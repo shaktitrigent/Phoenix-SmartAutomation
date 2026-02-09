@@ -1,0 +1,41 @@
+# Phoenix Configuration Example
+# Copy this file and customize for your environment
+# Or use environment variables instead
+
+# Database Configuration
+database:
+  # For development (SQLite)
+  url: "sqlite:///./phoenix.db"
+  
+  # For production (PostgreSQL)
+  # url: "postgresql://user:password@localhost/phoenix"
+  # pool_size: 10
+  # max_overflow: 20
+
+# MCP Server Configuration
+mcp:
+  # Playwright MCP server settings
+  server_url: "http://localhost:8000"
+  timeout: 30
+  retry_count: 3
+
+# Cache Configuration
+cache:
+  # In-memory cache for MVP
+  type: "memory"
+  ttl: 3600  # seconds
+  
+  # For production (Redis)
+  # type: "redis"
+  # url: "redis://localhost:6379/0"
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Project Settings
+project:
+  default_project: "default"
+  test_output_dir: "./test_results"
+  report_output_dir: "./reports"

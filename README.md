@@ -1,442 +1,348 @@
-# Phoenix Enterprise QA Automation Platform
+# Phoenix Smart Automation
 
-Phoenix is an enterprise-grade QA automation platform where **teams do not write automation code**. Users provide user stories, application URLs, and acceptance criteria, and Phoenix automatically generates both **manual test cases** and **runnable Playwright automation scripts**.
+Enterprise-grade AI-powered QA automation platform. Describe a user story — Phoenix generates manual test cases and runnable Playwright scripts automatically.
 
-## What Phoenix Does
-
-Phoenix transforms this:
-```
-User Story: "As a user, I want to login"
-Application URL: "https://your-app.com/login"
-Acceptance Criteria: ["User can enter email", "User can click login"]
-```
-
-Into this:
-- **Manual test cases** (markdown files) for QA review
-- **Runnable pytest + Playwright scripts** ready to execute
-- **Test execution** with HTML reports
-
-**No coding required** - Phoenix generates everything from your requirements.
-
-## Key Features
-
-- **No-Code Test Generation**: Generate tests from user stories and application URLs
-- **Dual Output**: Creates both manual test cases (markdown) and automation scripts (Playwright)
-- **Skill-Based Agents**: Specialized AI agents for test generation, locator discovery, and failure analysis
-- **Knowledge Base**: Structured knowledge folders provide context to agents, reducing AI costs
-- **Playwright MCP Integration**: Leverages Playwright MCP for intelligent test generation
-- **Enterprise Ready**: SQLite for development, PostgreSQL for production
-- **Simple CLI**: Easy-to-use command-line interface
+---
 
 ## How It Works
 
-### Architecture Flow
-
 ```
-User Input (Story + URL + Criteria)
-    ↓
-Phoenix CLI/SDK
-    ↓
-Skill-Based Agents (Test Generator, Locator Expert, etc.)
-    ↓
-Knowledge Base (Test Patterns, Best Practices)
-    ↓
-Playwright MCP (Intelligent Generation)
-    ↓
-Generators (Manual + Automation)
-    ↓
-Output Files (Markdown + Python Scripts)
-    ↓
-Execution Engine (pytest + Playwright)
-    ↓
-HTML Reports
+Your user story
+      │
+      ▼
+phoenix-intelligence  ←── Anthropic Claude (LLM)
+  (FastAPI, port 8001)  ←── Playwright MCP (live page inspection)
+  (Knowledge Base)      ←── Playwright rules, test patterns, best practices
+      │
+      ▼
+phoenix-core CLI
+  └── manual_tests/    ←── Structured Markdown test cases
+  └── test_results/    ←── Ready-to-run pytest + Playwright scripts
+  └── reports/         ←── HTML execution reports
 ```
 
-### Core Components
-
-1. **SDK Client** (`phoenix/sdk/`) - Main entry point, orchestrates all components
-2. **Agents** (`phoenix/agents/`) - Specialized AI agents:
-   - `TestGeneratorAgent` - Generates test cases from user stories
-   - `LocatorExpertAgent` - Discovers stable locators
-   - `FailureAnalyzerAgent` - Analyzes test failures
-3. **Knowledge Base** (`phoenix/knowledge/`) - Structured knowledge:
-   - Test patterns (login flows, CRUD operations)
-   - Locator strategies (best practices)
-   - Domain knowledge (e-commerce, banking, etc.)
-   - Best practices (test design principles)
-4. **MCP Integration** (`phoenix/mcp/`) - Playwright MCP client for intelligent generation
-5. **Generators** (`phoenix/generators/`) - Test generation:
-   - `ManualTestGenerator` - Creates manual test markdown files
-   - `AutomationTestGenerator` - Creates runnable Playwright scripts
-6. **Execution** (`phoenix/execution/`) - Test execution engine (pytest integration)
-7. **Storage** (`phoenix/storage/`) - Database (SQLite/PostgreSQL) and caching
-8. **Reporting** (`phoenix/reporting/`) - HTML report generation
-
-## Installation
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Install Playwright browsers
-playwright install
-
-# Initialize Phoenix project
-phoenix init --project-name my-project
-```
-
-## Quick Start
-
-### CLI Usage (Recommended)
-
-```bash
-# 1. Initialize project
-phoenix init --project-name demo
-
-# 2. Generate tests (user story + application URL)
-phoenix generate \
-  --story "As a user, I want to login to the application" \
-  --url "https://your-app.com/login" \
-  --criteria "User can enter email and password" \
-  --criteria "User can click login button" \
-  --criteria "User is redirected to dashboard after login"
-
-# Output:
-# ✓ Generated 1 manual test(s)
-# ✓ Generated 1 automation test(s)
-#   Manual test saved: ./manual_tests/manual_test_001_*.md
-#   Automation script saved: ./test_results/test_001_*.py
-
-# 3. Run automation tests
-pytest -v test_results/
-
-# 4. View reports
-# Reports are generated in ./reports/ after execution
-```
-
-### Python SDK Usage
-
-```python
-from phoenix import PhoenixClient
-
-# Initialize client
-client = PhoenixClient()
-client.set_project("my-project")
-
-# Generate tests
-result = client.generate_tests(
-    user_story="As a user, I want to login to the application",
-    application_url="https://your-app.com/login",
-    acceptance_criteria=[
-        "User can enter email and password",
-        "User can click login button",
-        "User is redirected to dashboard after successful login"
-    ],
-    test_type="both"  # or "manual" or "automation"
-)
-
-# Manual tests saved to: ./manual_tests/
-# Automation scripts saved to: ./test_results/
-
-# Execute tests
-execution_result = client.execute_tests()
-
-# Get execution results
-results = client.get_execution_results()
-print(f"Report: {results['report_path']}")
-```
-
-## What Gets Generated
-
-### Manual Test Cases (`./manual_tests/`)
-
-Markdown files with structured test steps:
-
-```markdown
-Application URL: https://your-app.com/login
-
-Test Case: Manual Test: As a user, I want to login...
-
-Description: As a user, I want to login to the application
-
-Steps:
-  1. Navigate to https://your-app.com/login
-  2. Step 1: User can enter email and password
-  3. Step 2: User can click login button
-  4. Step 3: User is redirected to dashboard after login
-
-Expected Result: All acceptance criteria are met and the user story is fulfilled
-
-Risk Level: REGRESSION
-```
-
-### Automation Scripts (`./test_results/`)
-
-Runnable pytest + Playwright Python scripts:
-
-```python
-"""Generated Playwright UI Test
-User Story: As a user, I want to login to the application
-Application URL: https://your-app.com/login
-"""
-
-import pytest
-from playwright.sync_api import Page, expect
-
-def test_login(page: Page):
-    """As a user, I want to login to the application"""
-    # Navigate to application
-    page.goto("https://your-app.com/login")
-    page.wait_for_load_state('networkidle')
-    
-    # Step 1: User can enter email and password
-    page.get_by_label("Email").fill("test@example.com")
-    page.get_by_label("Password").fill("password123")
-    
-    # Step 2: User can click login button
-    page.get_by_role("button", name="Login").click()
-    
-    # Step 3: User is redirected to dashboard after login
-    # TODO: Add assertion for: User is redirected to dashboard after login
-    
-    # Assertions
-    expect(page).to_have_url(containing="login"))
-```
-
-## CLI Commands
-
-### Initialize Project
-```bash
-phoenix init --project-name my-project
-```
-
-### Generate Tests
-```bash
-# Generate both manual and automation tests
-phoenix generate \
-  --story "User story text" \
-  --url "https://application-url.com" \
-  --criteria "Acceptance criteria 1" \
-  --criteria "Acceptance criteria 2"
-
-# Generate only manual tests
-phoenix generate --story "..." --url "..." --type manual
-
-# Generate only automation tests
-phoenix generate --story "..." --url "..." --type automation
-
-# Specify risk level
-phoenix generate --story "..." --url "..." --risk smoke
-```
-
-### Execute Tests
-```bash
-# Execute all automation tests in project
-phoenix execute --project my-project
-
-# Execute specific tests
-phoenix execute --project my-project --test-ids 1 2 3
-
-# Execute with specific browser
-phoenix execute --project my-project --browser chromium
-```
+---
 
 ## Project Structure
 
-### Block Diagram (Simplified)
-
 ```
-                          ┌──────────────────────────┐
-                          │        CLI / SDK         │
-                          │   phoenix/cli, sdk/      │
-                          └─────────────┬────────────┘
-                                        │
-                                        ▼
-                          ┌──────────────────────────┐
-                          │   Skill-Based Agents     │
-                          │   phoenix/agents/        │
-                          └─────────────┬────────────┘
-                                        │
-                 ┌──────────────────────┼──────────────────────┐
-                 ▼                      ▼                      ▼
-       ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
-       │   Knowledge Base │   │  MCP Integration │   │   Generators     │
-       │ phoenix/knowledge│   │    phoenix/mcp   │   │ phoenix/generators│
-       └─────────┬────────┘   └─────────┬────────┘   └─────────┬────────┘
-                 │                      │                      │
-                 └──────────────────────┼──────────────────────┘
-                                        ▼
-                          ┌──────────────────────────┐
-                          │   Execution + Reporting  │
-                          │ phoenix/execution,       │
-                          │ phoenix/reporting        │
-                          └─────────────┬────────────┘
-                                        │
-                                        ▼
-                          ┌──────────────────────────┐
-                          │   Storage + Cache        │
-                          │ phoenix/storage          │
-                          └──────────────────────────┘
+Phoenix-SmartAutomation/
+├── shared/                    # Pydantic contracts shared by both packages
+├── phoenix-core/              # pip-installable SDK + CLI (no AI/LLM deps)
+│   └── phoenix/
+│       ├── cli/               # Commands: init, generate, execute, run, report
+│       ├── sdk/               # PhoenixClient, config (.phoenixrc / phoenix.yaml)
+│       ├── generators/        # Writes manual .md and automation .py files
+│       ├── execution/         # Runs pytest, collects results
+│       ├── reporting/         # HTML report generator
+│       └── storage/           # SQLAlchemy models + SQLite database
+│
+├── phoenix-intelligence/      # Hosted AI server (FastAPI, port 8001)
+│   ├── api/                   # REST endpoints
+│   ├── services/agents/       # TestGenerator, LocatorExpert, FailureAnalyzer
+│   ├── services/llm/          # LLM Router (Anthropic / OpenAI / Gemini / Ollama)
+│   ├── services/knowledge/    # Playwright rules, test patterns, best practices
+│   ├── services/mcp/          # Playwright MCP client (live page inspection)
+│   └── prompts/               # Versioned prompt files (Markdown, per agent)
+│
+├── examples/sample_project/   # Ready-to-run Playwright test examples
+├── infra/                     # Docker, docker-compose, .env.example
+├── docs/                      # Architecture, MCP guides, ADRs
+└── contracts/openapi.yaml     # API specification
 ```
 
-### Folder Layout
+---
 
-```
-phoenix/
-├── phoenix/              # Core SDK package
-│   ├── sdk/              # Main SDK module (PhoenixClient)
-│   ├── agents/           # Skill-based agent system
-│   │   ├── test_generator.py    # Test generation agent
-│   │   ├── locator_expert.py    # Locator discovery agent
-│   │   └── failure_analyzer.py  # Failure analysis agent
-│   ├── knowledge/        # Knowledge base for agents
-│   │   ├── test_patterns/       # Test pattern knowledge
-│   │   ├── locator_strategies/  # Locator best practices
-│   │   ├── domain_knowledge/    # Domain-specific knowledge
-│   │   └── best_practices/      # QA best practices
-│   ├── mcp/              # Playwright MCP integration
-│   ├── generators/       # Test generation layer
-│   │   ├── manual.py     # Manual test generator
-│   │   └── automation.py # Automation script generator
-│   ├── execution/        # Test execution engine
-│   ├── storage/          # Data persistence (database + cache)
-│   ├── reporting/        # HTML report generation
-│   └── cli/              # Command-line interface
-├── tests/                # Unit/integration tests
-├── examples/             # Usage examples
-└── README.md
-```
+## Prerequisites
 
-## How Phoenix Works Internally
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Python | ≥ 3.9 | |
+| Node.js | ≥ 18 | Required for Playwright MCP |
+| ANTHROPIC_API_KEY | — | Get one at console.anthropic.com |
 
-### 1. Test Generation Flow
+---
 
-```
-User Story + URL + Criteria
-    ↓
-TestGeneratorAgent receives input
-    ↓
-Queries Knowledge Base for relevant patterns
-    ↓
-Calls Playwright MCP (if configured) for intelligent generation
-    ↓
-ManualTestGenerator creates markdown files
-    ↓
-AutomationTestGenerator creates Python scripts
-    ↓
-Files saved to disk + stored in database
-```
+## Setup
 
-### 2. Execution Flow
-
-```
-pytest discovers generated scripts
-    ↓
-Playwright runs tests in browser
-    ↓
-Results collected
-    ↓
-HTMLReporter generates reports
-    ↓
-Results stored in database
-```
-
-### 3. Knowledge Base System
-
-Phoenix uses a structured knowledge base to provide context to agents:
-
-- **Test Patterns**: Common patterns (login flows, CRUD operations)
-- **Locator Strategies**: Best practices for stable locators
-- **Domain Knowledge**: Domain-specific scenarios (e-commerce, banking)
-- **Best Practices**: QA principles and guidelines
-
-This reduces AI costs by providing structured context instead of relying solely on AI generation.
-
-## Configuration
-
-Phoenix uses environment variables or a `config.yaml` file:
-
-```yaml
-# config.yaml
-database:
-  url: "sqlite:///./phoenix.db"  # or PostgreSQL URL
-
-mcp:
-  server_url: "http://localhost:8000"  # MCP server URL (for HTTP mode)
-  # OR use stdio mode:
-  # use_stdio: true
-  # mcp_command: "npx"
-  # mcp_args: ["-y", "@modelcontextprotocol/server-playwright"]
-
-project:
-  default_project: "default"
-  test_output_dir: "./test_results"
-  report_output_dir: "./reports"
-```
-
-Or via environment variables:
-```bash
-export PHOENIX_DATABASE_URL="postgresql://user:pass@localhost/phoenix"
-export PHOENIX_MCP_SERVER_URL="http://localhost:8000"  # For HTTP mode
-# OR for stdio mode:
-# export PHOENIX_MCP_USE_STDIO=true
-# export PHOENIX_MCP_COMMAND="npx"
-```
-
-### MCP Configuration (Required for Automation Scripts)
-
-**To generate automation scripts, you need to configure Playwright MCP integration.**
-
-📖 **See [MCP Configuration Guide](docs/MCP_CONFIGURATION.md) for detailed setup instructions.**
-
-**Quick Summary:**
-- Manual tests work without MCP (generated locally)
-- Automation scripts require MCP integration
-- Two options: HTTP MCP server or local stdio MCP
-- Once configured, automation scripts are generated automatically
-
-## Database & Multi-Project Support
-
-### Multiple Projects
-
-Phoenix supports multiple projects in the same database:
-
-```python
-client.set_project("project-1")  # Switch between projects
-client.set_project("project-2")
-```
-
-Each project's tests are isolated by `project_id` in the database.
-
-### Team Collaboration
-
-For team collaboration, use PostgreSQL:
+### 1. Clone and create a virtual environment
 
 ```bash
-export PHOENIX_DATABASE_URL="postgresql://user:pass@shared-server/phoenix"
+git clone <repo-url>
+cd Phoenix-SmartAutomation
+
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# Linux / macOS
+source venv/bin/activate
 ```
 
-All team members connect to the same database and can work on shared projects.
-
-## Examples
-
-See `examples/` directory for:
-- `basic_usage.py` - Basic SDK usage
-- `thin_slice_usage.py` - Simple user story + URL workflow
-
-## Development
+### 2. Install packages
 
 ```bash
-# Run tests
+pip install -e shared/
+pip install -e phoenix-core/
+pip install -e phoenix-intelligence/
+```
+
+### 3. Install Playwright browsers
+
+```bash
+playwright install chromium
+```
+
+### 4. Set your API key
+
+**Windows PowerShell:**
+```powershell
+$env:ANTHROPIC_API_KEY = "sk-ant-your-key-here"
+```
+
+**Linux / macOS:**
+```bash
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+```
+
+---
+
+## Step 1: Start the Intelligence Server
+
+The intelligence server handles all AI operations. Start it once and leave it running in a dedicated terminal.
+
+**Windows PowerShell:**
+```powershell
+cd phoenix-intelligence
+.\start_server.ps1
+```
+
+**Windows CMD:**
+```cmd
+cd phoenix-intelligence
+start_server.bat
+```
+
+**Linux / macOS:**
+```bash
+cd phoenix-intelligence
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+python api/server.py
+```
+
+**Verify it is running:**
+```bash
+curl http://localhost:8001/docs
+# or open http://localhost:8001/docs in your browser
+```
+
+---
+
+## Step 2: Use the CLI
+
+Open a second terminal with the virtual environment active.
+
+### Initialize a new project
+
+```bash
+mkdir my-project && cd my-project
+phoenix init
+```
+
+Creates a `.phoenixrc` config file and the output directories (`manual_tests/`, `test_results/`, `reports/`).
+
+### Generate test cases
+
+```bash
+# From a user story string (generates both manual and automation tests)
+phoenix generate \
+  --story "As a user, I want to log in with valid credentials so I can access my dashboard" \
+  --url "https://your-app.com/login"
+
+# From a file containing multiple user stories
+phoenix generate --story-file stories.txt --url "https://your-app.com"
+
+# Manual tests only
+phoenix generate --story "..." --type manual
+
+# Automation tests only, smoke level
+phoenix generate --story "..." --url "https://..." --type automation --risk smoke
+
+# Regenerate (delete previous outputs first)
+phoenix generate --story "..." --url "https://..." --clean
+```
+
+### Execute automation tests
+
+```bash
+phoenix execute
+phoenix execute --browser firefox
+phoenix execute --test-ids 1 2 3
+```
+
+### View execution report
+
+```bash
+phoenix report
+phoenix report --execution-id 5
+```
+
+### Global options
+
+```bash
+phoenix --config /path/to/.phoenixrc generate ...   # explicit config file
+phoenix --verbose generate ...                       # show detailed output
+phoenix --help                                       # list all commands
+```
+
+---
+
+## Configuration — `.phoenixrc`
+
+`phoenix init` creates a `.phoenixrc` TOML file in your project directory:
+
+```toml
+[project]
+default_project    = "my-project"
+application_url    = "https://your-app.com"   # default URL for generate
+manual_output_dir  = "./manual_tests"
+test_output_dir    = "./test_results"
+report_output_dir  = "./reports"
+
+[intelligence]
+base_url    = "http://localhost:8001/api/v1"
+timeout     = 60
+retry_count = 3
+
+[database]
+url = "sqlite:///./phoenix.db"
+```
+
+> **Legacy:** `phoenix.yaml` is still supported for existing projects.
+
+---
+
+## Running the Example Tests
+
+`examples/sample_project/` contains three ready-to-run tests against `https://the-internet.herokuapp.com`. No intelligence server or API key needed.
+
+```bash
+cd examples/sample_project
+
+# Install if needed
+pip install pytest pytest-playwright
+playwright install chromium
+
+# Run all examples
 pytest
 
-# Format code
-black phoenix/
+# Headed mode (watch the browser)
+pytest --headed
 
-# Lint code
-ruff check phoenix/
+# Run a specific file
+pytest test_results/test_login.py -v
+pytest test_results/test_dynamic_content.py -v
+pytest test_results/test_data_table.py -v
 ```
 
-## License
+| File | Covers |
+|------|--------|
+| `test_login.py` | Valid login, wrong password, wrong username, logout |
+| `test_dynamic_content.py` | Checkboxes, dropdown select, dynamic loading (async content) |
+| `test_data_table.py` | Table headers, row-level actions, column sorting |
 
-MIT
+---
+
+## Generating Tests for the Example Site
+
+```bash
+cd examples/sample_project
+
+phoenix generate \
+  --story "As a user, I want to log in with valid credentials so I can access the secure area" \
+  --url "https://the-internet.herokuapp.com/login" \
+  --type both \
+  --risk smoke
+```
+
+---
+
+## LLM Providers
+
+| Provider | Environment Variables |
+|----------|-----------------------|
+| **Anthropic** (default) | `ANTHROPIC_API_KEY`, `PHOENIX_LLM_MODEL=claude-sonnet-4-20250514` |
+| OpenAI | `OPENAI_API_KEY`, `PHOENIX_LLM_PROVIDER=openai`, `PHOENIX_LLM_MODEL=gpt-4o` |
+| Google Gemini | `GOOGLE_API_KEY`, `PHOENIX_LLM_PROVIDER=gemini`, `PHOENIX_LLM_MODEL=gemini-1.5-pro` |
+| Ollama (local) | `PHOENIX_LLM_PROVIDER=ollama`, `PHOENIX_LLM_MODEL=llama3`, `OLLAMA_BASE_URL=http://localhost:11434` |
+
+---
+
+## Docker
+
+```bash
+cp infra/.env.example infra/.env
+# Edit infra/.env and set ANTHROPIC_API_KEY
+
+docker compose -f infra/docker-compose.yml up intelligence
+```
+
+---
+
+## Intelligence API Reference
+
+Full interactive docs at `http://localhost:8001/docs`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/tests/generate` | Generate manual + automation tests from a user story |
+| `POST` | `/api/v1/locators/discover` | Discover stable Playwright locators for page elements |
+| `POST` | `/api/v1/failures/analyze` | Analyze a test failure and suggest a targeted fix |
+
+---
+
+## Knowledge Base
+
+The knowledge base is automatically injected into every LLM prompt. Files live under `phoenix-intelligence/services/knowledge/`:
+
+```
+knowledge/
+├── playwright/
+│   ├── locator_rules.md      # Priority order, strict mode, anti-patterns
+│   ├── assertions.md         # expect() patterns
+│   ├── waiting_rules.md      # Auto-waiting, networkidle
+│   └── security_rules.md     # Auth handling, input sanitization
+├── test_patterns/
+│   ├── login_flow.md
+│   └── crud_operations.md
+├── best_practices/
+│   └── test_design.md
+└── domain_knowledge/
+    └── ecommerce.md
+```
+
+**Add your own rules**: drop a `.md` file in any folder — it is loaded automatically on the next request.
+
+---
+
+## Versioned Prompts
+
+Each agent has its own versioned prompt file under `phoenix-intelligence/prompts/`:
+
+```
+prompts/
+├── test_generator/1.0.md
+├── manual_test_generator/1.0.md
+├── test_name/1.0.md
+├── locator_expert/1.0.md
+└── failure_analyzer/1.0.md
+```
+
+To update a prompt without breaking existing behaviour, create a new version file (e.g., `1.1.md`). The loader automatically uses the latest version.
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).

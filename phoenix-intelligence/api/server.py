@@ -108,7 +108,7 @@ def discover_locators(payload: LocatorDiscoveryRequest):
 def analyze_failure(payload: FailureAnalysisRequest):
     """Analyze a failure and suggest fixes."""
     result = _agent_registry.analyze_failure(
-        test_case_id="unknown",
+        test_case_id=getattr(payload, "test_case_id", "unknown") or "unknown",
         error_message=payload.error_message,
         traceback=payload.traceback,
     )
@@ -123,10 +123,13 @@ def analyze_failure(payload: FailureAnalysisRequest):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import os
     import uvicorn
     from services.config import IntelligenceSettings
-
-    logging.basicConfig(level=logging.INFO)
+    from services.logger import configure_logging
 
     settings = IntelligenceSettings()
+    json_logs = os.environ.get("PHOENIX_LOG_JSON", "false").lower() == "true"
+    configure_logging(level=settings.log_level.upper(), json_output=json_logs)
+
     uvicorn.run(app, host=settings.host, port=settings.port, log_level=settings.log_level)

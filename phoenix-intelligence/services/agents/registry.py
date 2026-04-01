@@ -1,16 +1,17 @@
-"""Agent registry for routing requests to appropriate agents"""
+"""Agent registry — routes requests to the appropriate agent."""
 
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from services.agents.base import BaseAgent
-from services.agents.test_generator import TestGeneratorAgent
-from services.agents.locator_expert import LocatorExpertAgent
 from services.agents.failure_analyzer import FailureAnalyzerAgent
-from services.knowledge.base import KnowledgeBase
+from services.agents.locator_expert import LocatorExpertAgent
+from services.agents.test_generator import TestGeneratorAgent
 from services.cache import Cache
+from services.knowledge.base import KnowledgeBase
 
 
 class AgentRegistry:
-    """Registry for managing and routing to agents"""
+    """Manages and dispatches to Phoenix agents."""
 
     def __init__(
         self,
@@ -18,55 +19,50 @@ class AgentRegistry:
         cache: Cache,
         mcp_client=None,
         llm_client=None,
-    ):
-        """
-        Initialize agent registry.
-
-        Args:
-            knowledge_base: Knowledge base instance
-            cache: Cache instance
-            mcp_client: Optional MCP client for page inspection
-            llm_client: Optional LLM client for AI-powered generation
-        """
+    ) -> None:
         self.knowledge_base = knowledge_base
         self.cache = cache
         self._agents: Dict[str, BaseAgent] = {}
-        self._initialize_agents(mcp_client, llm_client)
+        self._init_agents(mcp_client, llm_client)
 
-    def _initialize_agents(self, mcp_client=None, llm_client=None):
-        """Initialize all available agents"""
+    def _init_agents(self, mcp_client=None, llm_client=None) -> None:
+        kwargs = dict(mcp_client=mcp_client, llm_client=llm_client)
         self._agents["test_generator"] = TestGeneratorAgent(
-            self.knowledge_base, self.cache, mcp_client=mcp_client, llm_client=llm_client
+            self.knowledge_base, self.cache, **kwargs
         )
         self._agents["locator_expert"] = LocatorExpertAgent(
-            self.knowledge_base, self.cache, mcp_client=mcp_client, llm_client=llm_client
+            self.knowledge_base, self.cache, **kwargs
         )
         self._agents["failure_analyzer"] = FailureAnalyzerAgent(
-            self.knowledge_base, self.cache, mcp_client=mcp_client, llm_client=llm_client
+            self.knowledge_base, self.cache, **kwargs
         )
 
-    def get_agent(self, agent_name: str) -> Optional[BaseAgent]:
-        """Get an agent by name."""
-        return self._agents.get(agent_name)
+    def get_agent(self, name: str) -> Optional[BaseAgent]:
+        return self._agents.get(name)
 
-    def list_agents(self) -> list:
-        """List all available agent names"""
+    def list_agents(self) -> List[str]:
         return list(self._agents.keys())
 
     def invoke_agent(
         self, agent_name: str, input_data: Dict[str, Any], **kwargs
     ) -> Dict[str, Any]:
-        """Invoke an agent with input data."""
         agent = self.get_agent(agent_name)
         if agent is None:
-            raise ValueError(f"Unknown agent: {agent_name}")
-
+            raise ValueError(f"Unknown agent: '{agent_name}'. Available: {self.list_agents()}")
         return agent.process(input_data, **kwargs)
 
+    # ------------------------------------------------------------------
+    # Convenience methods used by the API server
+    # ------------------------------------------------------------------
+
     def generate_tests(
-        self, user_story: str, application_url: Optional[str] = None, acceptance_criteria: list = None, **kwargs
+        self,
+        user_story: str,
+        application_url: Optional[str] = None,
+        acceptance_criteria: Optional[List[str]] = None,
+        test_type: str = "both",
+        risk_level: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Generate tests using test generator agent."""
         return self.invoke_agent(
             "test_generator",
             {
@@ -74,31 +70,36 @@ class AgentRegistry:
                 "application_url": application_url,
                 "acceptance_criteria": acceptance_criteria or [],
             },
-            **kwargs,
+            test_type=test_type,
+            risk_level=risk_level,
         )
 
     def discover_locators(
-        self, page_url: str, element_name: str, **kwargs
+        self,
+        page_url: str,
+        element_name: str,
+        dom_snapshot: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Discover locators using locator expert agent."""
         return self.invoke_agent(
             "locator_expert",
             {
                 "page_url": page_url,
                 "element_name": element_name,
+                "dom_snapshot": dom_snapshot,
             },
-            **kwargs,
         )
 
     def analyze_failure(
-        self, test_case_id: str, error_message: str, **kwargs
+        self,
+        test_case_id: str,
+        error_message: str,
+        traceback: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Analyze test failure using failure analyzer agent."""
         return self.invoke_agent(
             "failure_analyzer",
             {
                 "test_case_id": test_case_id,
                 "error_message": error_message,
+                "traceback": traceback or "",
             },
-            **kwargs,
         )

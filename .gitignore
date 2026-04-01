@@ -33,6 +33,9 @@ ENV/
 *.swo
 *~
 
+# Claude Code (local settings with machine-specific paths)
+.claude/
+
 # Testing
 .pytest_cache/
 .coverage
@@ -54,12 +57,14 @@ logs/
 
 # Playwright
 .playwright/
+.playwright-mcp/
 
 # Alembic
 alembic/versions/*.pyc
 
-# Project specific
+# Project specific — generated runtime output
 .phoenix/
+manual_tests/
 reports/
 test_results/
 

@@ -81,11 +81,17 @@ class FailureAnalysisRequest(BaseModel):
     """Request payload for failure analysis."""
     error_message: str
     traceback: Optional[str] = None
+    test_case_id: Optional[str] = None
     test_context: Optional[Dict[str, Any]] = None
 
 
 class FailureAnalysisResponse(BaseModel):
     """Response payload for failure analysis."""
-    failure_reason: Optional[str] = None
-    suggested_fixes: List[str] = []
+    root_cause: Optional[str] = None
+    category: Optional[str] = None
+    confidence: float = 0.0
+    suggested_fix: Optional[str] = None
+    code_snippet: Optional[str] = None
+    related_locators: List[Dict[str, Any]] = []
+    prevention: Optional[str] = None
     metadata: Dict[str, Any] = {}

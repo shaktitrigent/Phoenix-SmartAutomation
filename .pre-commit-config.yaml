@@ -1,0 +1,42 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: debug-statements
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.9.0
+    hooks:
+      - id: mypy
+        additional_dependencies:
+          - pydantic>=2.5.0
+          - types-PyYAML
+          - types-requests
+        args: ["--ignore-missing-imports", "--no-strict-optional"]
+        exclude: "^(venv/|examples/)"
+
+  - repo: local
+    hooks:
+      - id: pytest-phoenix-core
+        name: pytest (phoenix-core)
+        entry: bash -c "cd phoenix-core && python -m pytest tests/ -x -q 2>/dev/null || true"
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

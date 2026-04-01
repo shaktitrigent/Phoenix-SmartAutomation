@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phoenix Report — {{ execution.get('project_name', 'Execution') }}</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --green:  #22c55e;
+      --red:    #ef4444;
+      --amber:  #f59e0b;
+      --blue:   #3b82f6;
+      --purple: #8b5cf6;
+      --slate:  #64748b;
+      --bg:     #f8fafc;
+      --card:   #ffffff;
+      --border: #e2e8f0;
+      --text:   #1e293b;
+      --muted:  #64748b;
+      --radius: 12px;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Layout ── */
+    .page { max-width: 1280px; margin: 0 auto; padding: 24px 20px 48px; }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .header-left { display: flex; align-items: center; gap: 14px; }
+    .logo {
+      width: 42px; height: 42px; border-radius: 10px;
+      background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-size: 20px; font-weight: 900; flex-shrink: 0;
+    }
+    .header-title { font-size: 22px; font-weight: 700; }
+    .header-sub   { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .header-meta  { font-size: 12px; color: var(--muted); text-align: right; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    /* ── KPI row ── */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .kpi {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .kpi-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .kpi-value { font-size: 34px; font-weight: 800; line-height: 1; }
+    .kpi-sub   { font-size: 12px; color: var(--muted); }
+
+    .kpi-total  .kpi-value { color: var(--blue);   }
+    .kpi-passed .kpi-value { color: var(--green);  }
+    .kpi-failed .kpi-value { color: var(--red);    }
+    .kpi-skipped .kpi-value{ color: var(--amber);  }
+    .kpi-rate .kpi-value   { color: var(--purple); }
+    .kpi-duration .kpi-value{ color: var(--slate); }
+
+    /* ── Charts row ── */
+    .charts-row {
+      display: grid;
+      grid-template-columns: 260px 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 900px) {
+      .charts-row { grid-template-columns: 1fr 1fr; }
+      .charts-row .card:first-child { grid-column: 1 / -1; }
+    }
+    @media (max-width: 600px) {
+      .charts-row { grid-template-columns: 1fr; }
+    }
+    .chart-wrap { position: relative; height: 200px; }
+
+    /* ── Pass-rate bar ── */
+    .pass-bar-wrap { margin-top: 8px; }
+    .pass-bar-track {
+      height: 10px; border-radius: 99px;
+      background: var(--border); overflow: hidden; margin: 6px 0;
+    }
+    .pass-bar-fill {
+      height: 100%; border-radius: 99px;
+      background: linear-gradient(90deg, var(--green), #86efac);
+      transition: width .6s ease;
+    }
+    .pass-bar-fill.amber {
+      background: linear-gradient(90deg, var(--amber), #fcd34d);
+    }
+    .pass-bar-fill.red {
+      background: linear-gradient(90deg, var(--red), #fca5a5);
+    }
+
+    /* ── Status badges ── */
+    .badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 10px; border-radius: 99px;
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .badge::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
+    .badge-passed  { background: #dcfce7; color: #16a34a; }
+    .badge-passed::before  { background: #16a34a; }
+    .badge-failed  { background: #fee2e2; color: #dc2626; }
+    .badge-failed::before  { background: #dc2626; }
+    .badge-skipped { background: #fef3c7; color: #d97706; }
+    .badge-skipped::before { background: #d97706; }
+    .badge-error   { background: #f3f4f6; color: #6b7280; }
+    .badge-error::before   { background: #6b7280; }
+    .badge-completed { background: #ede9fe; color: #7c3aed; }
+    .badge-completed::before { background: #7c3aed; }
+
+    /* ── Results table ── */
+    .results-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { border-bottom: 2px solid var(--border); }
+    th {
+      padding: 10px 14px;
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .06em;
+      color: var(--muted); text-align: left; white-space: nowrap;
+    }
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background .15s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #f8fafc; }
+    td { padding: 12px 14px; vertical-align: top; }
+
+    .test-name { font-weight: 600; color: var(--text); }
+    .test-file { font-size: 11px; color: var(--muted); margin-top: 2px; font-family: monospace; }
+
+    /* duration pill */
+    .dur { display: inline-block; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .dur-bar {
+      height: 4px; border-radius: 99px;
+      background: linear-gradient(90deg, #c7d2fe, #818cf8);
+      margin-top: 4px; min-width: 4px;
+    }
+
+    /* error expand */
+    details summary {
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--red);
+      font-weight: 600;
+      list-style: none;
+      display: flex; align-items: center; gap: 4px;
+    }
+    details summary::before { content: "▶"; font-size: 9px; transition: transform .2s; }
+    details[open] summary::before { transform: rotate(90deg); }
+    .error-box {
+      margin-top: 8px;
+      padding: 10px 12px;
+      background: #fff5f5;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      font-size: 12px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: #991b1b;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    /* ── Stats grid ── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-item { padding: 14px 16px; }
+    .stat-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .stat-value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+
+    /* ── Metadata ── */
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px 24px;
+    }
+    .meta-row { display: flex; flex-direction: column; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .meta-row:last-child { border-bottom: none; }
+    .meta-key   { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .meta-val   { font-size: 13px; color: var(--text); margin-top: 2px; }
+
+    /* ── Footer ── */
+    .footer {
+      text-align: center; font-size: 11px; color: var(--muted);
+      margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border);
+    }
+
+    /* ── Utility ── */
+    .mb-4 { margin-bottom: 4px; }
+    .mb-16 { margin-bottom: 16px; }
+    .mb-20 { margin-bottom: 20px; }
+    .text-green { color: var(--green); }
+    .text-red   { color: var(--red);   }
+    .text-amber { color: var(--amber); }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">P</div>
+      <div>
+        <div class="header-title">Phoenix Test Report</div>
+        <div class="header-sub">{{ execution.get('project_name', 'Unnamed Project') }}</div>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div>Generated {{ generated_at }}</div>
+      <div style="margin-top:4px;">
+        <span class="badge badge-{{ status.lower() if status.lower() in ['passed','failed','skipped','error'] else 'completed' }}">
+          {{ status.upper() }}
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div class="kpi-row">
+    <div class="kpi kpi-total">
+      <span class="kpi-label">Total</span>
+      <span class="kpi-value">{{ total_tests }}</span>
+      <span class="kpi-sub">test cases</span>
+    </div>
+    <div class="kpi kpi-passed">
+      <span class="kpi-label">Passed</span>
+      <span class="kpi-value">{{ passed_tests }}</span>
+      <span class="kpi-sub">{{ "%.0f"|format(pass_rate) }}% of total</span>
+    </div>
+    <div class="kpi kpi-failed">
+      <span class="kpi-label">Failed</span>
+      <span class="kpi-value">{{ failed_tests }}</span>
+      <span class="kpi-sub">{{ "%.0f"|format(failed_tests / total_tests * 100 if total_tests > 0 else 0) }}% of total</span>
+    </div>
+    <div class="kpi kpi-skipped">
+      <span class="kpi-label">Skipped</span>
+      <span class="kpi-value">{{ skipped_tests }}</span>
+      <span class="kpi-sub">{{ "%.0f"|format(skipped_tests / total_tests * 100 if total_tests > 0 else 0) }}% of total</span>
+    </div>
+    <div class="kpi kpi-rate">
+      <span class="kpi-label">Pass Rate</span>
+      <span class="kpi-value">{{ "%.1f"|format(pass_rate) }}%</span>
+      <div class="pass-bar-wrap">
+        <div class="pass-bar-track">
+          <div class="pass-bar-fill {% if pass_rate < 60 %}red{% elif pass_rate < 80 %}amber{% endif %}"
+               style="width: {{ pass_rate }}%"></div>
+        </div>
+      </div>
+    </div>
+    <div class="kpi kpi-duration">
+      <span class="kpi-label">Duration</span>
+      <span class="kpi-value">{{ "%.1f"|format(execution.get('duration_seconds', 0)) }}s</span>
+      <span class="kpi-sub">total wall time</span>
+    </div>
+  </div>
+
+  <!-- Charts row -->
+  <div class="charts-row">
+
+    <!-- Donut -->
+    <div class="card">
+      <div class="card-title">Distribution</div>
+      <div class="chart-wrap">
+        <canvas id="donutChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Duration bar chart -->
+    <div class="card">
+      <div class="card-title">Test Durations (seconds)</div>
+      <div class="chart-wrap">
+        <canvas id="durationChart"></canvas>
+      </div>
+    </div>
+
+    <!-- Status horizontal bar -->
+    <div class="card">
+      <div class="card-title">Status Breakdown</div>
+      <div class="chart-wrap">
+        <canvas id="statusChart"></canvas>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Test Results table -->
+  {% if test_executions %}
+  <div class="card mb-20">
+    <div class="card-title">Test Results</div>
+    <div class="results-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Test Case</th>
+            <th>Status</th>
+            <th>Duration</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for te in test_executions %}
+          {% set dur = te.get('duration_seconds', 0) | float %}
+          <tr>
+            <td style="color:var(--muted);font-size:12px;">{{ loop.index }}</td>
+            <td>
+              <div class="test-name">{{ te.get('test_case_name', 'Unknown') }}</div>
+              {% if te.get('test_file') %}
+              <div class="test-file">{{ te.get('test_file') }}</div>
+              {% endif %}
+            </td>
+            <td>
+              {% set st = te.get('status', 'unknown').lower() %}
+              <span class="badge badge-{{ st if st in ['passed','failed','skipped'] else 'error' }}">
+                {{ te.get('status', 'UNKNOWN').upper() }}
+              </span>
+            </td>
+            <td>
+              <span class="dur">{{ "%.2f"|format(dur) }}s</span>
+              <div class="dur-bar" style="width: {{ [dur * 8, 120] | min }}px"></div>
+            </td>
+            <td>
+              {% if te.get('error_message') %}
+              <details>
+                <summary>View error</summary>
+                <div class="error-box">{{ te.get('error_message', '') }}</div>
+              </details>
+              {% else %}
+              <span style="color:var(--muted);font-size:12px;">—</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Stats -->
+  {% if stats %}
+  <div class="stat-grid mb-20">
+    <div class="card stat-item">
+      <div class="stat-label">Avg Duration</div>
+      <div class="stat-value">{{ "%.2f"|format(stats.avg_duration) }}s</div>
+    </div>
+    <div class="card stat-item">
+      <div class="stat-label">Slowest Test</div>
+      <div class="stat-value">{{ "%.2f"|format(stats.max_duration) }}s</div>
+    </div>
+    <div class="card stat-item">
+      <div class="stat-label">Fastest Test</div>
+      <div class="stat-value">{{ "%.2f"|format(stats.min_duration) }}s</div>
+    </div>
+    <div class="card stat-item">
+      <div class="stat-label">Failure Rate</div>
+      <div class="stat-value {% if stats.failure_rate >= 40 %}text-red{% elif stats.failure_rate >= 20 %}text-amber{% else %}text-green{% endif %}">
+        {{ "%.1f"|format(stats.failure_rate) }}%
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Metadata -->
+  <div class="card">
+    <div class="card-title">Execution Details</div>
+    <div class="meta-grid">
+      <div class="meta-row">
+        <span class="meta-key">Execution ID</span>
+        <span class="meta-val">{{ execution.get('id', 'N/A') }}</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-key">Project</span>
+        <span class="meta-val">{{ execution.get('project_name', 'N/A') }}</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-key">Started</span>
+        <span class="meta-val">{{ execution.get('started_at', 'N/A') }}</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-key">Completed</span>
+        <span class="meta-val">{{ execution.get('completed_at', 'N/A') }}</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-key">Total Duration</span>
+        <span class="meta-val">{{ execution.get('duration_seconds', 0) }}s</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-key">Report Generated</span>
+        <span class="meta-val">{{ generated_at }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">Phoenix Smart Automation &nbsp;·&nbsp; powered by Anthropic Claude</div>
+
+</div>
+
+<script>
+// ── Data from Jinja ──────────────────────────────────────
+const passed  = {{ passed_tests }};
+const failed  = {{ failed_tests }};
+const skipped = {{ skipped_tests }};
+const total   = {{ total_tests }};
+
+const testNames = [
+  {% for te in test_executions %}"{{ te.get('test_case_name', 'Test ' + loop.index|string) | replace('"', '\\"') }}"{% if not loop.last %},{% endif %}{% endfor %}
+];
+const testDurations = [
+  {% for te in test_executions %}{{ te.get('duration_seconds', 0) | float }}{% if not loop.last %},{% endif %}{% endfor %}
+];
+const testStatuses = [
+  {% for te in test_executions %}"{{ te.get('status', 'unknown').lower() }}"{% if not loop.last %},{% endif %}{% endfor %}
+];
+
+// ── Colour helpers ────────────────────────────────────────
+const C = {
+  green:  '#22c55e', greenBg: '#dcfce7',
+  red:    '#ef4444', redBg:   '#fee2e2',
+  amber:  '#f59e0b', amberBg: '#fef3c7',
+  blue:   '#3b82f6', blueBg:  '#dbeafe',
+  purple: '#8b5cf6',
+  slate:  '#94a3b8',
+};
+
+function statusColor(s) {
+  if (s === 'passed')  return C.green;
+  if (s === 'failed')  return C.red;
+  if (s === 'skipped') return C.amber;
+  return C.slate;
+}
+
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: { legend: { labels: { font: { family: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', size: 12 } } } }
+};
+
+// ── Donut chart ───────────────────────────────────────────
+new Chart(document.getElementById('donutChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Passed', 'Failed', 'Skipped'],
+    datasets: [{
+      data: [passed, failed, skipped],
+      backgroundColor: [C.green, C.red, C.amber],
+      borderWidth: 2,
+      borderColor: '#fff',
+      hoverOffset: 6,
+    }]
+  },
+  options: {
+    ...chartDefaults,
+    cutout: '68%',
+    plugins: {
+      ...chartDefaults.plugins,
+      legend: { position: 'bottom', labels: { padding: 14, boxWidth: 12, font: { size: 12 } } },
+      tooltip: {
+        callbacks: {
+          label: ctx => ` ${ctx.label}: ${ctx.raw} (${total > 0 ? ((ctx.raw/total)*100).toFixed(1) : 0}%)`
+        }
+      }
+    }
+  }
+});
+
+// ── Duration bar chart ────────────────────────────────────
+const shortNames = testNames.map(n => n.length > 22 ? n.slice(0, 20) + '…' : n);
+new Chart(document.getElementById('durationChart'), {
+  type: 'bar',
+  data: {
+    labels: shortNames.length ? shortNames : ['No tests'],
+    datasets: [{
+      label: 'Duration (s)',
+      data: testDurations.length ? testDurations : [0],
+      backgroundColor: testStatuses.map(statusColor),
+      borderRadius: 4,
+      borderSkipped: false,
+    }]
+  },
+  options: {
+    ...chartDefaults,
+    indexAxis: testNames.length > 6 ? 'y' : 'x',
+    plugins: {
+      ...chartDefaults.plugins,
+      legend: { display: false },
+      tooltip: { callbacks: { label: ctx => ` ${ctx.raw.toFixed(2)}s` } }
+    },
+    scales: {
+      x: { grid: { display: false }, ticks: { font: { size: 11 } } },
+      y: { grid: { color: '#f1f5f9' }, ticks: { font: { size: 11 } } }
+    }
+  }
+});
+
+// ── Status horizontal stacked bar ────────────────────────
+new Chart(document.getElementById('statusChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Results'],
+    datasets: [
+      { label: 'Passed',  data: [passed],  backgroundColor: C.green,  borderRadius: 4 },
+      { label: 'Failed',  data: [failed],  backgroundColor: C.red,    borderRadius: 0 },
+      { label: 'Skipped', data: [skipped], backgroundColor: C.amber,  borderRadius: 4 },
+    ]
+  },
+  options: {
+    ...chartDefaults,
+    indexAxis: 'y',
+    plugins: {
+      ...chartDefaults.plugins,
+      legend: { position: 'bottom', labels: { padding: 14, boxWidth: 12, font: { size: 12 } } },
+      tooltip: { mode: 'index' }
+    },
+    scales: {
+      x: { stacked: true, grid: { color: '#f1f5f9' }, ticks: { font: { size: 11 } }, max: total || 1 },
+      y: { stacked: true, grid: { display: false }, ticks: { display: false } }
+    }
+  }
+});
+</script>
+</body>
+</html>

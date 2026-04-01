@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for Playwright
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy shared contracts first (layer cache)
+COPY shared/ ./shared/
+RUN pip install --no-cache-dir -e ./shared/
+
+# Copy phoenix-core
+COPY phoenix-core/ ./phoenix-core/
+RUN pip install --no-cache-dir -e "./phoenix-core/[dev]"
+
+# Install Playwright browsers
+RUN playwright install chromium --with-deps
+
+# Default working directory for user projects
+WORKDIR /workspace
+
+ENTRYPOINT ["phoenix"]
+CMD ["--help"]

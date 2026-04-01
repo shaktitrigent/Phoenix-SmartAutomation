@@ -1,0 +1,17 @@
+# Phoenix project configuration
+# Target: https://the-internet.herokuapp.com  (public Playwright practice site)
+
+[project]
+default_project    = "sample-ui-tests"
+application_url    = "https://the-internet.herokuapp.com"
+manual_output_dir  = "./manual_tests"
+test_output_dir    = "./test_results"
+report_output_dir  = "./reports"
+
+[intelligence]
+base_url    = "http://localhost:8001/api/v1"
+timeout     = 60
+retry_count = 3
+
+[database]
+url = "sqlite:///./phoenix.db"

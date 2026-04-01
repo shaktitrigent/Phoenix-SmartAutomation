@@ -1,122 +1,156 @@
-"""Locator discovery agent"""
+"""Locator discovery agent — uses LLM + MCP to find stable Playwright locators."""
 
-from typing import Dict, Any, List, Optional
+import json
+import logging
+import re
+from typing import Any, Dict, List, Optional
+
 from services.agents.base import BaseAgent
+from services.llm.prompt_loader import PromptLoader
+
+logger = logging.getLogger(__name__)
+
+_prompt_loader = PromptLoader()
 
 
 class LocatorExpertAgent(BaseAgent):
-    """Agent specialized in finding stable locators"""
+    """Discovers stable Playwright locators for UI elements.
+
+    Flow:
+        1. Inspect the live page via MCP to get an accessibility snapshot.
+        2. Build a prompt from the versioned ``locator_expert/1.0.md`` prompt.
+        3. Call the LLM → returns JSON with primary + fallback locators.
+        4. Falls back to role/test-id heuristic when LLM is unavailable.
+    """
 
     def process(self, input_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """
-        Discover and validate locators for UI elements.
-        
-        Args:
-            input_data: Dictionary containing:
-                - page_url: URL of the page
-                - element_name: Name/description of element to locate
-                - dom_snapshot: Optional DOM snapshot
-            **kwargs: Additional parameters
-            
-        Returns:
-            Dictionary containing:
-                - locators: List of discovered locators (ordered by priority)
-                - recommended_locator: Best locator to use
-                - validation_results: Validation results
-        """
         page_url = input_data.get("page_url", "")
         element_name = input_data.get("element_name", "")
         dom_snapshot = input_data.get("dom_snapshot")
-        
-        # Get knowledge context for locator strategies
-        knowledge_context = self.get_knowledge_context(query="locator strategy")
-        
-        # Check cache first
-        cache_key = self._cache_key("locator",
-                                    page_url=page_url,
-                                    element_name=element_name)
-        cached_result = self.cache.get(cache_key)
-        if cached_result:
-            return cached_result
-        
-        # TODO: Use MCP to discover locators from DOM
-        # For now, return placeholder structure
+
+        cache_key = self._cache_key("locator", page_url=page_url, element_name=element_name)
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
+
+        locators = self._discover_locators(element_name, page_url, dom_snapshot)
+
         result = {
-            "locators": [],
-            "recommended_locator": None,
-            "validation_results": {},
+            "locators": locators,
+            "recommended_locator": locators[0] if locators else None,
             "metadata": {
                 "page_url": page_url,
                 "element_name": element_name,
-                "knowledge_context_used": bool(knowledge_context),
-            }
+                "llm_used": bool(self.llm_client),
+                "mcp_used": bool(self.mcp_client and page_url),
+            },
         }
-        
-        # Discover locators (placeholder)
-        result["locators"] = self._discover_locators(
-            element_name, page_url, dom_snapshot, knowledge_context
-        )
-        
-        if result["locators"]:
-            result["recommended_locator"] = result["locators"][0]
-        
-        # Cache result
-        self.cache.set(cache_key, result, ttl=7200)  # 2 hours TTL for locators
-        
+
+        self.cache.set(cache_key, result, ttl=7200)
         return result
+
+    # ------------------------------------------------------------------
 
     def _discover_locators(
         self,
         element_name: str,
         page_url: str,
         dom_snapshot: Optional[str],
-        knowledge_context: str
     ) -> List[Dict[str, Any]]:
-        """
-        Discover locators for an element.
-        
-        This will be implemented with MCP integration.
-        For now, returns placeholder structure.
-        """
-        # TODO: Implement with MCP and DOM analysis
-        # Priority order based on knowledge base:
-        # 1. data-testid
-        # 2. role-based
-        # 3. text content
-        # 4. CSS selectors
-        # 5. XPath (last resort)
-        
+        if self.llm_client:
+            try:
+                return self._discover_via_llm(element_name, page_url, dom_snapshot)
+            except Exception as exc:
+                logger.warning("LLM locator discovery failed, using fallback: %s", exc)
+
+        return self._heuristic_locators(element_name)
+
+    def _discover_via_llm(
+        self,
+        element_name: str,
+        page_url: str,
+        dom_snapshot: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        # Get live page snapshot via MCP if we don't already have one
+        snapshot = dom_snapshot or ""
+        if not snapshot and self.mcp_client and page_url:
+            logger.info("Fetching page snapshot via MCP: %s", page_url)
+            snapshot = self.mcp_client.inspect_page(page_url)
+
+        system_prompt = _prompt_loader.get("locator_expert")
+
+        # Inject locator strategy knowledge
+        knowledge_context = self.get_knowledge_context(query="locator strategy")
+
+        user_parts = [
+            f"Discover stable Playwright locators for the element: **{element_name}**",
+            f"\nPage URL: {page_url or 'not provided'}",
+        ]
+        if knowledge_context:
+            user_parts.append(f"\n## Locator Strategy Knowledge\n{knowledge_context[:1000]}")
+        if snapshot:
+            user_parts += [
+                "\n## Page Accessibility Snapshot",
+                "Use the snapshot below to choose accurate locators.",
+                "",
+                snapshot,
+            ]
+        else:
+            user_parts.append(
+                "\nNo page snapshot available. Use your best judgement based on the element name."
+            )
+
+        user_parts.append(
+            "\nReturn a JSON object with a `locators` array as specified in the system prompt."
+        )
+
+        logger.info("Discovering locators for '%s' via LLM", element_name)
+        raw = self.llm_client.generate(system_prompt, "\n".join(user_parts))
+        return self._parse_locators(raw)
+
+    @staticmethod
+    def _parse_locators(raw: str) -> List[Dict[str, Any]]:
+        """Extract the locators array from the LLM response."""
+        raw = raw.strip()
+        raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw).strip()
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return data.get("locators", [])
+        except json.JSONDecodeError:
+            match = re.search(r"\[.*\]", raw, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+        return []
+
+    @staticmethod
+    def _heuristic_locators(element_name: str) -> List[Dict[str, Any]]:
+        """Simple role/test-id fallback when the LLM is unavailable."""
+        slug = element_name.lower().replace(" ", "-")
+        label = element_name.title()
         return [
             {
-                "strategy": "data-testid",
-                "value": f"[data-testid='{element_name.lower().replace(' ', '-')}']",
-                "priority": 1,
-                "confidence": 0.9,
-                "is_stable": True,
+                "element_name": element_name,
+                "strategy": "role",
+                "value": f"button[name='{label}']",
+                "playwright_code": f"page.get_by_role('button', name='{label}')",
+                "confidence": 0.7,
+                "fallback": False,
+                "description": "Semantic role locator (heuristic)",
             },
             {
-                "strategy": "role",
-                "value": f"get_by_role('button', name='{element_name}')",
-                "priority": 2,
-                "confidence": 0.7,
-                "is_stable": True,
-            }
+                "element_name": element_name,
+                "strategy": "test-id",
+                "value": f"[data-testid='{slug}']",
+                "playwright_code": f"page.get_by_test_id('{slug}')",
+                "confidence": 0.6,
+                "fallback": True,
+                "description": "test-id fallback (heuristic)",
+            },
         ]
-
-    def validate_locator(self, locator: str, page_url: str) -> Dict[str, Any]:
-        """
-        Validate that a locator is still valid.
-        
-        Args:
-            locator: Locator string to validate
-            page_url: URL of the page
-            
-        Returns:
-            Validation result dictionary
-        """
-        # TODO: Implement locator validation with MCP
-        return {
-            "is_valid": True,
-            "element_found": True,
-            "validation_timestamp": None,
-        }

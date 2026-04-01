@@ -1,0 +1,47 @@
+version: "3.9"
+
+services:
+  # -------------------------------------------------------------------------
+  # Phoenix Intelligence — AI / LLM server (port 8001)
+  # -------------------------------------------------------------------------
+  intelligence:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.intelligence
+    image: phoenix-intelligence:latest
+    container_name: phoenix-intelligence
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      PHOENIX_LLM_PROVIDER: ${PHOENIX_LLM_PROVIDER:-anthropic}
+      PHOENIX_LLM_MODEL: ${PHOENIX_LLM_MODEL:-claude-sonnet-4-20250514}
+      PHOENIX_LLM_MAX_TOKENS: ${PHOENIX_LLM_MAX_TOKENS:-4096}
+      PHOENIX_MCP_ENABLED: ${PHOENIX_MCP_ENABLED:-true}
+      PHOENIX_INTELLIGENCE_LOG_LEVEL: ${PHOENIX_INTELLIGENCE_LOG_LEVEL:-info}
+    volumes:
+      - ../phoenix-intelligence/services/knowledge:/app/phoenix-intelligence/services/knowledge:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # -------------------------------------------------------------------------
+  # Optional: Redis cache for LLM response caching
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: phoenix-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    profiles:
+      - cache
+
+volumes:
+  redis_data:

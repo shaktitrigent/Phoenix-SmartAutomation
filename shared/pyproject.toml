@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phoenix-shared"
+version = "0.1.0"
+description = "Shared Pydantic contracts for Phoenix Smart Automation"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Phoenix Team"}]
+
+dependencies = [
+    "pydantic>=2.5.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["phoenix_shared*"]

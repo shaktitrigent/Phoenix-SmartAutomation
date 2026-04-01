@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Node.js for Playwright MCP
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy shared contracts first (layer cache)
+COPY shared/ ./shared/
+RUN pip install --no-cache-dir -e ./shared/
+
+# Copy intelligence service
+COPY phoenix-intelligence/ ./phoenix-intelligence/
+RUN pip install --no-cache-dir -e ./phoenix-intelligence/
+
+# Install Playwright MCP globally
+RUN npm install -g @playwright/mcp@latest
+RUN npx playwright install chromium --with-deps 2>/dev/null || true
+
+WORKDIR /app/phoenix-intelligence
+
+ENV PHOENIX_INTELLIGENCE_HOST=0.0.0.0
+ENV PHOENIX_INTELLIGENCE_PORT=8001
+
+EXPOSE 8001
+
+CMD ["python", "api/server.py"]

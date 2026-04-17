@@ -1,0 +1,16 @@
+# Phoenix project configuration
+# https://github.com/your-org/Phoenix-SmartAutomation
+
+[project]
+default_project = "default"
+manual_output_dir = "./manual_tests"
+test_output_dir   = "./test_results"
+report_output_dir = "./reports"
+
+[intelligence]
+base_url    = "http://localhost:8001/api/v1"
+timeout     = 180
+retry_count = 3
+
+[database]
+url = "sqlite:///./phoenix.db"

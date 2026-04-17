@@ -201,7 +201,7 @@ class TestGeneratorAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         if not self.llm_client:
             raise RuntimeError(
-                "LLM client is not configured. Set ANTHROPIC_API_KEY and restart the server."
+                "LLM client is not configured. Set the provider-specific API key and restart the server."
             )
 
         # Step 1 — Inspect the live page via MCP

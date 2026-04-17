@@ -38,13 +38,18 @@ _knowledge_base = KnowledgeBase()
 
 _llm_settings = LLMSettings()
 _llm_client = None
-if _llm_settings.api_key:
+if _llm_settings.provider.lower() == "ollama" or _llm_settings.api_key:
     _llm_client = LLMClient(_llm_settings)
-    logger.info("LLM client initialised (model=%s)", _llm_settings.model)
+    logger.info(
+        "LLM client initialised (provider=%s, model=%s)",
+        _llm_settings.provider,
+        _llm_settings.model,
+    )
 else:
     logger.warning(
-        "ANTHROPIC_API_KEY is not set — automation test generation will fail. "
-        "Set the environment variable and restart the server."
+        "%s is not set - automation test generation will fail. "
+        "Set the environment variable and restart the server.",
+        _llm_settings.api_key_env_var,
     )
 
 _mcp_settings = MCPSettings()

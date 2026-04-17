@@ -136,7 +136,7 @@ class GeminiProvider:
             import google.generativeai as genai
 
             genai.configure(api_key=api_key)
-            model_name = self._settings.model or "gemini-1.5-pro"
+            model_name = self._settings.model or "gemini-2.5-flash"
             self._model = genai.GenerativeModel(
                 model_name=model_name,
                 system_instruction=None,

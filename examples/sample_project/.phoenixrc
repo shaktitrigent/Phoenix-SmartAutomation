@@ -10,7 +10,7 @@ report_output_dir  = "./reports"
 
 [intelligence]
 base_url    = "http://localhost:8001/api/v1"
-timeout     = 60
+timeout     = 180
 retry_count = 3
 
 [database]

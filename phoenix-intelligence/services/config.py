@@ -1,18 +1,41 @@
 """Configuration for phoenix-intelligence services."""
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+
+
+_DEFAULT_PROVIDER = os.environ.get("PHOENIX_LLM_PROVIDER", "gemini").lower()
+_PROVIDER_API_KEYS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+    "ollama": "",
+}
+_PROVIDER_DEFAULT_MODELS = {
+    "anthropic": "claude-sonnet-4-20250514",
+    "openai": "gpt-4o",
+    "gemini": "gemini-2.5-flash",
+    "ollama": "llama3",
+}
+
+
+def _provider_api_key_env_var(provider: str) -> str:
+    return _PROVIDER_API_KEYS.get(provider.lower(), "GOOGLE_API_KEY")
+
+
+def _provider_default_model(provider: str) -> str:
+    return _PROVIDER_DEFAULT_MODELS.get(provider.lower(), "gemini-2.5-flash")
 
 
 @dataclass
 class LLMSettings:
-    """LLM provider settings — supports anthropic, openai, gemini, ollama."""
+    """LLM provider settings - supports anthropic, openai, gemini, ollama."""
 
-    provider: str = os.environ.get("PHOENIX_LLM_PROVIDER", "anthropic")
-    # Anthropic
-    api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
-    model: str = os.environ.get("PHOENIX_LLM_MODEL", "claude-sonnet-4-20250514")
+    provider: str = _DEFAULT_PROVIDER
+    api_key_env_var: str = _provider_api_key_env_var(provider)
+    api_key: str = os.environ.get(api_key_env_var, "")
+    model: str = os.environ.get("PHOENIX_LLM_MODEL", _provider_default_model(provider))
     max_tokens: int = int(os.environ.get("PHOENIX_LLM_MAX_TOKENS", "4096"))
     temperature: float = float(os.environ.get("PHOENIX_LLM_TEMPERATURE", "0.2"))
     # Prompt versioning

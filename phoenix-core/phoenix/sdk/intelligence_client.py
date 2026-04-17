@@ -104,7 +104,7 @@ class IntelligenceClient:
                 "risk_level": risk_level,
             },
         }
-        return self._post("/api/v1/tests/generate", payload)
+        return self._post("/tests/generate", payload)
 
     def discover_locators(
         self,
@@ -117,7 +117,7 @@ class IntelligenceClient:
             "elements": elements,
             "dom_snapshot": dom_snapshot,
         }
-        return self._post("/api/v1/locators/discover", payload)
+        return self._post("/locators/discover", payload)
 
     def analyze_failure(
         self,
@@ -128,4 +128,4 @@ class IntelligenceClient:
             "error_message": error_message,
             "traceback": traceback,
         }
-        return self._post("/api/v1/failures/analyze", payload)
+        return self._post("/failures/analyze", payload)

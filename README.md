@@ -10,7 +10,7 @@ Enterprise-grade AI-powered QA automation platform. Describe a user story — Ph
 Your user story
       │
       ▼
-phoenix-intelligence  ←── Anthropic Claude (LLM)
+phoenix-intelligence  ←── Gemini 2.5 Flash (LLM)
   (FastAPI, port 8001)  ←── Playwright MCP (live page inspection)
   (Knowledge Base)      ←── Playwright rules, test patterns, best practices
       │
@@ -59,7 +59,7 @@ Phoenix-SmartAutomation/
 |-------------|---------|-------|
 | Python | ≥ 3.9 | |
 | Node.js | ≥ 18 | Required for Playwright MCP |
-| ANTHROPIC_API_KEY | — | Get one at console.anthropic.com |
+| GOOGLE_API_KEY | — | Add your Google Gemini API key |
 
 ---
 
@@ -98,12 +98,12 @@ playwright install chromium
 
 **Windows PowerShell:**
 ```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-your-key-here"
+$env:GOOGLE_API_KEY = "your-gemini-api-key"
 ```
 
 **Linux / macOS:**
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+export GOOGLE_API_KEY="your-gemini-api-key"
 ```
 
 ---
@@ -127,7 +127,7 @@ start_server.bat
 **Linux / macOS:**
 ```bash
 cd phoenix-intelligence
-export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+export GOOGLE_API_KEY="your-gemini-api-key"
 python api/server.py
 ```
 
@@ -272,9 +272,8 @@ phoenix generate \
 
 | Provider | Environment Variables |
 |----------|-----------------------|
-| **Anthropic** (default) | `ANTHROPIC_API_KEY`, `PHOENIX_LLM_MODEL=claude-sonnet-4-20250514` |
+| **Google Gemini** (default) | `GOOGLE_API_KEY`, `PHOENIX_LLM_PROVIDER=gemini`, `PHOENIX_LLM_MODEL=gemini-2.5-flash` |
 | OpenAI | `OPENAI_API_KEY`, `PHOENIX_LLM_PROVIDER=openai`, `PHOENIX_LLM_MODEL=gpt-4o` |
-| Google Gemini | `GOOGLE_API_KEY`, `PHOENIX_LLM_PROVIDER=gemini`, `PHOENIX_LLM_MODEL=gemini-1.5-pro` |
 | Ollama (local) | `PHOENIX_LLM_PROVIDER=ollama`, `PHOENIX_LLM_MODEL=llama3`, `OLLAMA_BASE_URL=http://localhost:11434` |
 
 ---
@@ -283,7 +282,7 @@ phoenix generate \
 
 ```bash
 cp infra/.env.example infra/.env
-# Edit infra/.env and set ANTHROPIC_API_KEY
+# Edit infra/.env and set GOOGLE_API_KEY
 
 docker compose -f infra/docker-compose.yml up intelligence
 ```

@@ -79,7 +79,7 @@ class AutomationTestGenerator:
         if not script_code:
             raise RuntimeError(
                 "Intelligence server did not return script_code. "
-                "Ensure ANTHROPIC_API_KEY is set and the intelligence server is running."
+                "Ensure the provider-specific API key is set and the intelligence server is running."
             )
 
         normalised = self._normalise(script_code)

@@ -23,7 +23,7 @@ class ManualTestCase(BaseModel):
     """Manual test case schema."""
     name: str
     description: str
-    steps: List[str]
+    steps: List[Dict[str, Any]]
     expected_result: Optional[str] = None
     risk_level: Optional[str] = None
     tags: List[str] = []

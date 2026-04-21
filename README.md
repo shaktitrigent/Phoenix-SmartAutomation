@@ -59,7 +59,7 @@ Phoenix-SmartAutomation/
 |-------------|---------|-------|
 | Python | ≥ 3.9 | |
 | Node.js | ≥ 18 | Required for Playwright MCP |
-| LLM API key | — | Use `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, or `OPENAI_API_KEY` |
+| ANTHROPIC_API_KEY | — | Get one at console.anthropic.com |
 
 ---
 
@@ -98,14 +98,12 @@ playwright install chromium
 
 **Windows PowerShell:**
 ```powershell
-$env:GOOGLE_API_KEY = "AIzaSyBlByBrgqB40quoARtWnwRYKOhKg-MFdxA"
-$env:PHOENIX_LLM_PROVIDER = "gemini"
+$env:ANTHROPIC_API_KEY = "sk-ant-your-key-here"
 ```
 
 **Linux / macOS:**
 ```bash
-export GOOGLE_API_KEY="your-gemini-key-here"
-export PHOENIX_LLM_PROVIDER="gemini"
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
 ```
 
 ---
@@ -129,8 +127,7 @@ start_server.bat
 **Linux / macOS:**
 ```bash
 cd phoenix-intelligence
-export GOOGLE_API_KEY="your-gemini-key-here"
-export PHOENIX_LLM_PROVIDER="gemini"
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
 python api/server.py
 ```
 
@@ -275,13 +272,10 @@ phoenix generate \
 
 | Provider | Environment Variables |
 |----------|-----------------------|
-| **Auto** (default) | `PHOENIX_LLM_PROVIDER=auto` or leave unset. Phoenix picks from configured keys and can fall back across providers. |
-| Anthropic | `ANTHROPIC_API_KEY`, `PHOENIX_LLM_PROVIDER=anthropic`, `PHOENIX_LLM_MODEL=claude-sonnet-4-20250514` |
+| **Anthropic** (default) | `ANTHROPIC_API_KEY`, `PHOENIX_LLM_MODEL=claude-sonnet-4-20250514` |
 | OpenAI | `OPENAI_API_KEY`, `PHOENIX_LLM_PROVIDER=openai`, `PHOENIX_LLM_MODEL=gpt-4o` |
-| Google Gemini | `GOOGLE_API_KEY` or `GEMINI_API_KEY`, `PHOENIX_LLM_PROVIDER=gemini`, `PHOENIX_LLM_MODEL=gemini-1.5-pro` |
+| Google Gemini | `GOOGLE_API_KEY`, `PHOENIX_LLM_PROVIDER=gemini`, `PHOENIX_LLM_MODEL=gemini-1.5-pro` |
 | Ollama (local) | `PHOENIX_LLM_PROVIDER=ollama`, `PHOENIX_LLM_MODEL=llama3`, `OLLAMA_BASE_URL=http://localhost:11434` |
-
-You can also configure a fallback chain, for example `PHOENIX_LLM_PROVIDER=gemini,anthropic`.
 
 ---
 
@@ -289,7 +283,7 @@ You can also configure a fallback chain, for example `PHOENIX_LLM_PROVIDER=gemin
 
 ```bash
 cp infra/.env.example infra/.env
-# Edit infra/.env and set your preferred provider key
+# Edit infra/.env and set ANTHROPIC_API_KEY
 
 docker compose -f infra/docker-compose.yml up intelligence
 ```

@@ -9,7 +9,7 @@ from pathlib import Path
 class LLMSettings:
     """LLM provider settings — supports anthropic, openai, gemini, ollama."""
 
-    provider: str = os.environ.get("PHOENIX_LLM_PROVIDER", "anthropic")
+    provider: str = os.environ.get("PHOENIX_LLM_PROVIDER", "auto")
     # Anthropic
     api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
     model: str = os.environ.get("PHOENIX_LLM_MODEL", "claude-sonnet-4-20250514")

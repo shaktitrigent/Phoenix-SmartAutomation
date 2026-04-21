@@ -19,13 +19,23 @@ class TestGenerationRequest(BaseModel):
     options: Optional[TestGenerationOptions] = None
 
 
+class ManualTestStep(BaseModel):
+    """Structured manual test step schema."""
+    step_number: Optional[int] = None
+    action: str
+    expected_result: Optional[str] = None
+    test_data: Optional[str] = None
+
+
 class ManualTestCase(BaseModel):
     """Manual test case schema."""
     name: str
     description: str
-    steps: List[str]
+    steps: List[ManualTestStep] = []
     expected_result: Optional[str] = None
     risk_level: Optional[str] = None
+    preconditions: Optional[str] = None
+    postconditions: Optional[str] = None
     tags: List[str] = []
 
 

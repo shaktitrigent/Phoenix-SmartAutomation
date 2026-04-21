@@ -38,13 +38,20 @@ _knowledge_base = KnowledgeBase()
 
 _llm_settings = LLMSettings()
 _llm_client = None
-if _llm_settings.api_key:
+try:
     _llm_client = LLMClient(_llm_settings)
-    logger.info("LLM client initialised (model=%s)", _llm_settings.model)
-else:
+    logger.info(
+        "LLM client initialised (providers=%s, active=%s, model=%s)",
+        " -> ".join(_llm_client.provider_candidates),
+        _llm_client.active_provider_name,
+        _llm_settings.model,
+    )
+except Exception as exc:
     logger.warning(
-        "ANTHROPIC_API_KEY is not set — automation test generation will fail. "
-        "Set the environment variable and restart the server."
+        "LLM client failed to initialise: %s. "
+        "Automation test generation will fail. "
+        "Check your API key and provider settings.",
+        exc
     )
 
 _mcp_settings = MCPSettings()

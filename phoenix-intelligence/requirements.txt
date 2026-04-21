@@ -4,9 +4,9 @@ uvicorn>=0.27.0
 pydantic>=2.5.0
 pyyaml>=6.0.0
 anthropic>=0.40.0
+google-generativeai>=0.7.0
 mcp>=1.0.0
 
 # Optional LLM providers — install the ones you need
 # openai>=1.30.0
-# google-generativeai>=0.7.0
 # (ollama uses only stdlib urllib, no extra package needed)

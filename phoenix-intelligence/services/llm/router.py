@@ -1,16 +1,9 @@
-"""LLM Router — selects and wraps the active LLM provider.
-
-Supported providers
--------------------
-anthropic   → Anthropic Claude  (ANTHROPIC_API_KEY)
-openai      → OpenAI            (OPENAI_API_KEY)
-gemini      → Google Gemini     (GOOGLE_API_KEY)
-ollama      → Local Ollama      (no key required)
-"""
+"""LLM router with provider auto-selection and fallback support."""
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Protocol, runtime_checkable
 
@@ -27,13 +20,8 @@ class LLMProvider(Protocol):
         ...
 
 
-# ---------------------------------------------------------------------------
-# Provider implementations
-# ---------------------------------------------------------------------------
-
-
 class AnthropicProvider:
-    """Wraps the Anthropic Python SDK."""
+    """Wrap the Anthropic Python SDK."""
 
     def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
@@ -77,7 +65,7 @@ class AnthropicProvider:
 
 
 class OpenAIProvider:
-    """Wraps the OpenAI Python SDK."""
+    """Wrap the OpenAI Python SDK."""
 
     def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
@@ -85,8 +73,6 @@ class OpenAIProvider:
 
     def _get_client(self):
         if self._client is None:
-            import os
-
             api_key = os.environ.get("OPENAI_API_KEY", "")
             if not api_key:
                 raise RuntimeError(
@@ -117,7 +103,7 @@ class OpenAIProvider:
 
 
 class GeminiProvider:
-    """Wraps Google GenerativeAI SDK (google-generativeai)."""
+    """Wrap the Google Generative AI SDK."""
 
     def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
@@ -125,13 +111,11 @@ class GeminiProvider:
 
     def _get_model(self):
         if self._model is None:
-            import os
-
-            api_key = os.environ.get("GOOGLE_API_KEY", "")
+            api_key = os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
             if not api_key:
                 raise RuntimeError(
-                    "GOOGLE_API_KEY is not set. "
-                    "Set the environment variable before starting the intelligence server."
+                    "GOOGLE_API_KEY or GEMINI_API_KEY is not set. "
+                    "Set one of them before starting the intelligence server."
                 )
             import google.generativeai as genai
 
@@ -154,12 +138,10 @@ class GeminiProvider:
 
 
 class OllamaProvider:
-    """Calls a local Ollama instance via its REST API."""
+    """Call a local Ollama instance via its REST API."""
 
     def __init__(self, settings: LLMSettings) -> None:
         self._settings = settings
-        import os
-
         self._base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
@@ -191,43 +173,127 @@ class OllamaProvider:
         return _strip_code_fences(text)
 
 
-# ---------------------------------------------------------------------------
-# Router
-# ---------------------------------------------------------------------------
-
-_PROVIDERS: dict[str, type] = {
+_PROVIDERS: dict[str, type[LLMProvider]] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
     "gemini": GeminiProvider,
     "ollama": OllamaProvider,
 }
 
+_MODEL_PROVIDER_HINTS = (
+    ("claude", "anthropic"),
+    ("anthropic", "anthropic"),
+    ("gemini", "gemini"),
+    ("gpt", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("llama", "ollama"),
+    ("mistral", "ollama"),
+)
+
 
 class LLMRouter:
-    """Instantiates the correct provider based on LLMSettings.provider."""
+    """Select the active provider from explicit config, auto-detection, or fallbacks."""
 
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self.settings = settings or LLMSettings()
-        provider_name = self.settings.provider.lower()
-        if provider_name not in _PROVIDERS:
-            raise ValueError(
-                f"Unknown LLM provider '{provider_name}'. "
-                f"Supported: {list(_PROVIDERS.keys())}"
+        self.provider_candidates = _resolve_provider_candidates(self.settings)
+        if not self.provider_candidates:
+            raise RuntimeError(
+                "No usable LLM provider could be resolved. "
+                "Set PHOENIX_LLM_PROVIDER or configure one of: "
+                "ANTHROPIC_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY."
             )
-        self._provider: LLMProvider = _PROVIDERS[provider_name](self.settings)
+        self.active_provider_name = self.provider_candidates[0]
+        self._providers: dict[str, LLMProvider] = {}
         logger.info(
-            "LLM Router initialised: provider=%s model=%s",
-            provider_name,
+            "LLM Router initialised: providers=%s model=%s",
+            " -> ".join(self.provider_candidates),
             self.settings.model,
         )
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        return self._provider.generate(system_prompt, user_prompt)
+        errors: list[str] = []
+        for provider_name in self.provider_candidates:
+            provider = self._get_provider(provider_name)
+            self.active_provider_name = provider_name
+            try:
+                return provider.generate(system_prompt, user_prompt)
+            except Exception as exc:
+                errors.append(f"{provider_name}: {exc}")
+                if provider_name == self.provider_candidates[-1]:
+                    break
+                logger.warning(
+                    "LLM provider '%s' failed, trying next fallback provider: %s",
+                    provider_name,
+                    exc,
+                )
+
+        raise RuntimeError(
+            "All configured LLM providers failed. " + " | ".join(errors)
+        )
+
+    def _get_provider(self, provider_name: str) -> LLMProvider:
+        if provider_name not in self._providers:
+            self._providers[provider_name] = _PROVIDERS[provider_name](self.settings)
+        return self._providers[provider_name]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _resolve_provider_candidates(settings: LLMSettings) -> list[str]:
+    raw_tokens = [
+        token.strip().lower()
+        for token in settings.provider.replace(";", ",").split(",")
+        if token.strip()
+    ]
+    tokens = raw_tokens or ["auto"]
+    candidates: list[str] = []
+
+    for token in tokens:
+        if token == "auto":
+            candidates.extend(_auto_provider_candidates(settings))
+            continue
+        if token not in _PROVIDERS:
+            raise ValueError(
+                f"Unknown LLM provider '{token}'. Supported: {list(_PROVIDERS.keys())} or 'auto'."
+            )
+        candidates.append(token)
+
+    return _dedupe(candidates)
+
+
+def _auto_provider_candidates(settings: LLMSettings) -> list[str]:
+    candidates: list[str] = []
+    model_name = os.environ.get("PHOENIX_LLM_MODEL", "").strip().lower()
+
+    if model_name:
+        for prefix, provider_name in _MODEL_PROVIDER_HINTS:
+            if model_name.startswith(prefix):
+                candidates.append(provider_name)
+                break
+
+    if settings.api_key:
+        candidates.append("anthropic")
+    if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+        candidates.append("gemini")
+    if os.environ.get("OPENAI_API_KEY"):
+        candidates.append("openai")
+    if os.environ.get("OLLAMA_BASE_URL"):
+        candidates.append("ollama")
+
+    if not candidates:
+        candidates.extend(["anthropic", "gemini", "openai", "ollama"])
+
+    return _dedupe(candidates)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
 
 
 def _strip_code_fences(text: str) -> str:

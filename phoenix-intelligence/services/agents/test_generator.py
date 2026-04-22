@@ -1,4 +1,4 @@
-"""Test generation agent — uses LLM + Knowledge Base + MCP for real code generation."""
+"""Test generation agent - uses LLM + Knowledge Base + MCP for real code generation."""
 
 import json
 import logging
@@ -20,11 +20,11 @@ class TestGeneratorAgent(BaseAgent):
         1. Load knowledge context from the Knowledge Base.
         2. Inspect the target page via Playwright MCP (accessibility snapshot).
         3. Build prompt from versioned prompt file (prompts/test_generator/1.0.md).
-        4. Call LLM → returns complete Playwright script code.
+        4. Call LLM -> returns complete Playwright script code.
 
     Flow (manual):
         1. Build prompt from versioned prompt file (prompts/manual_test_generator/1.0.md).
-        2. Call LLM → returns JSON array of structured test cases.
+        2. Call LLM -> returns JSON array of structured test cases.
         3. Falls back to heuristic if LLM unavailable.
     """
 
@@ -76,7 +76,7 @@ class TestGeneratorAgent(BaseAgent):
         return result
 
     # ------------------------------------------------------------------
-    # Manual tests — LLM-powered structured output
+    # Manual tests - LLM-powered structured output
     # ------------------------------------------------------------------
 
     def _generate_manual_tests(
@@ -122,7 +122,6 @@ class TestGeneratorAgent(BaseAgent):
             f"Return a JSON array of test case objects as specified in the system prompt."
         )
 
-        # Inject knowledge context (test patterns, best practices) into user prompt
         knowledge_context = self.get_knowledge_context(query=user_story)
         if knowledge_context:
             user_prompt += f"\n\n## Additional Context (Knowledge Base)\n{knowledge_context[:1500]}"
@@ -134,7 +133,6 @@ class TestGeneratorAgent(BaseAgent):
         if not tests:
             raise ValueError("LLM returned empty or unparseable manual test JSON")
 
-        # Normalise each test case from the LLM
         normalised = []
         for idx, test in enumerate(tests, 1):
             normalised.append({
@@ -188,7 +186,7 @@ class TestGeneratorAgent(BaseAgent):
         ]
 
     # ------------------------------------------------------------------
-    # Automation tests — LLM + MCP powered
+    # Automation tests - LLM + MCP powered
     # ------------------------------------------------------------------
 
     def _generate_automation_tests(
@@ -201,70 +199,77 @@ class TestGeneratorAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         if not self.llm_client:
             raise RuntimeError(
-                "LLM client is not configured. Set ANTHROPIC_API_KEY and restart the server."
+                "LLM client is not configured. Set PHOENIX_LLM_PROVIDER and the matching API key, then restart the server."
             )
 
-        # Step 1 — Inspect the live page via MCP
-        page_snapshot = ""
-        if self.mcp_client and application_url:
-            logger.info("Inspecting page via MCP: %s", application_url)
-            page_snapshot = self.mcp_client.inspect_page(application_url)
+        try:
+            page_snapshot = ""
+            if self.mcp_client and application_url:
+                logger.info("Inspecting page via MCP: %s", application_url)
+                page_snapshot = self.mcp_client.inspect_page(application_url)
+                if page_snapshot:
+                    logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                else:
+                    logger.warning("MCP returned empty snapshot for %s", application_url)
+
+            system_prompt_template = _prompt_loader.get("test_generator")
+            system_prompt = system_prompt_template.format(
+                knowledge_context=knowledge_context if knowledge_context else "(no additional context)"
+            )
+
+            criteria_text = "\n".join(f"  {i}. {c}" for i, c in enumerate(acceptance_criteria, 1))
+            user_parts = [
+                "Generate a complete pytest + Playwright test script for the following user story.",
+                "",
+                f"## User Story\n{user_story}",
+                "",
+                f"## Application URL\n{application_url or 'N/A'}",
+                "",
+                f"## Acceptance Criteria\n{criteria_text}",
+            ]
+
             if page_snapshot:
-                logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                user_parts += [
+                    "",
+                    "## Page Accessibility Snapshot (live inspection of the target page)",
+                    "Use the element roles, names, and values below to choose accurate locators.",
+                    "",
+                    page_snapshot,
+                ]
             else:
-                logger.warning("MCP returned empty snapshot for %s", application_url)
+                user_parts += [
+                    "",
+                    "## Page Snapshot",
+                    "No live page snapshot available. Use your best judgement for locators "
+                    "based on common web patterns and the acceptance criteria.",
+                ]
 
-        # Step 2 — Load versioned system prompt
-        system_prompt_template = _prompt_loader.get("test_generator")
-        system_prompt = system_prompt_template.format(
-            knowledge_context=knowledge_context if knowledge_context else "(no additional context)"
-        )
-
-        # Step 3 — Build user prompt
-        criteria_text = "\n".join(f"  {i}. {c}" for i, c in enumerate(acceptance_criteria, 1))
-        user_parts = [
-            "Generate a complete pytest + Playwright test script for the following user story.",
-            "",
-            f"## User Story\n{user_story}",
-            "",
-            f"## Application URL\n{application_url or 'N/A'}",
-            "",
-            f"## Acceptance Criteria\n{criteria_text}",
-        ]
-
-        if page_snapshot:
             user_parts += [
                 "",
-                "## Page Accessibility Snapshot (live inspection of the target page)",
-                "Use the element roles, names, and values below to choose accurate locators.",
-                "",
-                page_snapshot,
-            ]
-        else:
-            user_parts += [
-                "",
-                "## Page Snapshot",
-                "No live page snapshot available. Use your best judgement for locators "
-                "based on common web patterns and the acceptance criteria.",
+                "## Instructions",
+                "- Write ONE test function that covers all acceptance criteria.",
+                "- Use the locator priority order defined in the system prompt.",
+                "- If the page snapshot contains exact element names/roles, use them directly.",
+                "- Include meaningful assertions for each acceptance criterion.",
+                "- Return ONLY the Python source code, nothing else.",
             ]
 
-        user_parts += [
-            "",
-            "## Instructions",
-            "- Write ONE test function that covers all acceptance criteria.",
-            "- Use the locator priority order defined in the system prompt.",
-            "- If the page snapshot contains exact element names/roles, use them directly.",
-            "- Include meaningful assertions for each acceptance criterion.",
-            "- Return ONLY the Python source code, nothing else.",
-        ]
+            user_prompt = "\n".join(user_parts)
 
-        user_prompt = "\n".join(user_parts)
+            logger.info("Generating automation script via LLM for: %s", user_story[:80])
+            script_code = self.llm_client.generate(system_prompt, user_prompt)
+        except Exception as exc:
+            logger.warning(
+                "LLM automation generation failed, using fallback script: %s",
+                exc,
+                exc_info=True,
+            )
+            script_code = self._build_automation_fallback_script(
+                user_story=user_story,
+                application_url=application_url,
+                acceptance_criteria=acceptance_criteria,
+            )
 
-        # Step 4 — Call LLM
-        logger.info("Generating automation script via LLM for: %s", user_story[:80])
-        script_code = self.llm_client.generate(system_prompt, user_prompt)
-
-        # Step 5 — Derive a clean name
         test_name = self._derive_short_name(user_story)
 
         return [
@@ -281,12 +286,32 @@ class TestGeneratorAgent(BaseAgent):
             }
         ]
 
+    def _build_automation_fallback_script(
+        self,
+        user_story: str,
+        application_url: Optional[str],
+        acceptance_criteria: List[str],
+    ) -> str:
+        """Build a minimal valid Playwright test when LLM generation fails."""
+        url = application_url or "https://example.com"
+        criteria_comments = "\n".join(f"    # Acceptance criterion: {c}" for c in acceptance_criteria)
+        return f'''import pytest
+from playwright.sync_api import Page, expect
+
+
+def test_generated_automation_flow(page: Page):
+    """Fallback automation script for: {user_story}"""
+    page.goto("{url}")
+    expect(page).to_have_url("{url}")
+{criteria_comments or "    # Add assertions for the acceptance criteria here."}
+'''
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _derive_short_name(self, user_story: str) -> str:
-        """Derive a short snake_case name — LLM first, heuristic fallback."""
+        """Derive a short snake_case name - LLM first, heuristic fallback."""
         if self.llm_client:
             try:
                 system_prompt = _prompt_loader.get("test_name")
@@ -310,7 +335,6 @@ class TestGeneratorAgent(BaseAgent):
     def _parse_json_array(raw: str) -> List[Dict[str, Any]]:
         """Extract a JSON array from the LLM response."""
         raw = raw.strip()
-        # Strip any accidental code fences
         raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
         raw = re.sub(r"\n?```\s*$", "", raw)
         raw = raw.strip()
@@ -321,7 +345,6 @@ class TestGeneratorAgent(BaseAgent):
             if isinstance(data, dict) and "tests" in data:
                 return data["tests"]
         except json.JSONDecodeError:
-            # Try to find a JSON array anywhere in the response
             match = re.search(r"\[.*\]", raw, re.DOTALL)
             if match:
                 try:
@@ -332,7 +355,7 @@ class TestGeneratorAgent(BaseAgent):
 
     @staticmethod
     def _normalise_steps(steps: Any) -> List[Dict[str, Any]]:
-        """Normalise steps — accept list-of-dicts or list-of-strings."""
+        """Normalise steps - accept list-of-dicts or list-of-strings."""
         if not steps:
             return []
         normalised = []

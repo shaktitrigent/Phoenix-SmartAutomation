@@ -40,7 +40,7 @@ class IntelligenceClient:
     # ------------------------------------------------------------------
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = self._build_url(path)
-        last_error: Exception | None = None
+        last_error: Optional[Exception] = None
 
         for attempt in range(self.retry_count):
             try:

@@ -71,14 +71,10 @@ class ManualTestGenerator:
         slug = _slugify(test["name"])
         filename = f"manual_test_{index:03d}_{slug}.md"
         file_path = self.output_dir / filename
-        file_path.write_text(
-            self._render_markdown(test, application_url), encoding="utf-8"
-        )
+        file_path.write_text(self._render_markdown(test, application_url), encoding="utf-8")
         test["file_path"] = str(file_path)
 
-    def _render_markdown(
-        self, test: Dict[str, Any], application_url: Optional[str]
-    ) -> str:
+    def _render_markdown(self, test: Dict[str, Any], application_url: Optional[str]) -> str:
         risk = test.get("risk_level", "regression").upper()
         tags = ", ".join(f"`{t}`" for t in test.get("tags", []))
         generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -155,6 +151,7 @@ class ManualTestGenerator:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
+
 
 def _slugify(name: str, max_len: int = 60) -> str:
     """Convert a test name to a filesystem-safe slug."""

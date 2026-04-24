@@ -11,6 +11,7 @@ from dataclasses import dataclass
 @dataclass
 class KnowledgeEntry:
     """Knowledge entry"""
+
     title: str
     content: str
     category: str
@@ -24,24 +25,24 @@ class KnowledgeBase:
     def __init__(self, base_path: Optional[Path] = None):
         """
         Initialize knowledge base.
-        
+
         Args:
             base_path: Base path to knowledge base directory. If None, uses default.
         """
         if base_path is None:
             # Default to phoenix/knowledge directory
             base_path = Path(__file__).parent
-        
+
         self.base_path = Path(base_path)
         self._cache: Dict[str, List[KnowledgeEntry]] = {}
-        
+
         # Knowledge folders
         self.test_patterns_path = self.base_path / "test_patterns"
         self.locator_strategies_path = self.base_path / "locator_strategies"
         self.domain_knowledge_path = self.base_path / "domain_knowledge"
         self.best_practices_path = self.base_path / "best_practices"
         self.playwright_path = self.base_path / "playwright"
-        
+
         # Ensure directories exist
         self._ensure_directories()
 
@@ -60,7 +61,7 @@ class KnowledgeBase:
         """Load a knowledge file"""
         if not file_path.exists():
             return None
-        
+
         try:
             if file_path.suffix == ".json":
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -70,7 +71,7 @@ class KnowledgeBase:
                     content=data.get("content", ""),
                     category=data.get("category", ""),
                     tags=data.get("tags", []),
-                    metadata=data.get("metadata", {})
+                    metadata=data.get("metadata", {}),
                 )
             elif file_path.suffix in [".yaml", ".yml"]:
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -80,158 +81,166 @@ class KnowledgeBase:
                     content=data.get("content", ""),
                     category=data.get("category", ""),
                     tags=data.get("tags", []),
-                    metadata=data.get("metadata", {})
+                    metadata=data.get("metadata", {}),
                 )
             elif file_path.suffix == ".md":
                 # Parse markdown file
                 with open(file_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                
+
                 # Extract frontmatter if present
                 frontmatter_match = re.match(r"^---\n(.*?)\n---\n", content, re.DOTALL)
                 metadata = {}
                 if frontmatter_match:
                     try:
                         metadata = yaml.safe_load(frontmatter_match.group(1)) or {}
-                        content = content[frontmatter_match.end():]
-                    except:
+                        content = content[frontmatter_match.end() :]
+                    except Exception:
                         pass
-                
+
                 return KnowledgeEntry(
                     title=metadata.get("title", file_path.stem),
                     content=content,
                     category=metadata.get("category", ""),
                     tags=metadata.get("tags", []),
-                    metadata=metadata
+                    metadata=metadata,
                 )
         except Exception as e:
             print(f"Error loading knowledge file {file_path}: {e}")
             return None
-        
+
         return None
 
     def _load_directory(self, directory: Path, category: str) -> List[KnowledgeEntry]:
         """Load all knowledge files from a directory"""
         entries = []
-        
+
         if not directory.exists():
             return entries
-        
+
         for file_path in directory.rglob("*"):
             if file_path.is_file() and file_path.suffix in [".md", ".json", ".yaml", ".yml"]:
                 entry = self._load_file(file_path)
                 if entry:
                     entry.category = category
                     entries.append(entry)
-        
+
         return entries
 
     def get_test_patterns(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
         """
         Get test patterns.
-        
+
         Args:
             query: Optional search query to filter patterns
-            
+
         Returns:
             List of test pattern entries
         """
         cache_key = f"test_patterns:{query or 'all'}"
         if cache_key in self._cache:
             return self._cache[cache_key]
-        
+
         entries = self._load_directory(self.test_patterns_path, "test_patterns")
-        
+
         if query:
             query_lower = query.lower()
             entries = [
-                e for e in entries
-                if query_lower in e.title.lower() or query_lower in e.content.lower()
+                e
+                for e in entries
+                if query_lower in e.title.lower()
+                or query_lower in e.content.lower()
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
-        
+
         self._cache[cache_key] = entries
         return entries
 
     def get_locator_strategies(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
         """
         Get locator strategies.
-        
+
         Args:
             query: Optional search query to filter strategies
-            
+
         Returns:
             List of locator strategy entries
         """
         cache_key = f"locator_strategies:{query or 'all'}"
         if cache_key in self._cache:
             return self._cache[cache_key]
-        
+
         entries = self._load_directory(self.locator_strategies_path, "locator_strategies")
-        
+
         if query:
             query_lower = query.lower()
             entries = [
-                e for e in entries
-                if query_lower in e.title.lower() or query_lower in e.content.lower()
+                e
+                for e in entries
+                if query_lower in e.title.lower()
+                or query_lower in e.content.lower()
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
-        
+
         self._cache[cache_key] = entries
         return entries
 
     def get_domain_knowledge(self, domain: Optional[str] = None) -> List[KnowledgeEntry]:
         """
         Get domain knowledge.
-        
+
         Args:
             domain: Optional domain name to filter knowledge
-            
+
         Returns:
             List of domain knowledge entries
         """
         cache_key = f"domain_knowledge:{domain or 'all'}"
         if cache_key in self._cache:
             return self._cache[cache_key]
-        
+
         entries = self._load_directory(self.domain_knowledge_path, "domain_knowledge")
-        
+
         if domain:
             domain_lower = domain.lower()
             entries = [
-                e for e in entries
-                if domain_lower in e.title.lower() or domain_lower in e.content.lower()
+                e
+                for e in entries
+                if domain_lower in e.title.lower()
+                or domain_lower in e.content.lower()
                 or domain_lower in e.category.lower()
                 or any(domain_lower in tag.lower() for tag in e.tags)
             ]
-        
+
         self._cache[cache_key] = entries
         return entries
 
     def get_best_practices(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
         """
         Get best practices.
-        
+
         Args:
             query: Optional search query to filter practices
-            
+
         Returns:
             List of best practice entries
         """
         cache_key = f"best_practices:{query or 'all'}"
         if cache_key in self._cache:
             return self._cache[cache_key]
-        
+
         entries = self._load_directory(self.best_practices_path, "best_practices")
-        
+
         if query:
             query_lower = query.lower()
             entries = [
-                e for e in entries
-                if query_lower in e.title.lower() or query_lower in e.content.lower()
+                e
+                for e in entries
+                if query_lower in e.title.lower()
+                or query_lower in e.content.lower()
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
-        
+
         self._cache[cache_key] = entries
         return entries
 
@@ -254,8 +263,10 @@ class KnowledgeBase:
         if query:
             query_lower = query.lower()
             entries = [
-                e for e in entries
-                if query_lower in e.title.lower() or query_lower in e.content.lower()
+                e
+                for e in entries
+                if query_lower in e.title.lower()
+                or query_lower in e.content.lower()
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
 
@@ -265,18 +276,24 @@ class KnowledgeBase:
     def search(self, query: str, categories: Optional[List[str]] = None) -> List[KnowledgeEntry]:
         """
         Search across all knowledge bases.
-        
+
         Args:
             query: Search query
             categories: Optional list of categories to search in
-            
+
         Returns:
             List of matching knowledge entries
         """
         all_entries = []
-        
+
         if categories is None:
-            categories = ["test_patterns", "locator_strategies", "domain_knowledge", "best_practices", "playwright"]
+            categories = [
+                "test_patterns",
+                "locator_strategies",
+                "domain_knowledge",
+                "best_practices",
+                "playwright",
+            ]
 
         if "test_patterns" in categories:
             all_entries.extend(self.get_test_patterns(query))
@@ -294,16 +311,16 @@ class KnowledgeBase:
     def get_context_for_agent(self, agent_type: str, query: Optional[str] = None) -> str:
         """
         Get formatted context string for an agent.
-        
+
         Args:
             agent_type: Type of agent ('test_generator', 'locator_expert', 'failure_analyzer')
             query: Optional query to filter knowledge
-            
+
         Returns:
             Formatted context string
         """
         context_parts = []
-        
+
         if agent_type == "test_generator":
             patterns = self.get_test_patterns(query)
             practices = self.get_best_practices(query)
@@ -342,15 +359,15 @@ class KnowledgeBase:
                 for rule in playwright_rules[:5]:
                     context_parts.append(f"### {rule.title}")
                     context_parts.append(rule.content[:800])
-        
+
         elif agent_type == "failure_analyzer":
             practices = self.get_best_practices("failure")
             patterns = self.get_test_patterns("error")
-            
+
             if practices:
                 context_parts.append("## Failure Analysis Practices")
                 for practice in practices[:3]:
                     context_parts.append(f"### {practice.title}")
                     context_parts.append(practice.content[:500])
-        
+
         return "\n\n".join(context_parts)

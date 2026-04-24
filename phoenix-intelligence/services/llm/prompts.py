@@ -107,30 +107,36 @@ def build_test_generation_prompt(
     ]
 
     if page_snapshot:
-        user_parts.extend([
-            "",
-            "## Page Accessibility Snapshot (live inspection of the target page)",
-            "Use the element roles, names, and values below to choose accurate locators.",
-            "",
-            page_snapshot,
-        ])
+        user_parts.extend(
+            [
+                "",
+                "## Page Accessibility Snapshot (live inspection of the target page)",
+                "Use the element roles, names, and values below to choose accurate locators.",
+                "",
+                page_snapshot,
+            ]
+        )
     else:
-        user_parts.extend([
-            "",
-            "## Page Snapshot",
-            "No live page snapshot available. Use your best judgement for locators "
-            "based on common web patterns and the acceptance criteria.",
-        ])
+        user_parts.extend(
+            [
+                "",
+                "## Page Snapshot",
+                "No live page snapshot available. Use your best judgement for locators "
+                "based on common web patterns and the acceptance criteria.",
+            ]
+        )
 
-    user_parts.extend([
-        "",
-        "## Instructions",
-        "- Write ONE test function that covers all acceptance criteria.",
-        "- Use the locator priority order defined in the system prompt.",
-        "- If the page snapshot contains exact element names/roles, use them directly.",
-        "- Include meaningful assertions for each acceptance criterion.",
-        "- Return ONLY the Python source code, nothing else.",
-    ])
+    user_parts.extend(
+        [
+            "",
+            "## Instructions",
+            "- Write ONE test function that covers all acceptance criteria.",
+            "- Use the locator priority order defined in the system prompt.",
+            "- If the page snapshot contains exact element names/roles, use them directly.",
+            "- Include meaningful assertions for each acceptance criterion.",
+            "- Return ONLY the Python source code, nothing else.",
+        ]
+    )
 
     return system, "\n".join(user_parts)
 

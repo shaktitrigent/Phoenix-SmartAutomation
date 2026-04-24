@@ -43,9 +43,7 @@ class AgentRegistry:
     def list_agents(self) -> List[str]:
         return list(self._agents.keys())
 
-    def invoke_agent(
-        self, agent_name: str, input_data: Dict[str, Any], **kwargs
-    ) -> Dict[str, Any]:
+    def invoke_agent(self, agent_name: str, input_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         agent = self.get_agent(agent_name)
         if agent is None:
             raise ValueError(f"Unknown agent: '{agent_name}'. Available: {self.list_agents()}")

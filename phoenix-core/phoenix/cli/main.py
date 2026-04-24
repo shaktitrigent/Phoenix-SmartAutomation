@@ -5,18 +5,8 @@ from phoenix.cli.commands import generate, execute, init, run, report
 
 
 @click.group()
-@click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True),
-    help="Path to configuration file"
-)
-@click.option(
-    "--verbose",
-    "-v",
-    is_flag=True,
-    help="Enable verbose output"
-)
+@click.option("--config", "-c", type=click.Path(exists=True), help="Path to configuration file")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.pass_context
 def main(ctx, config, verbose):
     """Phoenix Enterprise QA Automation Platform CLI"""

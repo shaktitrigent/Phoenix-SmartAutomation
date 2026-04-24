@@ -23,11 +23,11 @@ class Cache:
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         expiry = datetime.now(timezone.utc) + timedelta(seconds=ttl or self.ttl)
         self._store[key] = {"value": value, "expires_at": expiry}
-    
+
     def clear(self) -> None:
         """Clear all cached entries."""
         self._store.clear()
-    
+
     def delete(self, key: str) -> None:
         """Delete a specific cache entry."""
         self._store.pop(key, None)

@@ -57,32 +57,37 @@ class MCPClient:
             args=cmd_parts,
         )
 
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
+        async with (
+            stdio_client(server_params) as (
+                read_stream,
+                write_stream,
+            ),
+            ClientSession(read_stream, write_stream) as session,
+        ):
+            await session.initialize()
 
-                logger.info("MCP: navigating to %s", url)
-                await session.call_tool("browser_navigate", {"url": url})
+            logger.info("MCP: navigating to %s", url)
+            await session.call_tool("browser_navigate", {"url": url})
 
-                logger.info("MCP: taking accessibility snapshot")
-                snapshot_result = await session.call_tool("browser_snapshot", {})
+            logger.info("MCP: taking accessibility snapshot")
+            snapshot_result = await session.call_tool("browser_snapshot", {})
 
-                text = ""
-                if snapshot_result and snapshot_result.content:
-                    for block in snapshot_result.content:
-                        if hasattr(block, "text"):
-                            text += block.text
-                        elif isinstance(block, dict):
-                            text += block.get("text", "")
+            text = ""
+            if snapshot_result and snapshot_result.content:
+                for block in snapshot_result.content:
+                    if hasattr(block, "text"):
+                        text += block.text
+                    elif isinstance(block, dict):
+                        text += block.get("text", "")
 
-                logger.info(
-                    "MCP: snapshot received (%d chars)",
-                    len(text),
-                )
+            logger.info(
+                "MCP: snapshot received (%d chars)",
+                len(text),
+            )
 
-                await session.call_tool("browser_close", {})
+            await session.call_tool("browser_close", {})
 
-                return text
+            return text
 
     @staticmethod
     def _run_async(coro):

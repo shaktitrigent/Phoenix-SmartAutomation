@@ -58,15 +58,17 @@ class AutomationTestGenerator:
         results = []
         for idx, test in enumerate(automation_tests, 1):
             script_path = self._write_script(test, idx)
-            results.append({
-                "name": test.get("name", f"automation_test_{idx}"),
-                "description": test.get("description", user_story),
-                "script_path": str(script_path),
-                "test_type": TestType.AUTOMATION.value,
-                "test_category": test_category,
-                "locators": test.get("locators", []),
-                "tags": test.get("tags", ["automation", "generated"]),
-            })
+            results.append(
+                {
+                    "name": test.get("name", f"automation_test_{idx}"),
+                    "description": test.get("description", user_story),
+                    "script_path": str(script_path),
+                    "test_type": TestType.AUTOMATION.value,
+                    "test_category": test_category,
+                    "locators": test.get("locators", []),
+                    "tags": test.get("tags", ["automation", "generated"]),
+                }
+            )
         return results
 
     # ------------------------------------------------------------------
@@ -117,6 +119,7 @@ class AutomationTestGenerator:
 # Fix functions (module-level for clarity)
 # ------------------------------------------------------------------
 
+
 def _fix_url_containing(code: str) -> str:
     """to_have_url(containing="...") → to_have_url(re.compile(r"...*"))"""
     pattern = re_module.compile(
@@ -133,29 +136,35 @@ def _fix_url_containing(code: str) -> str:
 
 def _fix_wait_for_selector(code: str) -> str:
     """page.wait_for_selector("sel") → expect(page.locator("sel")).to_be_visible()"""
-    pattern = re_module.compile(r'page\.wait_for_selector\(([^)]+)\)')
+    pattern = re_module.compile(r"page\.wait_for_selector\(([^)]+)\)")
+
     def replacer(m):
         arg = m.group(1).strip()
-        return f'expect(page.locator({arg})).to_be_visible()'
+        return f"expect(page.locator({arg})).to_be_visible()"
+
     return pattern.sub(replacer, code)
 
 
 def _fix_time_sleep(code: str) -> str:
     """Remove time.sleep() calls and add a # TODO comment."""
-    pattern = re_module.compile(r'time\.sleep\s*\([^)]*\)\s*\n?')
-    result = pattern.sub('# TODO: replace sleep with expect() assertion\n', code)
+    pattern = re_module.compile(r"time\.sleep\s*\([^)]*\)\s*\n?")
+    result = pattern.sub("# TODO: replace sleep with expect() assertion\n", code)
     # Also remove the now-unused "import time" if it was only there for sleep
-    if 'time.sleep' not in result and re_module.search(r'import time\s*\n', result):
-        result = re_module.sub(r'import time\s*\n', '', result, count=1)
+    if "time.sleep" not in result and re_module.search(r"import time\s*\n", result):
+        result = re_module.sub(r"import time\s*\n", "", result, count=1)
     return result
 
 
 def _fix_bare_assert(code: str) -> str:
     """Flag bare assert statements that should use expect()."""
-    pattern = re_module.compile(r'^(\s+)(assert\s+(?!isinstance|issubclass).+)$', re_module.MULTILINE)
+    pattern = re_module.compile(
+        r"^(\s+)(assert\s+(?!isinstance|issubclass).+)$", re_module.MULTILINE
+    )
+
     def replacer(m):
         indent, stmt = m.group(1), m.group(2)
-        return f'{indent}# NOTE: prefer expect() over bare assert\n{indent}{stmt}'
+        return f"{indent}# NOTE: prefer expect() over bare assert\n{indent}{stmt}"
+
     return pattern.sub(replacer, code)
 
 

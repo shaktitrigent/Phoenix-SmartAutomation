@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 class LLMProvider(Protocol):
     """Minimal interface every provider must implement."""
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        ...
+    def generate(self, system_prompt: str, user_prompt: str) -> str: ...
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +210,7 @@ class LLMRouter:
         provider_name = self.settings.provider.lower()
         if provider_name not in _PROVIDERS:
             raise ValueError(
-                f"Unknown LLM provider '{provider_name}'. "
-                f"Supported: {list(_PROVIDERS.keys())}"
+                f"Unknown LLM provider '{provider_name}'. Supported: {list(_PROVIDERS.keys())}"
             )
         self._provider: LLMProvider = _PROVIDERS[provider_name](self.settings)
         logger.info(

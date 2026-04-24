@@ -1,8 +1,13 @@
 [tool.ruff]
 line-length = 100
 target-version = "py39"
-select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"phoenix-intelligence/api/server.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["phoenix", "phoenix_shared"]

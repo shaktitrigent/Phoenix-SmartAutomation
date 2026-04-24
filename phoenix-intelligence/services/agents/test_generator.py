@@ -135,16 +135,18 @@ class TestGeneratorAgent(BaseAgent):
 
         normalised = []
         for idx, test in enumerate(tests, 1):
-            normalised.append({
-                "name": test.get("name", f"TC-{idx:03d}: {user_story[:50]}"),
-                "description": test.get("description", user_story),
-                "risk_level": test.get("risk_level", risk_level or "regression"),
-                "preconditions": test.get("preconditions", ""),
-                "steps": self._normalise_steps(test.get("steps", [])),
-                "expected_result": test.get("expected_result", ""),
-                "postconditions": test.get("postconditions", ""),
-                "tags": test.get("tags", ["manual", "generated"]),
-            })
+            normalised.append(
+                {
+                    "name": test.get("name", f"TC-{idx:03d}: {user_story[:50]}"),
+                    "description": test.get("description", user_story),
+                    "risk_level": test.get("risk_level", risk_level or "regression"),
+                    "preconditions": test.get("preconditions", ""),
+                    "steps": self._normalise_steps(test.get("steps", [])),
+                    "expected_result": test.get("expected_result", ""),
+                    "postconditions": test.get("postconditions", ""),
+                    "tags": test.get("tags", ["manual", "generated"]),
+                }
+            )
 
         logger.info("LLM generated %d manual test(s)", len(normalised))
         return normalised
@@ -159,17 +161,21 @@ class TestGeneratorAgent(BaseAgent):
         """Heuristic fallback when LLM is unavailable."""
         steps = []
         if application_url:
-            steps.append({
-                "step_number": 1,
-                "action": f"Navigate to {application_url}",
-                "expected_result": "Page loads successfully",
-            })
-        for idx, criteria in enumerate(acceptance_criteria, 1):
-            steps.append({
-                "step_number": len(steps) + 1,
-                "action": criteria,
-                "expected_result": "Step completes as expected",
-            })
+            steps.append(
+                {
+                    "step_number": 1,
+                    "action": f"Navigate to {application_url}",
+                    "expected_result": "Page loads successfully",
+                }
+            )
+        for _idx, criteria in enumerate(acceptance_criteria, 1):
+            steps.append(
+                {
+                    "step_number": len(steps) + 1,
+                    "action": criteria,
+                    "expected_result": "Step completes as expected",
+                }
+            )
 
         test_name = self._derive_short_name(user_story)
         return [
@@ -214,7 +220,9 @@ class TestGeneratorAgent(BaseAgent):
 
             system_prompt_template = _prompt_loader.get("test_generator")
             system_prompt = system_prompt_template.format(
-                knowledge_context=knowledge_context if knowledge_context else "(no additional context)"
+                knowledge_context=knowledge_context
+                if knowledge_context
+                else "(no additional context)"
             )
 
             criteria_text = "\n".join(f"  {i}. {c}" for i, c in enumerate(acceptance_criteria, 1))
@@ -294,7 +302,9 @@ class TestGeneratorAgent(BaseAgent):
     ) -> str:
         """Build a minimal valid Playwright test when LLM generation fails."""
         url = application_url or "https://example.com"
-        criteria_comments = "\n".join(f"    # Acceptance criterion: {c}" for c in acceptance_criteria)
+        criteria_comments = "\n".join(
+            f"    # Acceptance criterion: {c}" for c in acceptance_criteria
+        )
         return f'''import pytest
 from playwright.sync_api import Page, expect
 
@@ -361,17 +371,21 @@ def test_generated_automation_flow(page: Page):
         normalised = []
         for idx, step in enumerate(steps, 1):
             if isinstance(step, dict):
-                normalised.append({
-                    "step_number": step.get("step_number", idx),
-                    "action": step.get("action", str(step)),
-                    "expected_result": step.get("expected_result", ""),
-                    "test_data": step.get("test_data", ""),
-                })
+                normalised.append(
+                    {
+                        "step_number": step.get("step_number", idx),
+                        "action": step.get("action", str(step)),
+                        "expected_result": step.get("expected_result", ""),
+                        "test_data": step.get("test_data", ""),
+                    }
+                )
             else:
-                normalised.append({
-                    "step_number": idx,
-                    "action": str(step),
-                    "expected_result": "",
-                    "test_data": "",
-                })
+                normalised.append(
+                    {
+                        "step_number": idx,
+                        "action": str(step),
+                        "expected_result": "",
+                        "test_data": "",
+                    }
+                )
         return normalised

@@ -84,6 +84,7 @@ _agent_registry = AgentRegistry(
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.post("/api/v1/tests/generate", response_model=TestGenerationResponse)
 def generate_tests(payload: TestGenerationRequest):
     """Generate manual and automation tests from a user story."""

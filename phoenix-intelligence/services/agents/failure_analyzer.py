@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from services.agents.base import BaseAgent
 from services.llm.prompt_loader import PromptLoader
@@ -91,9 +91,7 @@ class FailureAnalyzerAgent(BaseAgent):
         }
 
     @staticmethod
-    def _analyze_heuristic(
-        test_case_id: str, error_message: str, traceback: str
-    ) -> Dict[str, Any]:
+    def _analyze_heuristic(test_case_id: str, error_message: str, traceback: str) -> Dict[str, Any]:
         """Pattern-matching fallback when LLM is unavailable."""
         error_lower = error_message.lower()
 

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 class TestGenerationOptions(BaseModel):
     """Options for test generation."""
+
     test_type: str = Field(default="both", description="manual, automation, or both")
     risk_level: Optional[str] = Field(default=None, description="smoke, regression, edge")
     output_style: Optional[str] = Field(default=None, description="markdown or gherkin")
@@ -13,6 +14,7 @@ class TestGenerationOptions(BaseModel):
 
 class TestGenerationRequest(BaseModel):
     """Request payload for test generation."""
+
     user_story: str
     application_url: Optional[str] = None
     acceptance_criteria: List[str] = []
@@ -21,6 +23,7 @@ class TestGenerationRequest(BaseModel):
 
 class ManualTestStep(BaseModel):
     """Structured manual test step."""
+
     step_number: Optional[int] = None
     action: str
     expected_result: Optional[str] = None
@@ -29,6 +32,7 @@ class ManualTestStep(BaseModel):
 
 class ManualTestCase(BaseModel):
     """Manual test case schema."""
+
     name: str
     description: str
     preconditions: Optional[str] = None
@@ -41,6 +45,7 @@ class ManualTestCase(BaseModel):
 
 class Locator(BaseModel):
     """Locator schema for UI elements."""
+
     element: Optional[str] = None
     selector: Optional[str] = None
     strategy: Optional[str] = None
@@ -49,6 +54,7 @@ class Locator(BaseModel):
 
 class AutomationTestCase(BaseModel):
     """Automation test case schema."""
+
     name: str
     description: str
     test_steps: List[str] = []
@@ -61,6 +67,7 @@ class AutomationTestCase(BaseModel):
 
 class ResponseMetadata(BaseModel):
     """Response metadata for tracing and versioning."""
+
     request_id: Optional[str] = None
     version: Optional[str] = None
     generated_at: Optional[str] = None
@@ -68,6 +75,7 @@ class ResponseMetadata(BaseModel):
 
 class TestGenerationResponse(BaseModel):
     """Response payload for test generation."""
+
     manual_tests: List[ManualTestCase] = []
     automation_tests: List[AutomationTestCase] = []
     metadata: Dict[str, Any] = {}
@@ -75,6 +83,7 @@ class TestGenerationResponse(BaseModel):
 
 class LocatorDiscoveryRequest(BaseModel):
     """Request payload for locator discovery."""
+
     page_url: str
     elements: List[str]
     dom_snapshot: Optional[str] = None
@@ -82,6 +91,7 @@ class LocatorDiscoveryRequest(BaseModel):
 
 class LocatorDiscoveryResponse(BaseModel):
     """Response payload for locator discovery."""
+
     locators: List[Locator] = []
     recommended_locator: Optional[Locator] = None
     metadata: Dict[str, Any] = {}
@@ -89,6 +99,7 @@ class LocatorDiscoveryResponse(BaseModel):
 
 class FailureAnalysisRequest(BaseModel):
     """Request payload for failure analysis."""
+
     error_message: str
     traceback: Optional[str] = None
     test_case_id: Optional[str] = None
@@ -97,6 +108,7 @@ class FailureAnalysisRequest(BaseModel):
 
 class FailureAnalysisResponse(BaseModel):
     """Response payload for failure analysis."""
+
     root_cause: Optional[str] = None
     category: Optional[str] = None
     confidence: float = 0.0

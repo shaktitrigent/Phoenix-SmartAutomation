@@ -1,8 +1,8 @@
 """UI test executor"""
 
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, Optional
 from pathlib import Path
-from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext
+from playwright.sync_api import Browser, BrowserContext, sync_playwright
 from phoenix.storage.models import ExecutionStatus
 
 

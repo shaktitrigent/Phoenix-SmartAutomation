@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import ast
 import re as re_module
-import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 

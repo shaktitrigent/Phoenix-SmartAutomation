@@ -1,6 +1,6 @@
 """API test executor"""
 
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, Optional
 from playwright.sync_api import sync_playwright, APIRequestContext
 from phoenix.storage.models import ExecutionStatus
 

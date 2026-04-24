@@ -12,7 +12,6 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
 import requests
-from requests.exceptions import RequestException
 
 from phoenix.sdk.config import PhoenixConfig
 

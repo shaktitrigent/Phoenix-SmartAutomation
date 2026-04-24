@@ -5,7 +5,6 @@ from pathlib import Path
 from phoenix import PhoenixClient
 from phoenix.sdk.config import PhoenixConfig
 from phoenix.cli.output import (
-    console,
     err_console,
     print_success,
     print_error,

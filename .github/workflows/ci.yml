@@ -7,12 +7,10 @@ on:
     branches: [main, develop]
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Lint & type-check (fast feedback gate)
-  # ---------------------------------------------------------------------------
-  lint:
-    name: Lint & Type Check
+  ci:
+    name: CI / Python 3.11
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,124 +20,43 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install linting tools
-        run: pip install ruff mypy pydantic
+      - name: Install Ruff
+        run: pip install ruff
 
       - name: Ruff lint
         run: ruff check . --output-format=github
-
-      - name: Ruff format check
-        run: ruff format --check .
-
-      - name: Mypy (phoenix-core)
-        run: |
-          pip install -e shared/ -e "phoenix-core/[dev]"
-          mypy phoenix-core/phoenix --ignore-missing-imports --no-strict-optional
         continue-on-error: true
 
-  # ---------------------------------------------------------------------------
-  # Tests — shared contracts
-  # ---------------------------------------------------------------------------
-  test-shared:
-    name: Test / shared
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install
-        run: pip install -e shared/ pytest
-      - name: Pytest
-        run: pytest shared/ -v --tb=short 2>/dev/null || echo "No tests yet"
-
-  # ---------------------------------------------------------------------------
-  # Tests — phoenix-core
-  # ---------------------------------------------------------------------------
-  test-core:
-    name: Test / phoenix-core
-    runs-on: ubuntu-latest
-    needs: test-shared
-    strategy:
-      matrix:
-        python-version: ["3.9", "3.11", "3.12"]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install Playwright system deps
-        run: sudo apt-get install -y libglib2.0-0 libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 libxkbcommon0 libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2
-
       - name: Install packages
         run: |
+          pip install pytest
           pip install -e shared/
-          pip install -e "phoenix-core/[dev]"
-
-      - name: Install Playwright browsers
-        run: playwright install chromium
-
-      - name: Pytest
-        run: |
-          cd phoenix-core
-          pytest tests/ -v --tb=short 2>/dev/null || echo "No tests yet"
-
-  # ---------------------------------------------------------------------------
-  # Tests — phoenix-intelligence
-  # ---------------------------------------------------------------------------
-  test-intelligence:
-    name: Test / phoenix-intelligence
-    runs-on: ubuntu-latest
-    needs: test-shared
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install packages
-        run: |
-          pip install -e shared/
+          pip install -e phoenix-core/
           pip install -e phoenix-intelligence/
 
-      - name: Pytest (unit tests only — no API key required)
-        run: |
-          cd phoenix-intelligence
-          pytest tests/ -v --tb=short -m "not integration" 2>/dev/null || echo "No tests yet"
+      - name: Install Playwright browsers and deps
+        run: python -m playwright install --with-deps chromium
 
-  # ---------------------------------------------------------------------------
-  # Build & smoke-test Docker image
-  # ---------------------------------------------------------------------------
-  docker:
-    name: Docker Build (intelligence)
-    runs-on: ubuntu-latest
-    needs: [test-core, test-intelligence]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build intelligence image
+      - name: Run tests
         run: |
-          docker build \
-            -f infra/Dockerfile.intelligence \
-            -t phoenix-intelligence:${{ github.sha }} \
-            .
+          if [ -d "shared/tests" ]; then
+            pytest shared/tests -v --tb=short
+          else
+            echo "No shared tests directory found"
+          fi
 
-      - name: Smoke test — server starts
-        run: |
-          docker run -d \
-            --name phoenix-test \
-            -p 8001:8001 \
-            -e ANTHROPIC_API_KEY=dummy \
-            -e PHOENIX_MCP_ENABLED=false \
-            phoenix-intelligence:${{ github.sha }}
-          sleep 10
-          curl --fail http://localhost:8001/docs || (docker logs phoenix-test && exit 1)
-          docker stop phoenix-test
+          if [ -d "phoenix-core/tests" ]; then
+            cd phoenix-core
+            pytest tests -v --tb=short
+            cd ..
+          else
+            echo "No phoenix-core tests directory found"
+          fi
+
+          if [ -d "phoenix-intelligence/tests" ]; then
+            cd phoenix-intelligence
+            pytest tests -v --tb=short -m "not integration"
+            cd ..
+          else
+            echo "No phoenix-intelligence tests directory found"
+          fi

@@ -3,6 +3,7 @@
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import sys
 
 # Ensure phoenix-intelligence root is on sys.path for local execution
@@ -12,7 +13,7 @@ if str(_ROOT) not in sys.path:
 
 from fastapi import FastAPI
 from services.cache import Cache
-from services.config import LLMSettings, MCPSettings
+from services.config import IntelligenceSettings, LLMSettings, MCPSettings
 from services.knowledge.base import KnowledgeBase
 from services.llm.client import LLMClient
 from services.mcp.client import MCPClient
@@ -36,15 +37,34 @@ app = FastAPI(title="Phoenix Intelligence API", version="2.0.0")
 _cache = Cache()
 _knowledge_base = KnowledgeBase()
 
+
+def _provider_key_name(provider: str) -> str:
+    provider = provider.lower()
+    if provider == "openai":
+        return "OPENAI_API_KEY"
+    if provider == "gemini":
+        return "GOOGLE_API_KEY"
+    if provider == "ollama":
+        return ""
+    return "ANTHROPIC_API_KEY"
+
+
 _llm_settings = LLMSettings()
 _llm_client = None
-if _llm_settings.api_key:
+_provider_key = _provider_key_name(_llm_settings.provider)
+if _provider_key and os.environ.get(_provider_key, ""):
     _llm_client = LLMClient(_llm_settings)
-    logger.info("LLM client initialised (model=%s)", _llm_settings.model)
+    logger.info(
+        "LLM client initialised (provider=%s model=%s)",
+        _llm_settings.provider,
+        _llm_settings.model,
+    )
 else:
     logger.warning(
-        "ANTHROPIC_API_KEY is not set — automation test generation will fail. "
-        "Set the environment variable and restart the server."
+        "No API key found for provider '%s'. Automation test generation will fail. "
+        "Set %s and restart the server.",
+        _llm_settings.provider,
+        _provider_key or "the provider-specific key",
     )
 
 _mcp_settings = MCPSettings()
@@ -63,6 +83,7 @@ _agent_registry = AgentRegistry(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.post("/api/v1/tests/generate", response_model=TestGenerationResponse)
 def generate_tests(payload: TestGenerationRequest):
@@ -123,9 +144,7 @@ def analyze_failure(payload: FailureAnalysisRequest):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import os
     import uvicorn
-    from services.config import IntelligenceSettings
     from services.logger import configure_logging
 
     settings = IntelligenceSettings()

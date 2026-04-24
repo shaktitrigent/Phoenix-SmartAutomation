@@ -61,6 +61,7 @@ class BaseAgent(ABC):
         """Generate cache key"""
         import hashlib
         import json
+
         key_data = {k: v for k, v in kwargs.items()}
         key_str = json.dumps(key_data, sort_keys=True, default=str)
         return f"{prefix}:{hashlib.md5(key_str.encode()).hexdigest()}"

@@ -32,10 +32,27 @@ class _JsonFormatter(logging.Formatter):
             payload["exc_info"] = self.formatException(record.exc_info)
         # Copy any extra fields attached via `extra=`
         skip = {
-            "args", "created", "exc_info", "exc_text", "filename", "funcName",
-            "levelname", "levelno", "lineno", "message", "module", "msecs",
-            "msg", "name", "pathname", "process", "processName", "relativeCreated",
-            "stack_info", "thread", "threadName",
+            "args",
+            "created",
+            "exc_info",
+            "exc_text",
+            "filename",
+            "funcName",
+            "levelname",
+            "levelno",
+            "lineno",
+            "message",
+            "module",
+            "msecs",
+            "msg",
+            "name",
+            "pathname",
+            "process",
+            "processName",
+            "relativeCreated",
+            "stack_info",
+            "thread",
+            "threadName",
         }
         for key, value in record.__dict__.items():
             if key not in skip:

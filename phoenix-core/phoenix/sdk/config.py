@@ -34,6 +34,7 @@ def _load_toml(path: Path) -> Dict[str, Any]:
 
 class DatabaseConfig(BaseModel):
     """Database configuration"""
+
     url: str = Field(default="sqlite:///./phoenix.db", description="Database connection URL")
     pool_size: int = Field(default=5, description="Connection pool size")
     max_overflow: int = Field(default=10, description="Max overflow connections")
@@ -41,13 +42,17 @@ class DatabaseConfig(BaseModel):
 
 class IntelligenceConfig(BaseModel):
     """Phoenix intelligence API configuration"""
-    base_url: str = Field(default="http://localhost:8001/api/v1", description="Intelligence API base URL")
+
+    base_url: str = Field(
+        default="http://localhost:8001/api/v1", description="Intelligence API base URL"
+    )
     timeout: int = Field(default=30, description="Request timeout in seconds")
     retry_count: int = Field(default=3, description="Number of retries on failure")
 
 
 class CacheConfig(BaseModel):
     """Cache configuration"""
+
     type: str = Field(default="memory", description="Cache type: memory or redis")
     ttl: int = Field(default=3600, description="Time to live in seconds")
     url: Optional[str] = Field(default=None, description="Redis URL if type is redis")
@@ -55,24 +60,28 @@ class CacheConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     """Logging configuration"""
+
     level: str = Field(default="INFO", description="Logging level")
     format: str = Field(
-        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        description="Log format"
+        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s", description="Log format"
     )
 
 
 class ProjectConfig(BaseModel):
     """Project settings"""
+
     default_project: str = Field(default="default", description="Default project name")
     application_url: Optional[str] = Field(default=None, description="Default application URL")
-    manual_output_dir: str = Field(default="./manual_tests", description="Manual test output directory")
+    manual_output_dir: str = Field(
+        default="./manual_tests", description="Manual test output directory"
+    )
     test_output_dir: str = Field(default="./test_results", description="Test output directory")
     report_output_dir: str = Field(default="./reports", description="Report output directory")
 
 
 class PhoenixConfig(BaseModel):
     """Main Phoenix configuration"""
+
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     intelligence: IntelligenceConfig = Field(default_factory=IntelligenceConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
@@ -104,8 +113,7 @@ class PhoenixConfig(BaseModel):
             logging=LoggingConfig(
                 level=os.environ.get("PHOENIX_LOG_LEVEL", "INFO"),
                 format=os.environ.get(
-                    "PHOENIX_LOG_FORMAT",
-                    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                    "PHOENIX_LOG_FORMAT", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
                 ),
             ),
             project=ProjectConfig(
@@ -160,7 +168,7 @@ class PhoenixConfig(BaseModel):
             raw = getattr(config.project, attr, None)
             if raw and not Path(raw).is_absolute():
                 setattr(config.project, attr, str((base_dir / raw).resolve()))
-        
+
         # Override with environment variables if present
         if os.environ.get("PHOENIX_DATABASE_URL"):
             config.database.url = os.environ["PHOENIX_DATABASE_URL"]

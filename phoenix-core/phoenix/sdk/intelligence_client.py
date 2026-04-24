@@ -9,9 +9,9 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
 
 import requests
-from requests.exceptions import RequestException
 
 from phoenix.sdk.config import PhoenixConfig
 
@@ -31,9 +31,16 @@ class IntelligenceClient:
         self.retry_count = self.config.retry_count
 
     # ------------------------------------------------------------------
+    def _build_url(self, path: str) -> str:
+        """Join base URL and path without duplicating /api/v1 prefixes."""
+        if self.base_url.endswith("/api/v1") and path.startswith("/api/v1/"):
+            path = path[len("/api/v1") :]
+        return urljoin(f"{self.base_url}/", path.lstrip("/"))
+
+    # ------------------------------------------------------------------
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        last_error: Exception | None = None
+        url = self._build_url(path)
+        last_error: Optional[Exception] = None
 
         for attempt in range(self.retry_count):
             try:

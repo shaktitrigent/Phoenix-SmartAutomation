@@ -13,7 +13,7 @@ class CacheEntry:
     def __init__(self, value: Any, ttl: int = 3600):
         """
         Initialize cache entry.
-        
+
         Args:
             value: Cached value
             ttl: Time to live in seconds
@@ -36,7 +36,7 @@ class MemoryCache:
     def __init__(self, default_ttl: int = 3600):
         """
         Initialize memory cache.
-        
+
         Args:
             default_ttl: Default time to live in seconds
         """
@@ -46,20 +46,17 @@ class MemoryCache:
 
     def _make_key(self, *args, **kwargs) -> str:
         """Create a cache key from arguments"""
-        key_data = {
-            "args": args,
-            "kwargs": sorted(kwargs.items())
-        }
+        key_data = {"args": args, "kwargs": sorted(kwargs.items())}
         key_str = json.dumps(key_data, sort_keys=True, default=str)
         return hashlib.md5(key_str.encode()).hexdigest()
 
     def get(self, key: str) -> Optional[Any]:
         """
         Get value from cache.
-        
+
         Args:
             key: Cache key
-            
+
         Returns:
             Cached value or None if not found/expired
         """
@@ -67,17 +64,17 @@ class MemoryCache:
             entry = self._cache.get(key)
             if entry is None:
                 return None
-            
+
             if entry.is_expired():
                 del self._cache[key]
                 return None
-            
+
             return entry.value
 
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """
         Set value in cache.
-        
+
         Args:
             key: Cache key
             value: Value to cache
@@ -91,7 +88,7 @@ class MemoryCache:
     def delete(self, key: str) -> None:
         """
         Delete value from cache.
-        
+
         Args:
             key: Cache key
         """
@@ -111,15 +108,12 @@ class MemoryCache:
     def cleanup_expired(self) -> int:
         """
         Remove expired entries from cache.
-        
+
         Returns:
             Number of entries removed
         """
         with self._lock:
-            expired_keys = [
-                key for key, entry in self._cache.items()
-                if entry.is_expired()
-            ]
+            expired_keys = [key for key, entry in self._cache.items() if entry.is_expired()]
             for key in expired_keys:
                 del self._cache[key]
             return len(expired_keys)
@@ -131,7 +125,7 @@ class Cache:
     def __init__(self, cache_type: str = "memory", ttl: int = 3600, url: Optional[str] = None):
         """
         Initialize cache.
-        
+
         Args:
             cache_type: Cache type ('memory' or 'redis')
             ttl: Default time to live in seconds
@@ -139,7 +133,7 @@ class Cache:
         """
         self.cache_type = cache_type
         self.ttl = ttl
-        
+
         if cache_type == "memory":
             self._cache = MemoryCache(default_ttl=ttl)
         elif cache_type == "redis":
@@ -187,11 +181,13 @@ class Cache:
     def _make_test_intent_key(self, user_story: str, acceptance_criteria: list) -> str:
         """Create cache key for test intent"""
         import hashlib
+
         content = f"{user_story}:{json.dumps(sorted(acceptance_criteria), sort_keys=True)}"
         return f"test_intent:{hashlib.md5(content.encode()).hexdigest()}"
 
     def _make_locator_key(self, element_name: str, page_url: str) -> str:
         """Create cache key for locator"""
         import hashlib
+
         content = f"{element_name}:{page_url}"
         return f"locator:{hashlib.md5(content.encode()).hexdigest()}"

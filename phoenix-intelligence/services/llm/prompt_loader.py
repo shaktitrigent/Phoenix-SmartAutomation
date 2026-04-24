@@ -91,7 +91,7 @@ class PromptLoader:
 
             meta = yaml.safe_load(match.group(1)) or {}
             version = str(meta.get("version", path.stem))
-            body = raw[match.end():].strip()
+            body = raw[match.end() :].strip()
         else:
             version = path.stem
             body = raw.strip()
@@ -100,6 +100,7 @@ class PromptLoader:
     @staticmethod
     def _latest_version(versions: Dict[str, str]) -> str:
         """Return the semantically latest version key."""
+
         def _key(v: str):
             parts = re.split(r"[.\-]", v)
             return tuple(int(p) if p.isdigit() else p for p in parts)

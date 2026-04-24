@@ -16,7 +16,7 @@ class Database:
     def __init__(self, config: PhoenixConfig):
         """
         Initialize database connection.
-        
+
         Args:
             config: Phoenix configuration
         """
@@ -28,19 +28,13 @@ class Database:
     def _initialize(self):
         """Initialize database engine and session factory"""
         database_url = self.config.database.url
-        
+
         # SQLite-specific configuration
         connect_args = {}
         if database_url.startswith("sqlite"):
-            connect_args = {
-                "check_same_thread": False,
-                "timeout": 20
-            }
+            connect_args = {"check_same_thread": False, "timeout": 20}
             # Use StaticPool for SQLite to allow multiple connections
-            engine_kwargs = {
-                "poolclass": StaticPool,
-                "connect_args": connect_args
-            }
+            engine_kwargs = {"poolclass": StaticPool, "connect_args": connect_args}
         else:
             # PostgreSQL configuration
             engine_kwargs = {
@@ -50,11 +44,7 @@ class Database:
             }
 
         self.engine = create_engine(database_url, **engine_kwargs)
-        self.SessionLocal = sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=self.engine
-        )
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
     def create_tables(self):
         """Create all database tables"""
@@ -68,7 +58,7 @@ class Database:
     def get_session(self):
         """
         Get a database session context manager.
-        
+
         Usage:
             with db.get_session() as session:
                 # Use session
@@ -87,7 +77,7 @@ class Database:
     def get_session_direct(self) -> Session:
         """
         Get a database session directly (caller must manage lifecycle).
-        
+
         Returns:
             Database session
         """

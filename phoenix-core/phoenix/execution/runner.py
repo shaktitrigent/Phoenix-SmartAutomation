@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import subprocess
 import json
+import sys
 from datetime import datetime
 from phoenix.storage.models import ExecutionStatus
 
@@ -35,39 +36,41 @@ class TestRunner:
         Returns:
             Test execution results
         """
-        # Build pytest command
-        cmd = ["pytest", "-v", "--tb=short"]
-
-        # Add JSON report
         json_report_path = (
             self.test_output_dir / f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         )
-        cmd.extend(["--json-report", f"--json-report-file={json_report_path}"])
-
-        # Add HTML report
         html_report_dir = self.test_output_dir / "html_reports"
         html_report_dir.mkdir(exist_ok=True)
-        cmd.extend(["--html", str(html_report_dir / "report.html"), "--self-contained-html"])
+        html_report_path = html_report_dir / "report.html"
 
-        # Add test paths
-        cmd.extend(test_paths)
-
-        # Add additional options
-        if kwargs.get("parallel"):
-            cmd.append("-n")
-            cmd.append(str(kwargs.get("workers", "auto")))
-
-        if kwargs.get("browser"):
-            cmd.extend(["--browser", kwargs["browser"]])
+        # Build pytest command
+        # Run pytest through the current interpreter so Phoenix uses the
+        # same virtualenv and installed plugins as the CLI itself.
+        cmd = self._build_pytest_command(
+            test_paths=test_paths,
+            json_report_path=json_report_path,
+            html_report_path=html_report_path,
+            **kwargs,
+        )
 
         # Run pytest
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
 
+            if self._has_unrecognized_reporting_args(result.stderr):
+                fallback_cmd = self._build_pytest_command(
+                    test_paths=test_paths,
+                    json_report_path=json_report_path,
+                    html_report_path=html_report_path,
+                    include_reporting_args=False,
+                    **kwargs,
+                )
+                result = subprocess.run(
+                    fallback_cmd, capture_output=True, text=True, cwd=Path.cwd()
+                )
+
             # Parse results
-            execution_result = self._parse_results(
-                result, json_report_path, html_report_dir / "report.html"
-            )
+            execution_result = self._parse_results(result, json_report_path, html_report_path)
 
             return execution_result
 
@@ -80,6 +83,38 @@ class TestRunner:
                 "failed_tests": 0,
                 "skipped_tests": 0,
             }
+
+    def _build_pytest_command(
+        self,
+        test_paths: List[str],
+        json_report_path: Path,
+        html_report_path: Path,
+        include_reporting_args: bool = True,
+        **kwargs,
+    ) -> List[str]:
+        cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"]
+
+        if include_reporting_args:
+            cmd.extend(["--json-report", f"--json-report-file={json_report_path}"])
+            cmd.extend(["--html", str(html_report_path), "--self-contained-html"])
+
+        cmd.extend(test_paths)
+
+        if kwargs.get("parallel"):
+            cmd.append("-n")
+            cmd.append(str(kwargs.get("workers", "auto")))
+
+        if kwargs.get("browser"):
+            cmd.extend(["--browser", kwargs["browser"]])
+
+        return cmd
+
+    @staticmethod
+    def _has_unrecognized_reporting_args(stderr: str) -> bool:
+        lowered = stderr.lower()
+        return "unrecognized arguments:" in lowered and (
+            "--json-report" in lowered or "--html" in lowered
+        )
 
     def _parse_results(
         self, result: subprocess.CompletedProcess, json_report_path: Path, html_report_path: Path
@@ -119,23 +154,32 @@ class TestRunner:
         if execution_result["total_tests"] == 0:
             stdout_lines = result.stdout.split("\n")
             for line in stdout_lines:
-                if "passed" in line.lower() and "failed" in line.lower():
-                    # Try to extract numbers
-                    import re
-
-                    numbers = re.findall(r"\d+", line)
-                    if len(numbers) >= 3:
-                        execution_result["passed_tests"] = int(numbers[0])
-                        execution_result["failed_tests"] = (
-                            int(numbers[1]) if len(numbers) > 1 else 0
-                        )
-                        execution_result["skipped_tests"] = (
-                            int(numbers[2]) if len(numbers) > 2 else 0
-                        )
-                        execution_result["total_tests"] = (
-                            execution_result["passed_tests"]
-                            + execution_result["failed_tests"]
-                            + execution_result["skipped_tests"]
-                        )
+                summary = self._parse_stdout_summary(line)
+                if summary:
+                    execution_result["passed_tests"] = summary["passed"]
+                    execution_result["failed_tests"] = summary["failed"] + summary["error"]
+                    execution_result["skipped_tests"] = summary["skipped"]
+                    execution_result["total_tests"] = (
+                        execution_result["passed_tests"]
+                        + execution_result["failed_tests"]
+                        + execution_result["skipped_tests"]
+                    )
+                    break
 
         return execution_result
+
+    @staticmethod
+    def _parse_stdout_summary(line: str) -> Optional[Dict[str, int]]:
+        """Extract pytest outcome counts from a terminal summary line."""
+        import re
+
+        summary = {"passed": 0, "failed": 0, "skipped": 0, "error": 0}
+        matches = re.findall(r"(\d+)\s+(passed|failed|skipped|error|errors)", line.lower())
+        if not matches:
+            return None
+
+        for count, label in matches:
+            normalized = "error" if label == "errors" else label
+            summary[normalized] = int(count)
+
+        return summary

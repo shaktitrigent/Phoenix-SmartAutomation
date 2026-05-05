@@ -60,12 +60,25 @@ if _provider_key and os.environ.get(_provider_key, ""):
         _llm_settings.model,
     )
 else:
-    logger.warning(
-        "No API key found for provider '%s'. Automation test generation will fail. "
-        "Set %s and restart the server.",
-        _llm_settings.provider,
-        _provider_key or "the provider-specific key",
+    _banner = (
+        "\n"
+        "╔══════════════════════════════════════════════════════════╗\n"
+        "║  ⚠  LLM API KEY NOT CONFIGURED                          ║\n"
+        "╠══════════════════════════════════════════════════════════╣\n"
+        f"║  Provider : {_llm_settings.provider:<46} ║\n"
+        f"║  Required : {(_provider_key or 'N/A'):<46} ║\n"
+        "╠══════════════════════════════════════════════════════════╣\n"
+        "║  Without an API key:                                     ║\n"
+        "║  • Automation scripts will be heuristic stubs only       ║\n"
+        "║  • All generated output is fallback / placeholder        ║\n"
+        "╠══════════════════════════════════════════════════════════╣\n"
+        "║  Fix:  export ANTHROPIC_API_KEY=sk-ant-...               ║\n"
+        "║        export OPENAI_API_KEY=sk-...                      ║\n"
+        "║        export GOOGLE_API_KEY=AIza...                     ║\n"
+        "║  Then restart the phoenix-intelligence server.           ║\n"
+        "╚══════════════════════════════════════════════════════════╝\n"
     )
+    logger.warning(_banner)
 
 _mcp_settings = MCPSettings()
 _mcp_client = None
@@ -83,6 +96,28 @@ _agent_registry = AgentRegistry(
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint — reports LLM and MCP availability."""
+    llm_ok = _llm_client is not None
+    return {
+        "status": "ok" if llm_ok else "degraded",
+        "llm": {
+            "configured": llm_ok,
+            "provider": _llm_settings.provider,
+            "model": _llm_settings.model if llm_ok else None,
+            "warning": None if llm_ok else (
+                f"No API key for provider '{_llm_settings.provider}'. "
+                f"Set {_provider_key or 'the provider-specific env var'} and restart."
+            ),
+        },
+        "mcp": {
+            "enabled": _mcp_settings.enabled,
+            "configured": _mcp_client is not None,
+        },
+    }
 
 
 @app.post("/api/v1/tests/generate", response_model=TestGenerationResponse)

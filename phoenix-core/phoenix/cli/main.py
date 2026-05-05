@@ -1,7 +1,7 @@
 """CLI entry point"""
 
 import click
-from phoenix.cli.commands import generate, execute, init, run, report
+from phoenix.cli.commands import doctor, generate, execute, init, run, report
 
 
 @click.group()
@@ -16,6 +16,7 @@ def main(ctx, config, verbose):
 
 
 # Register commands
+main.add_command(doctor)
 main.add_command(init)
 main.add_command(generate)
 main.add_command(execute)

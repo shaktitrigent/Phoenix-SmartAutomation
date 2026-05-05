@@ -3,12 +3,458 @@
 import json
 import logging
 import re
-from typing import Dict, Any, List, Optional
+from enum import Enum
+from typing import Dict, Any, List, Optional, Tuple
 
 from services.agents.base import BaseAgent
 from services.llm.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Control taxonomy (RC-02)
+# ---------------------------------------------------------------------------
+
+class ControlType(Enum):
+    TEXT_INPUT = "text_input"
+    PASSWORD_INPUT = "password_input"
+    EMAIL_INPUT = "email_input"
+    CHECKBOX = "checkbox"
+    RADIO_BUTTON = "radio_button"
+    SELECT_DROPDOWN = "select_dropdown"
+    FILE_INPUT = "file_input"
+    NUMBER_INPUT = "number_input"
+    BUTTON = "button"
+    LINK = "link"
+    BROWSER_ALERT = "browser_alert"
+    BROWSER_CONFIRM = "browser_confirm"
+    BROWSER_PROMPT = "browser_prompt"
+    HOVER_TARGET = "hover_target"
+    DRAG_DROP = "drag_drop"
+    MULTI_TAB = "multi_tab"
+    DYNAMIC_CONTENT = "dynamic_content"
+    FORM_SUBMIT = "form_submit"
+    NAVIGATE = "navigate"
+    ASSERTION = "assertion"
+    WAIT = "wait"
+    UNKNOWN = "unknown"
+
+
+def _classify_control(criterion: str, application_url: Optional[str] = None) -> ControlType:
+    """Determine ControlType from criterion text and optional URL."""
+    lower = criterion.lower()
+    url_lower = (application_url or "").lower()
+
+    # URL-based hints
+    if "/checkboxes" in url_lower or "checkbox" in url_lower:
+        if any(k in lower for k in ["check", "tick", "uncheck", "untick"]):
+            return ControlType.CHECKBOX
+    if "/dropdown" in url_lower:
+        if any(k in lower for k in ["select", "choose", "pick", "option"]):
+            return ControlType.SELECT_DROPDOWN
+    if "/upload" in url_lower:
+        if any(k in lower for k in ["upload", "attach", "file"]):
+            return ControlType.FILE_INPUT
+    if "/javascript_alerts" in url_lower or "/alerts" in url_lower:
+        if any(k in lower for k in ["alert", "dialog", "confirm", "prompt", "dismiss", "accept"]):
+            if "confirm" in lower:
+                return ControlType.BROWSER_CONFIRM
+            if "prompt" in lower:
+                return ControlType.BROWSER_PROMPT
+            return ControlType.BROWSER_ALERT
+    if "/drag_and_drop" in url_lower or "/drag" in url_lower:
+        if any(k in lower for k in ["drag", "drop"]):
+            return ControlType.DRAG_DROP
+    if "/hovers" in url_lower or "/hover" in url_lower:
+        if any(k in lower for k in ["hover", "mouse over"]):
+            return ControlType.HOVER_TARGET
+
+    # Keyword-based classification
+    if any(k in lower for k in ["navigate", "go to", "open", "visit"]):
+        return ControlType.NAVIGATE
+    if any(k in lower for k in ["verify", "assert", "check that", "should", "confirm that", "ensure"]):
+        return ControlType.ASSERTION
+    if any(k in lower for k in ["wait for", "loading", "wait until"]):
+        return ControlType.WAIT
+    if "drag" in lower:
+        return ControlType.DRAG_DROP
+    if any(k in lower for k in ["hover", "mouse over"]):
+        return ControlType.HOVER_TARGET
+    if any(k in lower for k in ["upload", "attach"]) and any(k in lower for k in ["file", "document"]):
+        return ControlType.FILE_INPUT
+    if any(k in lower for k in ["dismiss", "accept", "ok"]) and any(k in lower for k in ["alert", "dialog", "popup"]):
+        if "confirm" in lower:
+            return ControlType.BROWSER_CONFIRM
+        return ControlType.BROWSER_ALERT
+    if "alert" in lower or "dialog" in lower:
+        return ControlType.BROWSER_ALERT
+    if any(k in lower for k in ["uncheck", "untick"]):
+        return ControlType.CHECKBOX
+    if any(k in lower for k in ["check", "tick"]) and any(k in lower for k in ["checkbox", "box"]):
+        return ControlType.CHECKBOX
+    if any(k in lower for k in ["select", "choose", "pick"]) and any(k in lower for k in ["dropdown", "option", "combobox", "list"]):
+        return ControlType.SELECT_DROPDOWN
+    if any(k in lower for k in ["select", "choose", "pick"]) and "option" in lower:
+        return ControlType.SELECT_DROPDOWN
+    if "password" in lower and any(k in lower for k in ["enter", "type", "fill", "input"]):
+        return ControlType.PASSWORD_INPUT
+    if "email" in lower and any(k in lower for k in ["enter", "type", "fill", "input"]):
+        return ControlType.EMAIL_INPUT
+    if any(k in lower for k in ["enter", "type", "fill", "input"]):
+        return ControlType.TEXT_INPUT
+    if any(k in lower for k in ["submit", "click submit", "press submit"]):
+        return ControlType.FORM_SUBMIT
+    if any(k in lower for k in ["click", "press", "tap"]) and "link" in lower:
+        return ControlType.LINK
+    if any(k in lower for k in ["click", "press", "tap", "button"]):
+        return ControlType.BUTTON
+    return ControlType.UNKNOWN
+
+
+def _extract_quoted_value(text: str) -> Optional[str]:
+    """Return the first quoted string found in text."""
+    m = re.search(r'["\']([^"\']+)["\']', text)
+    return m.group(1) if m else None
+
+
+def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
+    """Extract (field_label, fill_value) from fill-type criteria."""
+    # Pattern: action + field + value  e.g. "Enter username tomsmith"
+    # Try quoted value first
+    quoted = _extract_quoted_value(criterion)
+
+    # Remove action keyword at start
+    cleaned = re.sub(
+        r"^(?:enter|type|fill|input|provide)\s+",
+        "",
+        criterion.strip(),
+        flags=re.IGNORECASE,
+    )
+
+    # "in the X field" or "into the X field" → extract field from that
+    field_match = re.search(
+        r"(?:in|into|for)\s+(?:the\s+)?['\"]?([a-zA-Z\s]+?)['\"]?\s+(?:field|input|box|area)",
+        criterion,
+        re.IGNORECASE,
+    )
+    if field_match:
+        field = field_match.group(1).strip()
+        value = quoted or re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
+        return field.title(), value
+
+    # "with value X" / "as X" / "= X"
+    with_match = re.search(r"(?:with|as|value|=)\s+['\"]?([^'\"]+)['\"]?", cleaned, re.IGNORECASE)
+    if with_match:
+        value = with_match.group(1).strip()
+        field = re.sub(r"\s+(?:with|as|value|=).*$", "", cleaned, flags=re.IGNORECASE).strip()
+        return field.title(), value
+
+    # e.g. "username tomsmith" → first token = field, rest = value
+    parts = cleaned.split(None, 1)
+    if len(parts) == 2:
+        return parts[0].title(), quoted or parts[1]
+    if len(parts) == 1:
+        return parts[0].title(), quoted or "value"
+
+    return "Field", quoted or "value"
+
+
+def _extract_click_target(criterion: str) -> Tuple[str, str]:
+    """Return (role_hint, label) for click-type criteria.  role_hint ∈ {'button','link','text'}"""
+    lower = criterion.lower()
+    cleaned = re.sub(
+        r"^(?:click|press|tap|submit)\s+(?:the\s+|on\s+(?:the\s+)?)?",
+        "",
+        criterion.strip(),
+        flags=re.IGNORECASE,
+    )
+    quoted = _extract_quoted_value(criterion) or cleaned
+
+    if "button" in lower:
+        label = re.sub(r"\s+button.*$", "", cleaned, flags=re.IGNORECASE).strip()
+        return "button", label or quoted
+    if "link" in lower:
+        label = re.sub(r"\s+link.*$", "", cleaned, flags=re.IGNORECASE).strip()
+        return "link", label or quoted
+    return "text", quoted
+
+
+def _extract_select_option(criterion: str) -> Tuple[str, str]:
+    """Return (field_label, option_value) for select-type criteria."""
+    lower = criterion.lower()
+    # "Select Option 1 from dropdown"
+    from_match = re.search(r"(.+?)\s+from\s+(?:the\s+)?(.+)", criterion, re.IGNORECASE)
+    if from_match:
+        option = from_match.group(1)
+        option = re.sub(r"^(?:select|choose|pick)\s+", "", option, flags=re.IGNORECASE).strip()
+        field = from_match.group(2).strip().title()
+        return field, option
+
+    # "Select X" with no context
+    cleaned = re.sub(r"^(?:select|choose|pick)\s+", "", criterion.strip(), flags=re.IGNORECASE)
+    quoted = _extract_quoted_value(criterion)
+    return "Dropdown", quoted or cleaned
+
+
+def _extract_assertion_subject(criterion: str) -> str:
+    """Extract what should be visible/true from assertion criteria."""
+    lower = criterion.lower()
+    # Remove assertion keyword
+    cleaned = re.sub(
+        r"^(?:verify|assert|check that|should|confirm that|ensure|validate)\s+(?:that\s+|the\s+)?",
+        "",
+        criterion.strip(),
+        flags=re.IGNORECASE,
+    )
+    quoted = _extract_quoted_value(criterion)
+    if quoted:
+        return quoted
+    # "the Secure Area page is shown" → "Secure Area"
+    title_match = re.search(r"the\s+(.+?)\s+(?:page|section|area|screen)", cleaned, re.IGNORECASE)
+    if title_match:
+        return title_match.group(1).strip()
+    # "URL contains /secure" → /secure
+    url_match = re.search(r"url\s+(?:contains|includes|is|=)\s+['\"]?([^\s'\"]+)", lower)
+    if url_match:
+        return url_match.group(1).strip()
+    return cleaned[:60]
+
+
+def _criterion_to_playwright_lines(
+    criterion: str,
+    step_num: int,
+    application_url: Optional[str] = None,
+) -> List[str]:
+    """Map a single acceptance criterion → list of indented Playwright code lines."""
+    control = _classify_control(criterion, application_url)
+    lower = criterion.lower()
+    lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+
+    if control == ControlType.NAVIGATE:
+        url = _extract_quoted_value(criterion) or application_url or "https://example.com"
+        lines += [
+            f'    page.goto("{url}")',
+            '    page.wait_for_load_state("networkidle")',
+        ]
+
+    elif control == ControlType.TEXT_INPUT:
+        field, value = _extract_fill_target_and_value(criterion)
+        lines.append(f'    page.get_by_label("{field}").fill("{value}")')
+
+    elif control == ControlType.PASSWORD_INPUT:
+        _, value = _extract_fill_target_and_value(criterion)
+        lines.append(f'    page.get_by_label("Password").fill("{value}")')
+
+    elif control == ControlType.EMAIL_INPUT:
+        _, value = _extract_fill_target_and_value(criterion)
+        lines.append(f'    page.get_by_label("Email").fill("{value}")')
+
+    elif control == ControlType.CHECKBOX:
+        if any(k in lower for k in ["uncheck", "untick"]):
+            # "Uncheck checkbox 2" → nth(1)
+            num_match = re.search(r"\d+", criterion)
+            idx = int(num_match.group()) - 1 if num_match else 0
+            lines.append(f"    page.locator(\"input[type='checkbox']\").nth({idx}).uncheck()")
+        else:
+            # "Check checkbox 1"
+            num_match = re.search(r"\d+", criterion)
+            idx = int(num_match.group()) - 1 if num_match else 0
+            label_match = re.search(r'the\s+["\']?(.+?)["\']?\s+checkbox', criterion, re.IGNORECASE)
+            if label_match:
+                label = label_match.group(1).strip()
+                lines.append(f'    page.get_by_label("{label}").check()')
+            else:
+                lines.append(f"    page.locator(\"input[type='checkbox']\").nth({idx}).check()")
+
+    elif control == ControlType.RADIO_BUTTON:
+        field, _ = _extract_fill_target_and_value(criterion)
+        lines.append(f'    page.get_by_label("{field}").check()')
+
+    elif control == ControlType.SELECT_DROPDOWN:
+        field, option = _extract_select_option(criterion)
+        lines.append(f'    page.get_by_label("{field}").select_option("{option}")')
+
+    elif control == ControlType.FILE_INPUT:
+        lines.append("    page.locator('input[type=\"file\"]').set_input_files('test_file.txt')")
+
+    elif control == ControlType.BUTTON:
+        role, label = _extract_click_target(criterion)
+        if role == "button":
+            lines.append(f'    page.get_by_role("button", name="{label}").click()')
+        else:
+            lines.append(f'    page.get_by_text("{label}").click()')
+
+    elif control == ControlType.LINK:
+        _, label = _extract_click_target(criterion)
+        lines.append(f'    page.get_by_role("link", name="{label}").click()')
+
+    elif control == ControlType.FORM_SUBMIT:
+        lines.append('    page.get_by_role("button", name="Submit").click()')
+
+    elif control == ControlType.BROWSER_ALERT:
+        if "dismiss" in lower:
+            lines += [
+                '    page.on("dialog", lambda dialog: dialog.dismiss())',
+                "    # Trigger the alert",
+                '    page.get_by_role("button").first.click()',
+            ]
+        else:
+            lines += [
+                '    page.on("dialog", lambda dialog: dialog.accept())',
+                "    # Trigger the alert",
+                '    page.get_by_role("button").first.click()',
+            ]
+
+    elif control == ControlType.BROWSER_CONFIRM:
+        if "dismiss" in lower or "cancel" in lower:
+            lines.append('    page.on("dialog", lambda dialog: dialog.dismiss())')
+        else:
+            lines.append('    page.on("dialog", lambda dialog: dialog.accept())')
+
+    elif control == ControlType.BROWSER_PROMPT:
+        prompt_val = _extract_quoted_value(criterion) or "response text"
+        lines.append(f'    page.on("dialog", lambda dialog: dialog.accept("{prompt_val}"))')
+
+    elif control == ControlType.HOVER_TARGET:
+        cleaned = re.sub(r"^(?:hover|mouse over)\s+(?:over\s+)?(?:the\s+)?", "", criterion, flags=re.IGNORECASE).strip()
+        target = _extract_quoted_value(criterion) or cleaned or "element"
+        lines.append(f'    page.get_by_text("{target}").hover()')
+
+    elif control == ControlType.DRAG_DROP:
+        lines += [
+            "    source = page.locator('#column-a')",
+            "    target = page.locator('#column-b')",
+            "    source.drag_to(target)",
+        ]
+
+    elif control == ControlType.ASSERTION:
+        subject = _extract_assertion_subject(criterion)
+        if any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
+            url_frag = re.search(r"[/][\w/-]+", subject)
+            if url_frag:
+                lines.append(f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"))')
+            else:
+                lines.append(f'    expect(page).to_have_url(re.compile(r".*{re.escape(subject)}.*"))')
+        elif "title" in lower:
+            lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
+        else:
+            lines.append(f'    expect(page.get_by_text("{subject}")).to_be_visible()')
+
+    elif control == ControlType.WAIT:
+        lines.append('    page.wait_for_load_state("networkidle")')
+
+    else:
+        # Truly unrecognized — emit comment + warning
+        logger.warning("Criterion not recognized for heuristic mapping, using comment: %s", criterion)
+        lines.append(f"    # WARNING: Criterion not mapped — add Playwright action here: {criterion}")
+
+    lines.append("")
+    return lines
+
+
+def _derive_expected_result(criterion: str) -> str:
+    """Derive a specific expected result string for a manual test step (RC-03).
+
+    Never returns the generic placeholder 'Step completes as expected'.
+    """
+    lower = criterion.lower()
+
+    # Assertion / verification criteria — the criterion IS the expected result
+    if any(k in lower for k in ["verify", "assert", "check that", "should", "confirm that", "ensure", "validate"]):
+        cleaned = re.sub(
+            r"^(?:verify|assert|check that|should|confirm that|ensure|validate)\s+(?:that\s+|the\s+)?",
+            "",
+            criterion.strip(),
+            flags=re.IGNORECASE,
+        )
+        return cleaned.capitalize() if cleaned else criterion
+
+    # Fill / input actions
+    if any(k in lower for k in ["enter", "type", "fill", "input", "provide"]):
+        field, value = _extract_fill_target_and_value(criterion)
+        return f'"{field}" field contains the value "{value}"'
+
+    # Click / button actions
+    if any(k in lower for k in ["click", "press", "tap"]):
+        _, label = _extract_click_target(criterion)
+        if "button" in lower or "submit" in lower:
+            return f'"{label}" button is clicked and the action is triggered'
+        if "link" in lower:
+            return f'Clicking "{label}" navigates to the linked page'
+        return f'"{label}" element responds to the click interaction'
+
+    # Select / dropdown
+    if any(k in lower for k in ["select", "choose", "pick"]):
+        field, option = _extract_select_option(criterion)
+        return f'"{option}" is shown as the selected value in the "{field}" control'
+
+    # Checkbox
+    if any(k in lower for k in ["check", "tick"]) and "checkbox" in lower:
+        return "Checkbox is checked (contains a tick/checkmark)"
+    if any(k in lower for k in ["uncheck", "untick"]):
+        return "Checkbox is unchecked (tick/checkmark is removed)"
+
+    # File upload
+    if any(k in lower for k in ["upload", "attach"]):
+        return "File is attached and its filename appears in the upload control"
+
+    # Alert / dialog
+    if any(k in lower for k in ["alert", "dialog", "confirm", "prompt"]):
+        if "dismiss" in lower or "cancel" in lower:
+            return "Dialog/alert is dismissed and the page returns to its previous state"
+        return "Dialog/alert is accepted and the page responds accordingly"
+
+    # Navigation
+    if any(k in lower for k in ["navigate", "go to", "open", "visit"]):
+        url = _extract_quoted_value(criterion) or "the target URL"
+        return f"Page loads at {url} with visible content and no error messages"
+
+    # Hover
+    if any(k in lower for k in ["hover", "mouse over"]):
+        return "Hover tooltip or visual change is displayed for the target element"
+
+    # Drag & drop
+    if "drag" in lower:
+        return "Source element is moved to the target drop zone"
+
+    # Wait / loading
+    if any(k in lower for k in ["wait", "loading"]):
+        return "Page or element finishes loading and becomes interactive"
+
+    # Unknown — flag for manual review
+    return f"[NEEDS MANUAL REVIEW] Expected outcome after: {criterion}"
+
+
+def _derive_overall_expected_result(criteria: List[str], user_story: str) -> str:
+    """Synthesise a final overall expected result from all criteria (RC-03)."""
+    # Look for explicit assertion criteria to use as the final outcome
+    assertion_keywords = ("verify", "assert", "check that", "should", "confirm that", "ensure")
+    assertions = [
+        c for c in criteria
+        if any(c.lower().startswith(k) for k in assertion_keywords)
+    ]
+    if assertions:
+        subjects = [
+            re.sub(
+                r"^(?:verify|assert|check that|should|confirm that|ensure)\s+(?:that\s+)?",
+                "",
+                a,
+                flags=re.IGNORECASE,
+            ).strip()
+            for a in assertions
+        ]
+        return "All assertions pass: " + "; ".join(subjects)
+
+    # Derive from story text
+    story_clean = re.sub(
+        r"^(?:as a [^,]+,?\s*)?(?:i want to|i should be able to)\s+",
+        "",
+        user_story,
+        flags=re.IGNORECASE,
+    ).strip()
+    return f"User successfully {story_clean}" if story_clean else "All acceptance criteria are satisfied"
+
 
 _prompt_loader = PromptLoader()
 
@@ -158,26 +604,34 @@ class TestGeneratorAgent(BaseAgent):
         acceptance_criteria: List[str],
         risk_level: Optional[str],
     ) -> List[Dict[str, Any]]:
-        """Heuristic fallback when LLM is unavailable."""
+        """Heuristic fallback when LLM is unavailable.
+
+        Derives specific expected results for each step (RC-03) rather than
+        emitting the generic placeholder 'Step completes as expected'.
+        """
         steps = []
         if application_url:
             steps.append(
                 {
                     "step_number": 1,
                     "action": f"Navigate to {application_url}",
-                    "expected_result": "Page loads successfully",
+                    "expected_result": (
+                        f"Page at {application_url} loads successfully "
+                        "with visible content and no error messages"
+                    ),
                 }
             )
-        for _idx, criteria in enumerate(acceptance_criteria, 1):
+        for criterion in acceptance_criteria:
             steps.append(
                 {
                     "step_number": len(steps) + 1,
-                    "action": criteria,
-                    "expected_result": "Step completes as expected",
+                    "action": criterion,
+                    "expected_result": _derive_expected_result(criterion),
                 }
             )
 
         test_name = self._derive_short_name(user_story)
+        overall_result = _derive_overall_expected_result(acceptance_criteria, user_story)
         return [
             {
                 "name": f"TC-001: {test_name.replace('_', ' ').title()}",
@@ -185,7 +639,7 @@ class TestGeneratorAgent(BaseAgent):
                 "risk_level": risk_level or "regression",
                 "preconditions": "User has access to the application",
                 "steps": steps,
-                "expected_result": "All acceptance criteria are met",
+                "expected_result": overall_result,
                 "postconditions": "",
                 "tags": ["manual", "generated"],
             }
@@ -300,21 +754,43 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str],
         acceptance_criteria: List[str],
     ) -> str:
-        """Build a minimal valid Playwright test when LLM generation fails."""
-        url = application_url or "https://example.com"
-        criteria_comments = "\n".join(
-            f"    # Acceptance criterion: {c}" for c in acceptance_criteria
+        """Build a heuristic Playwright test from acceptance criteria when LLM fails.
+
+        Uses the criteria-to-action mapping layer (RC-01 / RC-02) to emit real
+        Playwright interactions rather than comment-only stubs.
+        """
+        logger.warning(
+            "⚠  LLM generation failed — building heuristic script from acceptance criteria. "
+            "Set ANTHROPIC_API_KEY (or OPENAI_API_KEY / GOOGLE_API_KEY) for real generation."
         )
-        return f'''import pytest
-from playwright.sync_api import Page, expect
+        url = application_url or "https://example.com"
 
+        body_lines: List[str] = [
+            "    # Navigate to target URL",
+            f'    page.goto("{url}")',
+            '    page.wait_for_load_state("networkidle")',
+            "",
+        ]
 
-def test_generated_automation_flow(page: Page):
-    """Fallback automation script for: {user_story}"""
-    page.goto("{url}")
-    expect(page).to_have_url("{url}")
-{criteria_comments or "    # Add assertions for the acceptance criteria here."}
-'''
+        for idx, criterion in enumerate(acceptance_criteria, 1):
+            body_lines.extend(
+                _criterion_to_playwright_lines(criterion, idx, application_url)
+            )
+
+        body = "\n".join(body_lines)
+
+        return (
+            "# WARNING: This is heuristic fallback output — LLM generation failed.\n"
+            "# Set ANTHROPIC_API_KEY (or OPENAI_API_KEY / GOOGLE_API_KEY) for LLM-powered scripts.\n"
+            "import re\n"
+            "import pytest\n"
+            "from playwright.sync_api import Page, expect\n"
+            "\n"
+            "\n"
+            "def test_generated_automation_flow(page: Page):\n"
+            f'    """Heuristic fallback script for: {user_story}"""\n'
+            f"{body}\n"
+        )
 
     # ------------------------------------------------------------------
     # Helpers

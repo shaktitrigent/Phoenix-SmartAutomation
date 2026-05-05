@@ -1,7 +1,9 @@
 """CLI commands"""
 
-import contextlib
+import shutil
+import sys
 from pathlib import Path
+from typing import List, Tuple
 
 import click
 from phoenix import PhoenixClient
@@ -17,6 +19,139 @@ from phoenix.cli.output import (
     print_warning,
 )
 from phoenix.sdk.config import PhoenixConfig
+
+
+def _clean_project_directory(
+    manual_dir: Path, test_dir: Path, verbose: bool = False
+) -> bool:
+    """Remove all generated artifacts from previous runs.
+
+    Deletes only the two generated-output directories, then re-creates them
+    as empty folders.  Returns True if cleanup was fully successful.
+    If any deletion fails the run is aborted — never proceed with a mixed
+    artifact set (RC-06).
+    """
+    dirs_to_clean = [manual_dir, test_dir]
+    failed: List[Tuple[Path, str]] = []
+
+    for dir_path in dirs_to_clean:
+        if not dir_path.exists():
+            continue
+        try:
+            shutil.rmtree(dir_path)
+            if verbose:
+                click.echo(f"  Cleaned: {dir_path}")
+        except OSError as exc:
+            failed.append((dir_path, str(exc)))
+
+    # Verify deletion succeeded
+    for dir_path in dirs_to_clean:
+        if dir_path.exists() and any(dir_path.iterdir()):
+            failed.append((dir_path, "Directory still contains files after rmtree"))
+
+    if failed:
+        click.echo("WARNING: Some files could not be removed:", err=True)
+        for path, reason in failed:
+            click.echo(f"  {path}: {reason}", err=True)
+        click.echo(
+            "Aborting to prevent stale artifact contamination. "
+            "Fix the above errors and try again.",
+            err=True,
+        )
+        return False
+
+    # Re-create empty directories for the generator
+    for dir_path in dirs_to_clean:
+        dir_path.mkdir(parents=True, exist_ok=True)
+        if verbose:
+            click.echo(f"  Re-created: {dir_path}")
+
+    return True
+
+
+@click.command()
+@click.pass_context
+def doctor(ctx):
+    """Check Phoenix configuration and connectivity (API keys, intelligence server, DB)."""
+    config_path = ctx.obj.get("config_path")
+    config = PhoenixConfig.load(config_path) if config_path else PhoenixConfig.from_env()
+
+    all_ok = True
+
+    # 1. LLM API key check
+    import os
+
+    _providers = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "gemini": "GOOGLE_API_KEY",
+        "ollama": None,
+    }
+    configured_providers = [
+        name for name, var in _providers.items() if var is None or os.environ.get(var, "")
+    ]
+    if configured_providers:
+        print_success(f"LLM API key(s) found for: {', '.join(configured_providers)}")
+    else:
+        all_ok = False
+        print_error("No LLM API key configured. Phoenix cannot generate real automation scripts.")
+        click.echo("  Set one of:")
+        click.echo("    export ANTHROPIC_API_KEY=sk-ant-...")
+        click.echo("    export OPENAI_API_KEY=sk-...")
+        click.echo("    export GOOGLE_API_KEY=AIza...")
+
+    # 2. Intelligence server connectivity + LLM status
+    import requests as _requests
+
+    intel_url = config.intelligence.base_url.rstrip("/")
+    health_url = f"{intel_url}/health"
+    try:
+        resp = _requests.get(health_url, timeout=5)
+        data = resp.json()
+        if data.get("llm", {}).get("configured"):
+            provider = data["llm"]["provider"]
+            model = data["llm"].get("model", "unknown")
+            print_success(f"Intelligence server: OK  (LLM={provider}/{model})")
+        else:
+            all_ok = False
+            warning = data.get("llm", {}).get("warning", "LLM not configured on server.")
+            print_warning(f"Intelligence server reachable but LLM not configured: {warning}")
+    except _requests.ConnectionError:
+        all_ok = False
+        print_error(
+            f"Cannot reach intelligence server at {intel_url}. "
+            "Start it with: cd phoenix-intelligence && uvicorn api.server:app --port 8001"
+        )
+    except Exception as exc:
+        all_ok = False
+        print_error(f"Intelligence server health check failed: {exc}")
+
+    # 3. Database write access
+    from phoenix.storage.database import check_db_write_access
+
+    db_url = config.database.url
+    if check_db_write_access(db_url):
+        print_success(f"Database write access: OK  ({db_url})")
+    else:
+        all_ok = False
+        print_error(f"Database not writable: {db_url}. Check permissions and disk space.")
+
+    # 4. pytest plugin availability
+    from phoenix.execution.runner import _preflight_check
+
+    missing = _preflight_check()
+    if missing:
+        all_ok = False
+        print_error(f"Missing pytest plugin(s): {', '.join(missing)}")
+        click.echo(f"  Fix: pip install {' '.join(missing)}")
+    else:
+        print_success("pytest plugins: pytest-json-report, pytest-html — installed")
+
+    click.echo("")
+    if all_ok:
+        print_success("Phoenix doctor: all checks passed.")
+    else:
+        print_warning("Phoenix doctor: some checks failed. See above for details.")
 
 
 @click.command()
@@ -120,17 +255,12 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
         raise click.Abort()
 
     if clean:
-        # Delete only generated artifacts (safe patterns)
         manual_dir = Path(client.config.project.manual_output_dir)
         test_dir = Path(client.config.project.test_output_dir)
-        manual_dir.mkdir(parents=True, exist_ok=True)
-        test_dir.mkdir(parents=True, exist_ok=True)
-        for p in manual_dir.glob("manual_test_*.md"):
-            with contextlib.suppress(Exception):
-                p.unlink()
-        for p in test_dir.glob("test_*.py"):
-            with contextlib.suppress(Exception):
-                p.unlink()
+        verbose = ctx.obj.get("verbose", False)
+        if not _clean_project_directory(manual_dir, test_dir, verbose=verbose):
+            sys.exit(1)
+        print_success("Clean completed — artifact directories are empty.")
 
     print_header("Generating test cases...")
 

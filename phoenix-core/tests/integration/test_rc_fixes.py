@@ -4,7 +4,6 @@ Each test is labelled with the RC number it verifies and is fully independent.
 Run with:  pytest tests/integration/test_rc_fixes.py -v
 """
 
-import os
 import shutil
 import sys
 import tempfile
@@ -17,24 +16,22 @@ import pytest
 # ---------------------------------------------------------------------------
 
 # Add phoenix-intelligence to sys.path so we can import test_generator directly
-_INTEL_ROOT = (
-    Path(__file__).resolve().parents[3] / "phoenix-intelligence"
-)
+_INTEL_ROOT = Path(__file__).resolve().parents[3] / "phoenix-intelligence"
 if str(_INTEL_ROOT) not in sys.path:
     sys.path.insert(0, str(_INTEL_ROOT))
 
-from services.agents.test_generator import (
+from services.agents.test_generator import (  # noqa: E402
     ControlType,
     _classify_control,
     _criterion_to_playwright_lines,
     _derive_expected_result,
-    _derive_overall_expected_result,
 )
 
 
 # ---------------------------------------------------------------------------
 # RC-01: Fallback is not the default — criteria produce real Playwright code
 # ---------------------------------------------------------------------------
+
 
 class TestRC01FallbackCriteriaMapped:
     """RC-01: criteria-to-action mapper generates real Playwright interactions."""
@@ -74,6 +71,7 @@ class TestRC01FallbackCriteriaMapped:
 
     def test_script_is_valid_python(self):
         import ast
+
         script = self._build_script()
         ast.parse(script)  # raises SyntaxError if invalid
 
@@ -89,6 +87,7 @@ class TestRC01FallbackCriteriaMapped:
 # ---------------------------------------------------------------------------
 # RC-02: Control-specific logic — each control type maps to the right method
 # ---------------------------------------------------------------------------
+
 
 class TestRC02ControlClassification:
     """RC-02: correct ControlType is inferred from criterion text and URL."""
@@ -106,7 +105,10 @@ class TestRC02ControlClassification:
         assert ct == ControlType.FILE_INPUT
 
     def test_alert_classified(self):
-        ct = _classify_control("Click the JS Alert button and dismiss the alert", "https://example.com/javascript_alerts")
+        ct = _classify_control(
+            "Click the JS Alert button and dismiss the alert",
+            "https://example.com/javascript_alerts",
+        )
         assert ct in (ControlType.BROWSER_ALERT, ControlType.BUTTON)
 
     def test_drag_drop_classified(self):
@@ -114,18 +116,24 @@ class TestRC02ControlClassification:
         assert ct == ControlType.DRAG_DROP
 
     def test_fill_generates_check_for_checkbox(self):
-        lines = _criterion_to_playwright_lines("Check checkbox 1", 1, "https://example.com/checkboxes")
+        lines = _criterion_to_playwright_lines(
+            "Check checkbox 1", 1, "https://example.com/checkboxes"
+        )
         code = "\n".join(lines)
         assert ".check()" in code, f"Expected .check() in: {code}"
         assert ".fill(" not in code
 
     def test_fill_generates_select_option_for_dropdown(self):
-        lines = _criterion_to_playwright_lines("Select Option 1 from dropdown", 1, "https://example.com/dropdown")
+        lines = _criterion_to_playwright_lines(
+            "Select Option 1 from dropdown", 1, "https://example.com/dropdown"
+        )
         code = "\n".join(lines)
         assert "select_option(" in code, f"Expected select_option() in: {code}"
 
     def test_file_upload_generates_set_input_files(self):
-        lines = _criterion_to_playwright_lines("Upload a test file", 1, "https://example.com/upload")
+        lines = _criterion_to_playwright_lines(
+            "Upload a test file", 1, "https://example.com/upload"
+        )
         code = "\n".join(lines)
         assert "set_input_files(" in code, f"Expected set_input_files() in: {code}"
 
@@ -138,6 +146,7 @@ class TestRC02ControlClassification:
 # ---------------------------------------------------------------------------
 # RC-03: Manual test quality — no "Step completes as expected" placeholder
 # ---------------------------------------------------------------------------
+
 
 class TestRC03ManualTestQuality:
     """RC-03: derived expected results are specific, never the generic placeholder."""
@@ -167,18 +176,14 @@ class TestRC03ManualTestQuality:
         for tc in tests:
             for step in tc.get("steps", []):
                 er = step.get("expected_result", "").lower()
-                assert self.FORBIDDEN_PHRASE not in er, (
-                    f"Generic placeholder found in step: {step}"
-                )
+                assert self.FORBIDDEN_PHRASE not in er, f"Generic placeholder found in step: {step}"
 
     def test_each_expected_result_is_specific(self):
         tests = self._fallback_tests()
         for tc in tests:
             for step in tc.get("steps", []):
                 er = step.get("expected_result", "")
-                assert len(er) >= 20, (
-                    f"Expected result too short (likely a placeholder): '{er}'"
-                )
+                assert len(er) >= 20, f"Expected result too short (likely a placeholder): '{er}'"
 
     def test_overall_expected_result_is_not_generic(self):
         tests = self._fallback_tests()
@@ -217,26 +222,27 @@ class TestRC03ManualTestQuality:
 # RC-04: Execute pipeline — preflight check and exit-code handling
 # ---------------------------------------------------------------------------
 
+
 class TestRC04ExecutePipeline:
     """RC-04: missing plugins and fatal pytest exit codes are surfaced clearly."""
 
     def test_preflight_check_returns_list(self):
         from phoenix.execution.runner import _preflight_check
+
         missing = _preflight_check()
         assert isinstance(missing, list)
 
     def test_preflight_result_names_missing_plugins(self):
         """If plugins are missing, names must be 'pytest-json-report' / 'pytest-html'."""
         from phoenix.execution.runner import _preflight_check
+
         missing = _preflight_check()
         for name in missing:
-            assert name in ("pytest-json-report", "pytest-html"), (
-                f"Unexpected plugin name: {name}"
-            )
+            assert name in ("pytest-json-report", "pytest-html"), f"Unexpected plugin name: {name}"
 
     def test_runner_reports_error_when_plugins_missing(self, monkeypatch):
         """If preflight fails, run_tests must return status=error, not '0 passed'."""
-        from phoenix.execution.runner import TestRunner, _preflight_check
+        from phoenix.execution.runner import TestRunner
 
         monkeypatch.setattr(
             "phoenix.execution.runner._preflight_check",
@@ -264,9 +270,7 @@ class TestRC04ExecutePipeline:
 
         runner = TestRunner(test_output_dir=str(tmp_path))
         result = runner.run_tests(["test_dummy.py"])
-        assert result["status"] == "error", (
-            "Exit code 4 must not be silently treated as '0 passed'"
-        )
+        assert result["status"] == "error", "Exit code 4 must not be silently treated as '0 passed'"
         assert result.get("total_tests", 0) == 0
 
 
@@ -274,17 +278,20 @@ class TestRC04ExecutePipeline:
 # RC-05: SQLite healthcheck — write access is verified before use
 # ---------------------------------------------------------------------------
 
+
 class TestRC05SQLiteHealthcheck:
     """RC-05: DB write access is checked; failure degrades to JSON output."""
 
     def test_valid_temp_db_passes_healthcheck(self):
         from phoenix.storage.database import check_db_write_access
+
         with tempfile.TemporaryDirectory() as tmp:
             url = f"sqlite:///{tmp}/test.db"
             assert check_db_write_access(url) is True
 
     def test_nonexistent_dir_healthcheck_creates_parent_or_fails_gracefully(self):
         from phoenix.storage.database import check_db_write_access
+
         with tempfile.TemporaryDirectory() as tmp:
             url = f"sqlite:///{tmp}/subdir/test.db"
             result = check_db_write_access(url)
@@ -293,6 +300,7 @@ class TestRC05SQLiteHealthcheck:
 
     def test_memory_db_always_passes(self):
         from phoenix.storage.database import check_db_write_access
+
         assert check_db_write_access("sqlite:///:memory:") is True
 
     def test_db_unavailable_flag_set_on_bad_path(self, monkeypatch):
@@ -301,6 +309,7 @@ class TestRC05SQLiteHealthcheck:
         monkeypatch.setattr(db_module, "check_db_write_access", lambda url: False)
 
         from phoenix.sdk.config import PhoenixConfig
+
         config = PhoenixConfig.from_env()
 
         db = db_module.Database.__new__(db_module.Database)
@@ -329,6 +338,7 @@ class TestRC05SQLiteHealthcheck:
 # ---------------------------------------------------------------------------
 # RC-06: --clean flag — verified deletion, abort on failure
 # ---------------------------------------------------------------------------
+
 
 class TestRC06CleanFlag:
     """RC-06: clean deletes artifacts, re-creates empty dirs, aborts if deletion fails."""
@@ -390,6 +400,7 @@ class TestRC06CleanFlag:
 # ---------------------------------------------------------------------------
 # RC-07: API key validation — loud errors, no silent fallback
 # ---------------------------------------------------------------------------
+
 
 class TestRC07APIKeyValidation:
     """RC-07: missing API key produces loud errors and marks output as fallback."""

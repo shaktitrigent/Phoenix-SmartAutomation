@@ -27,19 +27,43 @@ import re as re_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from phoenix.execution.reliability import apply_reliability_pipeline
 from phoenix.storage.models import TestType
 
 # Title-case two-or-more word pattern used to detect person display names
 _PERSON_NAME_RE = re_module.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$")
 
 # Words that strongly indicate a page heading rather than arbitrary body text
-_HEADING_WORDS = frozenset({
-    "dashboard", "home", "profile", "settings", "admin", "reports",
-    "search", "results", "welcome", "overview", "summary", "details",
-    "history", "inbox", "queue", "employees", "candidates", "leave",
-    "recruitment", "performance", "time", "attendance", "payroll",
-    "claims", "buzz", "directory",
-})
+_HEADING_WORDS = frozenset(
+    {
+        "dashboard",
+        "home",
+        "profile",
+        "settings",
+        "admin",
+        "reports",
+        "search",
+        "results",
+        "welcome",
+        "overview",
+        "summary",
+        "details",
+        "history",
+        "inbox",
+        "queue",
+        "employees",
+        "candidates",
+        "leave",
+        "recruitment",
+        "performance",
+        "time",
+        "attendance",
+        "payroll",
+        "claims",
+        "buzz",
+        "directory",
+    }
+)
 
 
 class AutomationTestGenerator:
@@ -109,9 +133,13 @@ class AutomationTestGenerator:
         try:
             ast.parse(normalised)
         except SyntaxError as exc:
+            # Dump the broken script next to the output dir so it can be inspected
+            dump_path = self.output_dir / f"_syntax_error_dump_{idx}.py"
+            dump_path.write_text(normalised, encoding="utf-8")
             raise RuntimeError(
                 f"Generated script has a syntax error: {exc}\n\n"
-                "The LLM may have returned incomplete code. Try regenerating."
+                f"Broken script saved to: {dump_path}\n"
+                "Open that file to inspect what the LLM returned."
             ) from exc
 
         safe_name = _slugify(test.get("name", f"test_{idx}"))
@@ -127,6 +155,9 @@ class AutomationTestGenerator:
     @staticmethod
     def _normalise(code: str) -> str:
         """Apply all fix passes in order, then scan for residual anti-patterns."""
+        # --- Strip markdown code fences the LLM may have wrapped the script in ---
+        code = _strip_code_fences(code)
+
         # --- Existing fixes ---
         code = _fix_url_containing(code)
         code = _fix_wait_for_selector(code)
@@ -142,6 +173,9 @@ class AutomationTestGenerator:
         # --- Import completion (must run after all code transforms) ---
         code = _ensure_imports(code)
 
+        # --- Reliability pipeline: assertion fixes, dynamic waits, linter warnings ---
+        code = apply_reliability_pipeline(code)
+
         # --- Anti-pattern scanner: warn about anything not auto-fixed ---
         code = _inject_locator_warnings(code)
 
@@ -151,6 +185,14 @@ class AutomationTestGenerator:
 # ===========================================================================
 # Existing fix functions
 # ===========================================================================
+
+
+def _strip_code_fences(code: str) -> str:
+    """Remove markdown ```python ... ``` fences an LLM may wrap the script in."""
+    code = code.strip()
+    code = re_module.sub(r"^```[a-zA-Z]*\r?\n?", "", code)
+    code = re_module.sub(r"\r?\n?```\s*$", "", code)
+    return code.strip()
 
 
 def _fix_url_containing(code: str) -> str:
@@ -219,7 +261,7 @@ def _fix_ambiguous_get_by_text_in_assertion(code: str) -> str:
     """
     pattern = re_module.compile(
         r'expect\(\s*page\.get_by_text\((["\'])([^"\']+)\1\)\s*\)'
-        r'(\s*\.(?:to_be_visible|to_have_text|to_be_hidden|to_contain_text)\([^)]*\))'
+        r"(\s*\.(?:to_be_visible|to_have_text|to_be_hidden|to_contain_text)\([^)]*\))"
     )
 
     def replacer(m: re_module.Match) -> str:
@@ -230,10 +272,8 @@ def _fix_ambiguous_get_by_text_in_assertion(code: str) -> str:
         # Everything else (error messages, labels, status text) gets .first —
         # safe, non-breaking, and doesn't misclassify dynamic content as headings.
         if text.lower().strip() in _HEADING_WORDS:
-            return (
-                f'expect(page.get_by_role("heading", name={quote}{text}{quote})){suffix}'
-            )
-        return f'expect(page.get_by_text({quote}{text}{quote}).first){suffix}'
+            return f'expect(page.get_by_role("heading", name={quote}{text}{quote})){suffix}'
+        return f"expect(page.get_by_text({quote}{text}{quote}).first){suffix}"
 
     return pattern.sub(replacer, code)
 
@@ -257,10 +297,10 @@ def _fix_dynamic_person_name_in_locator(code: str) -> str:
     )
 
     _STABLE_USER_MENU_LOCATOR = (
-        'page.locator('
-        '"button[aria-haspopup], [class*=\'userdropdown\'], '
-        '[class*=\'user-dropdown\'], [class*=\'user-menu\']"'
-        ').first'
+        "page.locator("
+        "\"button[aria-haspopup], [class*='userdropdown'], "
+        "[class*='user-dropdown'], [class*='user-menu']\""
+        ").first"
     )
 
     def replacer(m: re_module.Match) -> str:
@@ -284,7 +324,7 @@ def _fix_get_by_text_click_strict_mode(code: str) -> str:
     pattern = re_module.compile(
         r'(\.get_by_text\(["\'][^"\']+["\']\))(?!\.first|\.nth\(|\.filter\()\.click\(\)'
     )
-    return pattern.sub(r'\1.first.click()', code)
+    return pattern.sub(r"\1.first.click()", code)
 
 
 def _fix_dialog_on_to_once(code: str) -> str:
@@ -308,7 +348,7 @@ def _fix_dialog_on_to_once(code: str) -> str:
 # Each entry: (pattern, human-readable warning message)
 _ANTI_PATTERNS: List[tuple] = [
     (
-        re_module.compile(r'expect\(.*\.get_by_text\('),
+        re_module.compile(r"expect\(.*\.get_by_text\("),
         "get_by_text() inside expect() may cause strict-mode violation — "
         "use get_by_role('heading') or scope to a container",
     ),
@@ -318,7 +358,7 @@ _ANTI_PATTERNS: List[tuple] = [
         "add .first or scope to a container",
     ),
     (
-        re_module.compile(r'\.nth\(\d+\)'),
+        re_module.compile(r"\.nth\(\d+\)"),
         ".nth(N) is position-based and breaks when page layout changes — "
         "prefer .filter(has_text=...) or a semantic locator",
     ),
@@ -356,11 +396,15 @@ def _inject_locator_warnings(code: str) -> str:
 
     border = "# " + "─" * 66
     block = (
-        border + "\n"
-        + _SENTINEL + " — review before merging to CI\n"
-        + border + "\n"
+        border
+        + "\n"
+        + _SENTINEL
+        + " — review before merging to CI\n"
+        + border
+        + "\n"
         + "".join(f"#    • {w}\n" for w in triggered)
-        + border + "\n"
+        + border
+        + "\n"
     )
 
     lines = code.splitlines(keepends=True)

@@ -227,13 +227,28 @@ expect(page.get_by_role("navigation", name="Sidebar")).to_be_visible()
 
 ## 4. Timeouts — Configuration and Overrides
 
-### Default Timeouts
+### Default Timeouts (Production-Tuned)
 
-| Scope              | Default    | What it covers                                    |
+> **IMPORTANT**: Demo/staging sites are significantly slower than production. Always use these
+> minimums when generating scripts for external test applications.
+
+| Scope              | Minimum    | What it covers                                    |
 |--------------------|------------|---------------------------------------------------|
-| Action timeout     | 30s        | `.click()`, `.fill()`, `.check()`, etc.           |
-| Assertion timeout  | 5s         | `expect()` retries                                |
-| Navigation timeout | 30s        | `.goto()`, `.wait_for_url()`                      |
+| Navigation timeout | 120,000ms  | `.goto()`, `page.wait_for_url()`                  |
+| Action timeout     | 30,000ms   | `.click()`, `.fill()`, `.check()`, etc.           |
+| Assertion timeout  | 10,000ms   | `expect()` retries                                |
+
+**Never use the Playwright default 30s for `page.goto()`** — demo sites like OrangeHRM, Demoblaze,
+and Maxima Apparel routinely take 30–90 seconds to load.
+
+```python
+# CORRECT — always pass explicit timeout to goto() for demo/staging apps
+page.goto(base_url, timeout=120_000)
+
+# CORRECT — override default timeouts at test start for slow apps
+page.set_default_timeout(30_000)
+page.set_default_navigation_timeout(120_000)
+```
 
 ### Per-Action Override
 
@@ -307,12 +322,22 @@ page.wait_for_load_state("networkidle")
 |----------------------|------------------------------------------------------------------|
 | `domcontentloaded`   | You only need the HTML/DOM; don't care about images/fonts        |
 | `load`               | Default — appropriate for most navigation                        |
-| `networkidle`        | SPA that fires many API calls after initial load                 |
+| `networkidle`        | SPA that fires many API calls after initial load — **use sparingly** |
 
 **Rules:**
 - `page.goto()` waits for `load` by default — you rarely need to add an explicit load state wait after goto.
-- Use `networkidle` sparingly — it can cause flakiness if the page has polling requests or websockets.
+- **NEVER use `networkidle` on sites with continuous background requests** (Demoblaze, sites with analytics, websockets) — the state is never reached and the test hangs.
 - Prefer asserting on visible content over waiting for load states.
+
+```python
+# WRONG — Demoblaze makes continuous background requests; networkidle never fires
+page.wait_for_load_state("networkidle")
+
+# CORRECT — wait for the specific element you need
+expect(page.get_by_role("link", name="Add to cart")).to_be_visible()
+# or wait for navigation to complete
+page.wait_for_url("**/cart**")
+```
 
 ---
 

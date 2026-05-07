@@ -340,6 +340,147 @@ row.get_by_role("cell").nth(2)
 
 ---
 
+## Real-World Failure Patterns (From Production Test Reports)
+
+These patterns caused failures across SauceDemo, OrangeHRM, Maxima Apparel, DemoQA, and Demoblaze.
+**Never generate these:**
+
+### 1. Bare `locator("form")` — matches hidden localization forms
+
+```python
+# WRONG — matched hidden #HeaderCountryMobileForm instead of Contact Us form
+page.locator("form").first.fill(...)
+
+# CORRECT — scope by form action or proximity to a heading
+page.locator("form[action*='contact']").fill(...)
+page.get_by_role("heading", name="Contact Us").locator("..").locator("form")
+```
+
+### 2. `input[type='search']` without scoping — matches hidden country filter
+
+```python
+# WRONG — matched hidden #country-filter-input
+page.locator("input[type='search']").fill("keyword")
+
+# CORRECT — scope to the visible header
+page.locator("header input[type='search']").fill("keyword")
+page.get_by_placeholder("Search").fill("keyword")
+```
+
+### 3. CSS-class-only dropdown selector — matches hidden wrapper
+
+```python
+# WRONG — matched hidden div.disclosure__list-wrapper (Shopify)
+page.locator(".country-selector").click()
+
+# CORRECT — click the trigger button, then interact with options
+page.locator("button[aria-controls='country-selector']").click()
+page.get_by_role("option", name="United States").click()
+```
+
+### 4. `get_by_label` when field has no `<label>` (OrangeHRM)
+
+```python
+# WRONG — OrangeHRM username field has no <label>, only a placeholder
+page.get_by_label("Username").fill("Admin")
+
+# CORRECT
+page.get_by_placeholder("Username").fill("Admin")
+page.locator("input[name='username']").fill("Admin")
+```
+
+### 5. `get_by_label` for custom Vue/React dropdowns
+
+```python
+# WRONG — OrangeHRM uses custom Vue dropdowns, not native <select>
+page.get_by_label("Leave Type").select_option("Annual")
+
+# CORRECT — click trigger to open, then select option
+page.get_by_role("combobox", name="Leave Type").click()
+page.get_by_role("option", name="Annual Leave").click()
+```
+
+### 6. `get_by_role("link", name="2")` for cart badge count
+
+```python
+# WRONG — cart badge count is display-only text, not a link name
+page.get_by_role("link", name="2").click()
+
+# CORRECT — target the cart link element directly
+page.locator(".shopping_cart_link").click()
+page.locator("[data-test='shopping-cart-link']").click()
+```
+
+### 7. `get_by_role("heading")` for non-heading elements
+
+```python
+# WRONG — SauceDemo "Products" is a <span class="title">, not a heading
+page.get_by_role("heading", name="Products")
+
+# CORRECT
+page.locator(".inventory_list")  # assert container is visible
+page.locator("[data-test='inventory-container']")
+page.locator(".title").filter(has_text="Products")
+```
+
+### 8. Strict mode violation from non-unique class selectors
+
+```python
+# WRONG — .inventory_item_img matches both the <div> and the <img>
+page.locator(".inventory_item").first.locator(".inventory_item_img").click()
+
+# CORRECT — use a unique data-test attribute
+page.locator("[data-test='item-4-title-link']").click()
+```
+
+---
+
+## Framework-Specific Patterns
+
+### Shopify / Liquid Sites (Maxima Apparel)
+- Hidden localization forms (`#HeaderCountryMobileForm`) exist alongside visible forms — always scope by `form[action*='contact']` or by proximity to headings.
+- Country/region selectors use Shopify's disclosure pattern: there is a hidden `div.disclosure__list-wrapper` and a visible trigger `<button>`. Always click the `<button>` trigger.
+- Search bar: scope to `header` to avoid matching the hidden country-filter input.
+
+### OrangeHRM (Vue.js framework)
+- Login fields: use `input[name='username']` and `input[name='password']` — no `<label>` elements exist.
+- All dropdowns are custom Vue components: use `get_by_role("combobox", name=...)` then `get_by_role("option", name=...)`.
+- User menu: use `page.locator(".oxd-userdropdown-tab")` — display name is dynamic and must NOT be used in locators.
+- Sub-navigation: always click the parent menu item before clicking child items.
+- Date pickers: click `input.oxd-date-input` first to open the calendar, then select the date.
+
+### SauceDemo (React)
+- Page title "Products" is a `<span class="title">`, not a heading element.
+- Cart icon: use `.shopping_cart_link` or `[data-test='shopping-cart-link']`.
+- Product items: use `[data-test='item-{id}-title-link']` for unique selection.
+- Sort dropdown: use `[data-test='product-sort-container']`.
+
+### DemoQA
+- Frames: many elements are inside `<iframe>` — use `page.frame_locator(...)` first.
+- Date pickers: use `page.locator("input#dateOfBirth")` and `.fill()` with keyboard submission.
+- Upload: use `page.locator("#uploadFile").set_input_files(path)`.
+
+---
+
+## Visibility-First Rules
+
+**Always target visible elements.** Before using a locator, consider:
+
+1. Is the element visible in the current DOM state? Use `.filter(has_text=...)` to exclude hidden duplicates.
+2. Is there a hidden sibling with the same selector? Scope to the nearest visible parent (`header`, `main`, `[role="dialog"]`).
+3. Does the element require a trigger action first? (dropdown open, accordion expand, menu click)
+
+```python
+# Scope to visible parent — prevents matching hidden duplicates
+page.locator("main input[type='search']").fill("query")
+page.locator("header").get_by_role("button", name="Search").click()
+
+# Filter out invisible elements
+page.locator("form").filter(has=page.get_by_role("heading", name="Contact")).fill(...)
+```
+
+---
+
 ## Rules for AI Code Generation
 
 When generating or modifying Playwright locators, follow these rules strictly:

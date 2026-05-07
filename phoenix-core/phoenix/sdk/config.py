@@ -46,7 +46,7 @@ class IntelligenceConfig(BaseModel):
     base_url: str = Field(
         default="http://localhost:8001/api/v1", description="Intelligence API base URL"
     )
-    timeout: int = Field(default=30, description="Request timeout in seconds")
+    timeout: int = Field(default=300, description="Request timeout in seconds (LLM generation can take up to 5 min)")
     retry_count: int = Field(default=3, description="Number of retries on failure")
 
 
@@ -102,7 +102,7 @@ class PhoenixConfig(BaseModel):
                     "PHOENIX_INTELLIGENCE_URL",
                     os.environ.get("PHOENIX_MCP_SERVER_URL", "http://localhost:8001/api/v1"),
                 ),
-                timeout=int(os.environ.get("PHOENIX_INTELLIGENCE_TIMEOUT", "30")),
+                timeout=int(os.environ.get("PHOENIX_INTELLIGENCE_TIMEOUT", "300")),
                 retry_count=int(os.environ.get("PHOENIX_INTELLIGENCE_RETRY_COUNT", "3")),
             ),
             cache=CacheConfig(

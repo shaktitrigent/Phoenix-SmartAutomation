@@ -170,8 +170,8 @@ class TestRunner:
                 summary = json_data.get("summary", {})
                 execution_result["total_tests"] = summary.get("total", 0)
                 execution_result["passed_tests"] = summary.get("passed", 0)
-                execution_result["failed_tests"] = (
-                    summary.get("failed", 0) + summary.get("error", 0)
+                execution_result["failed_tests"] = summary.get("failed", 0) + summary.get(
+                    "error", 0
                 )
                 execution_result["skipped_tests"] = summary.get("skipped", 0)
             except Exception:
@@ -187,7 +187,9 @@ class TestRunner:
                     for val, label in numbers:
                         counts[label] = counts.get(label, 0) + int(val)
                     execution_result["passed_tests"] = counts.get("passed", 0)
-                    execution_result["failed_tests"] = counts.get("failed", 0) + counts.get("error", 0)
+                    execution_result["failed_tests"] = counts.get("failed", 0) + counts.get(
+                        "error", 0
+                    )
                     execution_result["skipped_tests"] = counts.get("skipped", 0)
                     execution_result["total_tests"] = sum(counts.values())
                     break

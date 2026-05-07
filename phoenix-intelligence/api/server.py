@@ -108,7 +108,9 @@ def health_check():
             "configured": llm_ok,
             "provider": _llm_settings.provider,
             "model": _llm_settings.model if llm_ok else None,
-            "warning": None if llm_ok else (
+            "warning": None
+            if llm_ok
+            else (
                 f"No API key for provider '{_llm_settings.provider}'. "
                 f"Set {_provider_key or 'the provider-specific env var'} and restart."
             ),

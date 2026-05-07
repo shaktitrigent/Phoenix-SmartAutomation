@@ -35,7 +35,9 @@ jobs:
           pip install -e phoenix-intelligence/
 
       - name: Install Playwright browsers and deps
-        run: python -m playwright install --with-deps chromium
+        run: |
+          sudo apt-get update -y
+          python -m playwright install --with-deps chromium
 
       - name: Run tests
         run: |

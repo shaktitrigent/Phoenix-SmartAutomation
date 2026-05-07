@@ -12,9 +12,34 @@ from services.llm.prompt_loader import PromptLoader
 logger = logging.getLogger(__name__)
 
 
+def _strip_code_fences(text: str) -> str:
+    """Remove markdown code fences that LLMs sometimes wrap around Python scripts."""
+    text = text.strip()
+    text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
+    text = re.sub(r"\r?\n?```\s*$", "", text)
+    return text.strip()
+
+
+def _safe_py_str(value: str) -> str:
+    """Escape a value so it is safe to embed inside a Python double-quoted string literal.
+
+    Handles:
+    - Unicode smart/curly quotes (“ ” ‘ ’) → replaced with ASCII equivalents
+    - Backslashes → escaped
+    - ASCII double quotes → escaped
+    """
+    # Normalise Unicode quotation marks to ASCII before escaping
+    value = value.replace("“", '"').replace("”", '"')
+    value = value.replace("‘", "'").replace("’", "'")
+    # Escape backslashes first, then double quotes
+    value = value.replace("\\", "\\\\").replace('"', '\\"')
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Control taxonomy (RC-02)
 # ---------------------------------------------------------------------------
+
 
 class ControlType(Enum):
     TEXT_INPUT = "text_input"
@@ -47,33 +72,39 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
     url_lower = (application_url or "").lower()
 
     # URL-based hints
-    if "/checkboxes" in url_lower or "checkbox" in url_lower:
-        if any(k in lower for k in ["check", "tick", "uncheck", "untick"]):
-            return ControlType.CHECKBOX
-    if "/dropdown" in url_lower:
-        if any(k in lower for k in ["select", "choose", "pick", "option"]):
-            return ControlType.SELECT_DROPDOWN
-    if "/upload" in url_lower:
-        if any(k in lower for k in ["upload", "attach", "file"]):
-            return ControlType.FILE_INPUT
-    if "/javascript_alerts" in url_lower or "/alerts" in url_lower:
-        if any(k in lower for k in ["alert", "dialog", "confirm", "prompt", "dismiss", "accept"]):
-            if "confirm" in lower:
-                return ControlType.BROWSER_CONFIRM
-            if "prompt" in lower:
-                return ControlType.BROWSER_PROMPT
-            return ControlType.BROWSER_ALERT
-    if "/drag_and_drop" in url_lower or "/drag" in url_lower:
-        if any(k in lower for k in ["drag", "drop"]):
-            return ControlType.DRAG_DROP
-    if "/hovers" in url_lower or "/hover" in url_lower:
-        if any(k in lower for k in ["hover", "mouse over"]):
-            return ControlType.HOVER_TARGET
+    if ("/checkboxes" in url_lower or "checkbox" in url_lower) and any(
+        k in lower for k in ["check", "tick", "uncheck", "untick"]
+    ):
+        return ControlType.CHECKBOX
+    if "/dropdown" in url_lower and any(
+        k in lower for k in ["select", "choose", "pick", "option"]
+    ):
+        return ControlType.SELECT_DROPDOWN
+    if "/upload" in url_lower and any(k in lower for k in ["upload", "attach", "file"]):
+        return ControlType.FILE_INPUT
+    if ("/javascript_alerts" in url_lower or "/alerts" in url_lower) and any(
+        k in lower for k in ["alert", "dialog", "confirm", "prompt", "dismiss", "accept"]
+    ):
+        if "confirm" in lower:
+            return ControlType.BROWSER_CONFIRM
+        if "prompt" in lower:
+            return ControlType.BROWSER_PROMPT
+        return ControlType.BROWSER_ALERT
+    if ("/drag_and_drop" in url_lower or "/drag" in url_lower) and any(
+        k in lower for k in ["drag", "drop"]
+    ):
+        return ControlType.DRAG_DROP
+    if ("/hovers" in url_lower or "/hover" in url_lower) and any(
+        k in lower for k in ["hover", "mouse over"]
+    ):
+        return ControlType.HOVER_TARGET
 
     # Keyword-based classification
     if any(k in lower for k in ["navigate", "go to", "open", "visit"]):
         return ControlType.NAVIGATE
-    if any(k in lower for k in ["verify", "assert", "check that", "should", "confirm that", "ensure"]):
+    if any(
+        k in lower for k in ["verify", "assert", "check that", "should", "confirm that", "ensure"]
+    ):
         return ControlType.ASSERTION
     if any(k in lower for k in ["wait for", "loading", "wait until"]):
         return ControlType.WAIT
@@ -81,9 +112,13 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
         return ControlType.DRAG_DROP
     if any(k in lower for k in ["hover", "mouse over"]):
         return ControlType.HOVER_TARGET
-    if any(k in lower for k in ["upload", "attach"]) and any(k in lower for k in ["file", "document"]):
+    if any(k in lower for k in ["upload", "attach"]) and any(
+        k in lower for k in ["file", "document"]
+    ):
         return ControlType.FILE_INPUT
-    if any(k in lower for k in ["dismiss", "accept", "ok"]) and any(k in lower for k in ["alert", "dialog", "popup"]):
+    if any(k in lower for k in ["dismiss", "accept", "ok"]) and any(
+        k in lower for k in ["alert", "dialog", "popup"]
+    ):
         if "confirm" in lower:
             return ControlType.BROWSER_CONFIRM
         return ControlType.BROWSER_ALERT
@@ -93,7 +128,9 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
         return ControlType.CHECKBOX
     if any(k in lower for k in ["check", "tick"]) and any(k in lower for k in ["checkbox", "box"]):
         return ControlType.CHECKBOX
-    if any(k in lower for k in ["select", "choose", "pick"]) and any(k in lower for k in ["dropdown", "option", "combobox", "list"]):
+    if any(k in lower for k in ["select", "choose", "pick"]) and any(
+        k in lower for k in ["dropdown", "option", "combobox", "list"]
+    ):
         return ControlType.SELECT_DROPDOWN
     if any(k in lower for k in ["select", "choose", "pick"]) and "option" in lower:
         return ControlType.SELECT_DROPDOWN
@@ -140,7 +177,9 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     )
     if field_match:
         field = field_match.group(1).strip()
-        value = quoted or re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
+        value = (
+            quoted or re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
+        )
         return field.title(), value
 
     # "with value X" / "as X" / "= X"
@@ -182,7 +221,6 @@ def _extract_click_target(criterion: str) -> Tuple[str, str]:
 
 def _extract_select_option(criterion: str) -> Tuple[str, str]:
     """Return (field_label, option_value) for select-type criteria."""
-    lower = criterion.lower()
     # "Select Option 1 from dropdown"
     from_match = re.search(r"(.+?)\s+from\s+(?:the\s+)?(.+)", criterion, re.IGNORECASE)
     if from_match:
@@ -240,15 +278,15 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.TEXT_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("{field}").fill("{value}")')
+        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").fill("{_safe_py_str(value)}")')
 
     elif control == ControlType.PASSWORD_INPUT:
         _, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("Password").fill("{value}")')
+        lines.append(f'    page.get_by_label("Password").fill("{_safe_py_str(value)}")')
 
     elif control == ControlType.EMAIL_INPUT:
         _, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("Email").fill("{value}")')
+        lines.append(f'    page.get_by_label("Email").fill("{_safe_py_str(value)}")')
 
     elif control == ControlType.CHECKBOX:
         if any(k in lower for k in ["uncheck", "untick"]):
@@ -263,17 +301,17 @@ def _criterion_to_playwright_lines(
             label_match = re.search(r'the\s+["\']?(.+?)["\']?\s+checkbox', criterion, re.IGNORECASE)
             if label_match:
                 label = label_match.group(1).strip()
-                lines.append(f'    page.get_by_label("{label}").check()')
+                lines.append(f'    page.get_by_label("{_safe_py_str(label)}").check()')
             else:
                 lines.append(f"    page.locator(\"input[type='checkbox']\").nth({idx}).check()")
 
     elif control == ControlType.RADIO_BUTTON:
         field, _ = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("{field}").check()')
+        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").check()')
 
     elif control == ControlType.SELECT_DROPDOWN:
         field, option = _extract_select_option(criterion)
-        lines.append(f'    page.get_by_label("{field}").select_option("{option}")')
+        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").select_option("{_safe_py_str(option)}")')
 
     elif control == ControlType.FILE_INPUT:
         lines.append("    page.locator('input[type=\"file\"]').set_input_files('test_file.txt')")
@@ -281,13 +319,13 @@ def _criterion_to_playwright_lines(
     elif control == ControlType.BUTTON:
         role, label = _extract_click_target(criterion)
         if role == "button":
-            lines.append(f'    page.get_by_role("button", name="{label}").click()')
+            lines.append(f'    page.get_by_role("button", name="{_safe_py_str(label)}").click()')
         else:
-            lines.append(f'    page.get_by_text("{label}").click()')
+            lines.append(f'    page.get_by_text("{_safe_py_str(label)}").first.click()')
 
     elif control == ControlType.LINK:
         _, label = _extract_click_target(criterion)
-        lines.append(f'    page.get_by_role("link", name="{label}").click()')
+        lines.append(f'    page.get_by_role("link", name="{_safe_py_str(label)}").click()')
 
     elif control == ControlType.FORM_SUBMIT:
         lines.append('    page.get_by_role("button", name="Submit").click()')
@@ -314,12 +352,14 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.BROWSER_PROMPT:
         prompt_val = _extract_quoted_value(criterion) or "response text"
-        lines.append(f'    page.on("dialog", lambda dialog: dialog.accept("{prompt_val}"))')
+        lines.append(f'    page.on("dialog", lambda dialog: dialog.accept("{_safe_py_str(prompt_val)}"))')
 
     elif control == ControlType.HOVER_TARGET:
-        cleaned = re.sub(r"^(?:hover|mouse over)\s+(?:over\s+)?(?:the\s+)?", "", criterion, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(
+            r"^(?:hover|mouse over)\s+(?:over\s+)?(?:the\s+)?", "", criterion, flags=re.IGNORECASE
+        ).strip()
         target = _extract_quoted_value(criterion) or cleaned or "element"
-        lines.append(f'    page.get_by_text("{target}").hover()')
+        lines.append(f'    page.get_by_text("{_safe_py_str(target)}").hover()')
 
     elif control == ControlType.DRAG_DROP:
         lines += [
@@ -333,21 +373,29 @@ def _criterion_to_playwright_lines(
         if any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
             url_frag = re.search(r"[/][\w/-]+", subject)
             if url_frag:
-                lines.append(f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"))')
+                lines.append(
+                    f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"))'
+                )
             else:
-                lines.append(f'    expect(page).to_have_url(re.compile(r".*{re.escape(subject)}.*"))')
+                lines.append(
+                    f'    expect(page).to_have_url(re.compile(r".*{re.escape(subject)}.*"))'
+                )
         elif "title" in lower:
             lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
         else:
-            lines.append(f'    expect(page.get_by_text("{subject}")).to_be_visible()')
+            lines.append(f'    expect(page.get_by_text("{_safe_py_str(subject)}").first).to_be_visible()')
 
     elif control == ControlType.WAIT:
         lines.append('    page.wait_for_load_state("networkidle")')
 
     else:
         # Truly unrecognized — emit comment + warning
-        logger.warning("Criterion not recognized for heuristic mapping, using comment: %s", criterion)
-        lines.append(f"    # WARNING: Criterion not mapped — add Playwright action here: {criterion}")
+        logger.warning(
+            "Criterion not recognized for heuristic mapping, using comment: %s", criterion
+        )
+        lines.append(
+            f"    # WARNING: Criterion not mapped — add Playwright action here: {criterion}"
+        )
 
     lines.append("")
     return lines
@@ -361,7 +409,10 @@ def _derive_expected_result(criterion: str) -> str:
     lower = criterion.lower()
 
     # Assertion / verification criteria — the criterion IS the expected result
-    if any(k in lower for k in ["verify", "assert", "check that", "should", "confirm that", "ensure", "validate"]):
+    if any(
+        k in lower
+        for k in ["verify", "assert", "check that", "should", "confirm that", "ensure", "validate"]
+    ):
         cleaned = re.sub(
             r"^(?:verify|assert|check that|should|confirm that|ensure|validate)\s+(?:that\s+|the\s+)?",
             "",
@@ -430,10 +481,7 @@ def _derive_overall_expected_result(criteria: List[str], user_story: str) -> str
     """Synthesise a final overall expected result from all criteria (RC-03)."""
     # Look for explicit assertion criteria to use as the final outcome
     assertion_keywords = ("verify", "assert", "check that", "should", "confirm that", "ensure")
-    assertions = [
-        c for c in criteria
-        if any(c.lower().startswith(k) for k in assertion_keywords)
-    ]
+    assertions = [c for c in criteria if any(c.lower().startswith(k) for k in assertion_keywords)]
     if assertions:
         subjects = [
             re.sub(
@@ -453,7 +501,11 @@ def _derive_overall_expected_result(criteria: List[str], user_story: str) -> str
         user_story,
         flags=re.IGNORECASE,
     ).strip()
-    return f"User successfully {story_clean}" if story_clean else "All acceptance criteria are satisfied"
+    return (
+        f"User successfully {story_clean}"
+        if story_clean
+        else "All acceptance criteria are satisfied"
+    )
 
 
 _prompt_loader = PromptLoader()
@@ -719,7 +771,8 @@ class TestGeneratorAgent(BaseAgent):
             user_prompt = "\n".join(user_parts)
 
             logger.info("Generating automation script via LLM for: %s", user_story[:80])
-            script_code = self.llm_client.generate(system_prompt, user_prompt)
+            raw = self.llm_client.generate(system_prompt, user_prompt)
+            script_code = _strip_code_fences(raw)
         except Exception as exc:
             logger.warning(
                 "LLM automation generation failed, using fallback script: %s",
@@ -773,9 +826,7 @@ class TestGeneratorAgent(BaseAgent):
         ]
 
         for idx, criterion in enumerate(acceptance_criteria, 1):
-            body_lines.extend(
-                _criterion_to_playwright_lines(criterion, idx, application_url)
-            )
+            body_lines.extend(_criterion_to_playwright_lines(criterion, idx, application_url))
 
         body = "\n".join(body_lines)
 
@@ -788,7 +839,7 @@ class TestGeneratorAgent(BaseAgent):
             "\n"
             "\n"
             "def test_generated_automation_flow(page: Page):\n"
-            f'    """Heuristic fallback script for: {user_story}"""\n'
+            f'    """Heuristic fallback script for: {user_story.replace(chr(34), chr(39))}"""\n'
             f"{body}\n"
         )
 

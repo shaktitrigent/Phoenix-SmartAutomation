@@ -6,17 +6,27 @@ anthropic   → Anthropic Claude  (ANTHROPIC_API_KEY)
 openai      → OpenAI            (OPENAI_API_KEY)
 gemini      → Google Gemini     (GOOGLE_API_KEY)
 ollama      → Local Ollama      (no key required)
+
+Fallback behaviour
+------------------
+If the primary provider fails (rate limit, timeout, missing package, wrong key),
+the router automatically tries the next provider in the configured fallback chain.
+Only if ALL providers fail does it raise an exception — never returns empty output.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from typing import Protocol, runtime_checkable
 
 from services.config import LLMSettings
 
 logger = logging.getLogger(__name__)
+
+_RATE_LIMIT_WAIT = 60  # seconds to wait on 429 before trying next provider
 
 
 @runtime_checkable
@@ -74,6 +84,17 @@ class AnthropicProvider:
         )
         return _strip_code_fences(text)
 
+    @staticmethod
+    def check_available() -> tuple[bool, str]:
+        """Pre-flight: verify the package and API key are present."""
+        try:
+            import anthropic  # noqa: F401
+        except ImportError:
+            return False, "pip install anthropic"
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return False, "ANTHROPIC_API_KEY not set"
+        return True, "OK"
+
 
 class OpenAIProvider:
     """Wraps the OpenAI Python SDK."""
@@ -114,6 +135,16 @@ class OpenAIProvider:
         logger.info("OpenAI response: %d chars", len(text))
         return _strip_code_fences(text)
 
+    @staticmethod
+    def check_available() -> tuple[bool, str]:
+        try:
+            import openai  # noqa: F401
+        except ImportError:
+            return False, "pip install openai"
+        if not os.environ.get("OPENAI_API_KEY"):
+            return False, "OPENAI_API_KEY not set"
+        return True, "OK"
+
 
 class GeminiProvider:
     """Wraps Google GenerativeAI SDK (google-generativeai)."""
@@ -150,6 +181,16 @@ class GeminiProvider:
         text = response.text or ""
         logger.info("Gemini response: %d chars", len(text))
         return _strip_code_fences(text)
+
+    @staticmethod
+    def check_available() -> tuple[bool, str]:
+        try:
+            import google.generativeai  # noqa: F401
+        except ImportError:
+            return False, "pip install google-generativeai"
+        if not os.environ.get("GOOGLE_API_KEY"):
+            return False, "GOOGLE_API_KEY not set"
+        return True, "OK"
 
 
 class OllamaProvider:
@@ -201,26 +242,81 @@ _PROVIDERS: dict[str, type] = {
     "ollama": OllamaProvider,
 }
 
+_DEFAULT_FALLBACK_CHAIN = ["anthropic", "gemini", "openai", "ollama"]
+
 
 class LLMRouter:
-    """Instantiates the correct provider based on LLMSettings.provider."""
+    """Instantiates the correct provider based on LLMSettings.provider.
+
+    If the primary provider fails (rate limit, missing key, import error,
+    timeout), the router automatically tries the next provider in the
+    fallback chain.  Only raises if *all* providers fail.
+    """
 
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self.settings = settings or LLMSettings()
-        provider_name = self.settings.provider.lower()
-        if provider_name not in _PROVIDERS:
+        primary = self.settings.provider.lower()
+        if primary not in _PROVIDERS:
             raise ValueError(
-                f"Unknown LLM provider '{provider_name}'. Supported: {list(_PROVIDERS.keys())}"
+                f"Unknown LLM provider '{primary}'. Supported: {list(_PROVIDERS.keys())}"
             )
-        self._provider: LLMProvider = _PROVIDERS[provider_name](self.settings)
+
+        # Build fallback chain: primary first, then remaining providers
+        others = [p for p in _DEFAULT_FALLBACK_CHAIN if p != primary]
+        self._chain: list[str] = [primary] + others
+
         logger.info(
-            "LLM Router initialised: provider=%s model=%s",
-            provider_name,
+            "LLM Router initialised: primary=%s model=%s fallback_chain=%s",
+            primary,
             self.settings.model,
+            self._chain[1:],
         )
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        return self._provider.generate(system_prompt, user_prompt)
+        """Try each provider in chain; return first successful response."""
+        last_error: Exception | None = None
+
+        for provider_name in self._chain:
+            provider_cls = _PROVIDERS[provider_name]
+            provider: LLMProvider = provider_cls(self.settings)
+
+            # Pre-flight check — skip unavailable providers immediately
+            if hasattr(provider_cls, "check_available"):
+                ok, reason = provider_cls.check_available()
+                if not ok:
+                    logger.warning(
+                        "Skipping provider '%s': %s", provider_name, reason
+                    )
+                    last_error = RuntimeError(f"{provider_name} unavailable: {reason}")
+                    continue
+
+            try:
+                result = provider.generate(system_prompt, user_prompt)
+                if provider_name != self._chain[0]:
+                    logger.info("Fallback provider '%s' succeeded.", provider_name)
+                return result
+
+            except Exception as exc:
+                err_str = str(exc).lower()
+                if "429" in err_str or "rate limit" in err_str or "quota" in err_str:
+                    logger.warning(
+                        "Provider '%s' rate-limited — waiting %ds before next provider",
+                        provider_name,
+                        _RATE_LIMIT_WAIT,
+                    )
+                    time.sleep(_RATE_LIMIT_WAIT)
+                else:
+                    logger.warning(
+                        "Provider '%s' failed: %s — trying next provider",
+                        provider_name,
+                        exc,
+                    )
+                last_error = exc
+
+        raise RuntimeError(
+            f"All LLM providers failed. Last error: {last_error}\n"
+            "Check API keys and provider availability."
+        ) from last_error
 
 
 # ---------------------------------------------------------------------------

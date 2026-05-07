@@ -21,9 +21,7 @@ from phoenix.cli.output import (
 from phoenix.sdk.config import PhoenixConfig
 
 
-def _clean_project_directory(
-    manual_dir: Path, test_dir: Path, verbose: bool = False
-) -> bool:
+def _clean_project_directory(manual_dir: Path, test_dir: Path, verbose: bool = False) -> bool:
     """Remove all generated artifacts from previous runs.
 
     Deletes only the two generated-output directories, then re-creates them
@@ -54,8 +52,7 @@ def _clean_project_directory(
         for path, reason in failed:
             click.echo(f"  {path}: {reason}", err=True)
         click.echo(
-            "Aborting to prevent stale artifact contamination. "
-            "Fix the above errors and try again.",
+            "Aborting to prevent stale artifact contamination. Fix the above errors and try again.",
             err=True,
         )
         return False

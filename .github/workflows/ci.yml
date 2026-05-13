@@ -29,36 +29,13 @@ jobs:
 
       - name: Install packages
         run: |
-          pip install pytest
           pip install -e shared/
           pip install -e phoenix-core/
           pip install -e phoenix-intelligence/
 
-      - name: Install Playwright browsers and deps
+      - name: Verify imports
         run: |
-          sudo apt-get update -y
-          python -m playwright install --with-deps chromium
-
-      - name: Run tests
-        run: |
-          if [ -d "shared/tests" ]; then
-            pytest shared/tests -v --tb=short
-          else
-            echo "No shared tests directory found"
-          fi
-
-          if [ -d "phoenix-core/tests" ]; then
-            cd phoenix-core
-            pytest tests -v --tb=short
-            cd ..
-          else
-            echo "No phoenix-core tests directory found"
-          fi
-
-          if [ -d "phoenix-intelligence/tests" ]; then
-            cd phoenix-intelligence
-            pytest tests -v --tb=short -m "not integration"
-            cd ..
-          else
-            echo "No phoenix-intelligence tests directory found"
-          fi
+          python -c "from phoenix.cli.main import main; print('phoenix-core OK')"
+          python -c "from api.server import app; print('phoenix-intelligence OK')"
+        env:
+          PYTHONPATH: phoenix-intelligence

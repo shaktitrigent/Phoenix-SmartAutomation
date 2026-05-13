@@ -891,7 +891,13 @@ class TestGeneratorAgent(BaseAgent):
           - 1 manual test → 1 automation script
         """
         if not manual_tests:
-            # No manual tests available — fall back to single criteria-based script
+            if not self.llm_client:
+                raise RuntimeError(
+                    "LLM client is not configured. Set ANTHROPIC_API_KEY (or equivalent) "
+                    "and restart the intelligence server. "
+                    "Alternatively run 'phoenix generate' first to create manual tests, "
+                    "then 'phoenix automate' to derive scripts from them without LLM."
+                )
             logger.warning("No manual tests provided — generating single fallback script")
             return self._generate_single_automation_fallback(
                 user_story, application_url, acceptance_criteria, risk_level
@@ -1127,6 +1133,18 @@ class TestGeneratorAgent(BaseAgent):
                 "tags": ["automation", "generated", "fallback"],
             }
         ]
+
+    def _build_automation_fallback_script(
+        self,
+        user_story: str,
+        application_url: Optional[str],
+        acceptance_criteria: List[str],
+    ) -> str:
+        """Return a heuristic fallback script string (used by tests and legacy callers)."""
+        results = self._generate_single_automation_fallback(
+            user_story, application_url, acceptance_criteria, risk_level=None
+        )
+        return results[0]["script_code"] if results else ""
 
     @staticmethod
     def _format_manual_steps_for_prompt(manual_test: Dict[str, Any]) -> str:

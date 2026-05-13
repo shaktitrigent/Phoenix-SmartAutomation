@@ -16,8 +16,6 @@ from phoenix.storage.models import (
     ExecutionStatus,
 )
 from phoenix.sdk.intelligence_client import IntelligenceClient
-from phoenix.locators.extractor import extract_locators_from_script, page_name_from_script_path
-from phoenix.locators.registry import LocatorRegistry
 from datetime import datetime, timezone
 
 
@@ -201,6 +199,8 @@ class PhoenixClient:
         # ------------------------------------------------------------------
         locators_saved = 0
         if automation_tests:
+            from phoenix.locators.extractor import extract_locators_from_script, page_name_from_script_path
+            from phoenix.locators.registry import LocatorRegistry
             locators_dir = Path(self.config.project.test_output_dir).parent / "locators"
             locators_dir.mkdir(parents=True, exist_ok=True)
             registry = LocatorRegistry()

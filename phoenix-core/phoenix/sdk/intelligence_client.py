@@ -136,3 +136,31 @@ class IntelligenceClient:
             "traceback": traceback,
         }
         return self._post("/api/v1/failures/analyze", payload)
+
+    def automate_from_manual(
+        self,
+        manual_tests: List[Dict[str, Any]],
+        application_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "manual_tests": manual_tests,
+            "application_url": application_url,
+        }
+        return self._post("/api/v1/tests/automate", payload)
+
+    def fix_script(
+        self,
+        script_code: str,
+        error_message: str,
+        error_type: str = "unknown",
+        test_name: str = "unknown_test",
+        application_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "script_code": script_code,
+            "error_message": error_message,
+            "error_type": error_type,
+            "test_name": test_name,
+            "application_url": application_url,
+        }
+        return self._post("/api/v1/tests/fix", payload)

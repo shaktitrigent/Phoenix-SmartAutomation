@@ -19,12 +19,16 @@ from services.llm.client import LLMClient
 from services.mcp.client import MCPClient
 from services.agents.registry import AgentRegistry
 from api.models import (
+    AutomateRequest,
+    AutomateResponse,
     TestGenerationRequest,
     TestGenerationResponse,
     LocatorDiscoveryRequest,
     LocatorDiscoveryResponse,
     FailureAnalysisRequest,
     FailureAnalysisResponse,
+    ScriptFixRequest,
+    ScriptFixResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -169,6 +173,35 @@ def analyze_failure(payload: FailureAnalysisRequest):
         test_case_id=getattr(payload, "test_case_id", "unknown") or "unknown",
         error_message=payload.error_message,
         traceback=payload.traceback,
+    )
+    result.setdefault("metadata", {})
+    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
+    result["metadata"]["version"] = "2.0.0"
+    return result
+
+
+@app.post("/api/v1/tests/automate", response_model=AutomateResponse)
+def automate_from_manual(payload: AutomateRequest):
+    """Generate automation scripts from pre-written manual tests (1 script per test)."""
+    result = _agent_registry.automate_from_manual(
+        manual_tests=payload.manual_tests,
+        application_url=payload.application_url,
+    )
+    result.setdefault("metadata", {})
+    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
+    result["metadata"]["version"] = "2.0.0"
+    return result
+
+
+@app.post("/api/v1/tests/fix", response_model=ScriptFixResponse)
+def fix_script(payload: ScriptFixRequest):
+    """Fix a failing automation script given its error output."""
+    result = _agent_registry.fix_script(
+        script_code=payload.script_code,
+        error_message=payload.error_message,
+        error_type=payload.error_type,
+        test_name=payload.test_name,
+        application_url=payload.application_url,
     )
     result.setdefault("metadata", {})
     result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()

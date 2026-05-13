@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from phoenix.execution.reliability import apply_reliability_pipeline
+from phoenix.generators.clean_code import apply_clean_code_pipeline
 from phoenix.storage.models import TestType
 
 # Title-case two-or-more word pattern used to detect person display names
@@ -175,6 +176,9 @@ class AutomationTestGenerator:
 
         # --- Reliability pipeline: assertion fixes, dynamic waits, linter warnings ---
         code = apply_reliability_pipeline(code)
+
+        # --- Clean Code Emitter: gate check + AST cleanup ---
+        code = apply_clean_code_pipeline(code, gate_raises=False, clean=True)
 
         # --- Anti-pattern scanner: warn about anything not auto-fixed ---
         code = _inject_locator_warnings(code)

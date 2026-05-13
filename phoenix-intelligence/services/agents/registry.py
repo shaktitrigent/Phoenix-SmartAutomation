@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from services.agents.base import BaseAgent
 from services.agents.failure_analyzer import FailureAnalyzerAgent
 from services.agents.locator_expert import LocatorExpertAgent
+from services.agents.script_fixer import ScriptFixerAgent
 from services.agents.test_generator import TestGeneratorAgent
 from services.cache import Cache
 from services.knowledge.base import KnowledgeBase
@@ -34,6 +35,9 @@ class AgentRegistry:
             self.knowledge_base, self.cache, **kwargs
         )
         self._agents["failure_analyzer"] = FailureAnalyzerAgent(
+            self.knowledge_base, self.cache, **kwargs
+        )
+        self._agents["script_fixer"] = ScriptFixerAgent(
             self.knowledge_base, self.cache, **kwargs
         )
 
@@ -99,5 +103,35 @@ class AgentRegistry:
                 "test_case_id": test_case_id,
                 "error_message": error_message,
                 "traceback": traceback or "",
+            },
+        )
+
+    def automate_from_manual(
+        self,
+        manual_tests: List[Dict[str, Any]],
+        application_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        agent = self._agents.get("test_generator")
+        return agent.automate_from_manual_tests(
+            manual_tests=manual_tests,
+            application_url=application_url,
+        )
+
+    def fix_script(
+        self,
+        script_code: str,
+        error_message: str,
+        error_type: str = "unknown",
+        test_name: str = "unknown_test",
+        application_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.invoke_agent(
+            "script_fixer",
+            {
+                "script_code": script_code,
+                "error_message": error_message,
+                "error_type": error_type,
+                "test_name": test_name,
+                "application_url": application_url,
             },
         )

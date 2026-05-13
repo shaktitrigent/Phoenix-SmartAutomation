@@ -117,3 +117,42 @@ class FailureAnalysisResponse(BaseModel):
     related_locators: List[Dict[str, Any]] = []
     prevention: Optional[str] = None
     metadata: Dict[str, Any] = {}
+
+
+class AutomateRequest(BaseModel):
+    """Request payload — generate automation scripts from pre-written manual tests."""
+
+    manual_tests: List[Dict[str, Any]] = Field(
+        description="Structured manual test dicts parsed from manual_tests/ directory"
+    )
+    application_url: Optional[str] = Field(default=None, description="Application URL under test")
+
+
+class AutomateResponse(BaseModel):
+    """Response payload for automation-from-manual generation."""
+
+    automation_tests: List[AutomationTestCase] = []
+    metadata: Dict[str, Any] = {}
+
+
+class ScriptFixRequest(BaseModel):
+    """Request payload for fixing a failing automation script."""
+
+    script_code: str = Field(description="The full Python script that is failing")
+    error_message: str = Field(description="Exact error/exception text from pytest")
+    error_type: str = Field(
+        default="unknown",
+        description="Classified error type: locator_not_found, timeout, assertion_failure, "
+                    "stale_element, navigation_failure, or unknown",
+    )
+    test_name: str = Field(default="unknown_test", description="Name of the failing test function")
+    application_url: Optional[str] = Field(default=None, description="Application URL under test")
+
+
+class ScriptFixResponse(BaseModel):
+    """Response payload for a fixed script."""
+
+    fixed_script: str = Field(description="The corrected, complete Python script")
+    changed: bool = Field(description="True if the script was actually modified")
+    fix_summary: str = Field(description="One-line description of what was changed")
+    metadata: Dict[str, Any] = {}

@@ -60,16 +60,31 @@ class ControlType(Enum):
     MULTI_TAB = "multi_tab"
     DYNAMIC_CONTENT = "dynamic_content"
     FORM_SUBMIT = "form_submit"
+    LOGIN = "login"        # navigate + fill credentials + click login button
     NAVIGATE = "navigate"
+    MENU_CLICK = "menu_click"  # click a top-level nav menu item
     ASSERTION = "assertion"
     WAIT = "wait"
     UNKNOWN = "unknown"
+
+
+_LOGIN_URL_RE = re.compile(r'https?://\S+')
+_LOGIN_USER_RE = re.compile(r"[Uu]sername\s*['\"]?([\w@.+-]+)['\"]?")
+_LOGIN_PASS_RE = re.compile(r"[Pp]assword\s*['\"]?([\w@.!#$%^&*()-]+)['\"]?")
 
 
 def _classify_control(criterion: str, application_url: Optional[str] = None) -> ControlType:
     """Determine ControlType from criterion text and optional URL."""
     lower = criterion.lower()
     url_lower = (application_url or "").lower()
+
+    # LOGIN: "Navigate to <url> and log in with Username X and Password Y"
+    if (
+        any(k in lower for k in ["navigate", "go to", "open", "visit"])
+        and any(k in lower for k in ["log in", "login", "sign in"])
+        and any(k in lower for k in ["username", "password"])
+    ):
+        return ControlType.LOGIN
 
     # URL-based hints
     if ("/checkboxes" in url_lower or "checkbox" in url_lower) and any(
@@ -98,6 +113,12 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
         k in lower for k in ["hover", "mouse over"]
     ):
         return ControlType.HOVER_TARGET
+
+    # MENU_CLICK: "Click X in the navigation menu" / "Click X menu"
+    if any(k in lower for k in ["click", "press", "tap"]) and any(
+        k in lower for k in ["menu", "navigation", "nav", "sidebar", "submenu"]
+    ):
+        return ControlType.MENU_CLICK
 
     # Keyword-based classification
     if any(k in lower for k in ["navigate", "go to", "open", "visit"]):
@@ -269,11 +290,50 @@ def _criterion_to_playwright_lines(
     lower = criterion.lower()
     lines: List[str] = [f"    # Step {step_num}: {criterion}"]
 
-    if control == ControlType.NAVIGATE:
+    if control == ControlType.LOGIN:
+        # Extract URL, username, password from step text
+        url_match = _LOGIN_URL_RE.search(criterion)
+        url = url_match.group(0).rstrip(".,)") if url_match else (application_url or "https://example.com")
+        user_match = _LOGIN_USER_RE.search(criterion)
+        username = user_match.group(1).strip().strip("'\"") if user_match else "Admin"
+        pass_match = _LOGIN_PASS_RE.search(criterion)
+        password = pass_match.group(1).strip().strip("'\"") if pass_match else "admin123"
+        lines += [
+            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
+            f'    page.get_by_placeholder("Username").fill("{_safe_py_str(username)}")',
+            f'    page.get_by_placeholder("Password").fill("{_safe_py_str(password)}")',
+            '    page.get_by_role("button", name="Login").click()',
+            '    page.wait_for_url("**/dashboard**", timeout=30_000)',
+            '    expect(page.get_by_role("heading", name="Dashboard")).to_be_visible()',
+        ]
+
+    elif control == ControlType.MENU_CLICK:
+        # Extract the menu item label — strip "Click [the] X in/from the [navigation] menu/nav/sidebar/submenu"
+        cleaned = re.sub(
+            r"^(?:click|press|tap)\s+(?:the\s+|on\s+(?:the\s+)?)?",
+            "",
+            criterion.strip(),
+            flags=re.IGNORECASE,
+        )
+        # Remove trailing "in the X menu" / "in the X submenu" / "menu item" etc.
+        label = re.sub(
+            r"\s+(?:in|from|on)\s+(?:the\s+)?(?:\w+\s+)?(?:navigation\s+|nav\s+)?(?:menu|nav|sidebar|submenu)\b.*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        ).strip().strip("'\"")
+        # Prefer quoted value if present
+        label = _extract_quoted_value(criterion) or label
+        lines += [
+            f'    page.get_by_role("link", name="{_safe_py_str(label)}").click()',
+            f'    expect(page.get_by_role("link", name="{_safe_py_str(label)}")).to_be_visible()',
+        ]
+
+    elif control == ControlType.NAVIGATE:
         url = _extract_quoted_value(criterion) or application_url or "https://example.com"
         lines += [
-            f'    page.goto("{url}")',
-            '    page.wait_for_load_state("networkidle")',
+            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
+            '    page.wait_for_load_state("domcontentloaded")',
         ]
 
     elif control == ControlType.TEXT_INPUT:
@@ -386,7 +446,7 @@ def _criterion_to_playwright_lines(
             lines.append(f'    expect(page.get_by_text("{_safe_py_str(subject)}").first).to_be_visible()')
 
     elif control == ControlType.WAIT:
-        lines.append('    page.wait_for_load_state("networkidle")')
+        lines.append('    page.wait_for_load_state("domcontentloaded")')
 
     else:
         # Truly unrecognized — emit comment + warning
@@ -510,6 +570,85 @@ def _derive_overall_expected_result(criteria: List[str], user_story: str) -> str
 
 _prompt_loader = PromptLoader()
 
+# Maximum manual tests generated per user story (enforced in code, not just in the prompt)
+_MAX_MANUAL_TESTS = 5
+
+# Placeholder / comment patterns that indicate unimplemented automation code
+_PLACEHOLDER_LINE_RE = re.compile(
+    r"^\s*#\s*(WARNING|TODO|FIXME|NOTE|Criterion not mapped|add Playwright action here"
+    r"|placeholder|replace this|implement|step completes|needs manual review)",
+    re.IGNORECASE,
+)
+
+
+def _cap_and_consolidate(tests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Enforce maximum _MAX_MANUAL_TESTS tests, prioritising coverage diversity.
+
+    Selection order: 1 smoke → up to 2 regression → up to 2 edge.
+    If any bucket is empty the remaining slots are filled from whatever is left.
+    """
+    if len(tests) <= _MAX_MANUAL_TESTS:
+        return tests
+
+    by_risk: Dict[str, List] = {"smoke": [], "regression": [], "edge": []}
+    for t in tests:
+        rl = str(t.get("risk_level", "regression")).lower()
+        by_risk.setdefault(rl, []).append(t)
+
+    selected: List[Dict] = []
+    for risk, quota in [("smoke", 1), ("regression", 2), ("edge", 2)]:
+        selected.extend(by_risk.get(risk, [])[:quota])
+
+    # Fill remaining slots with any test not yet selected
+    if len(selected) < _MAX_MANUAL_TESTS:
+        chosen_names = {t["name"] for t in selected}
+        for t in tests:
+            if t["name"] not in chosen_names and len(selected) < _MAX_MANUAL_TESTS:
+                selected.append(t)
+
+    logger.info(
+        "Capped manual tests from %d → %d (limit=%d)",
+        len(tests), len(selected), _MAX_MANUAL_TESTS,
+    )
+    return selected[:_MAX_MANUAL_TESTS]
+
+
+def _strip_automation_placeholders(code: str) -> str:
+    """Remove placeholder / unimplemented comment lines from a Playwright script.
+
+    Removes:
+      - # WARNING: ...
+      - # TODO: ...
+      - # FIXME: ...
+      - # Criterion not mapped ...
+      - # add Playwright action here ...
+      - Any indented comment-only line inside a test function body that is
+        purely advisory and doesn't correspond to a real step header.
+
+    Preserves:
+      - Module-level docstrings
+      - Import statements
+      - Step header comments that follow the pattern "# --- Step N: ..."
+      - Inline expected-result notes that follow "# Expected: ..."
+    """
+    lines = code.splitlines(keepends=True)
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            result.append(line)
+            continue
+        # Keep step-header and expected-result comments — they are structural
+        if re.match(r"#\s*---\s*Step\s+\d+", stripped) or re.match(r"#\s*Expected:", stripped):
+            result.append(line)
+            continue
+        # Drop placeholder/warning comments
+        if _PLACEHOLDER_LINE_RE.match(line):
+            continue
+        # Keep everything else (imports, module-level comments, etc.)
+        result.append(line)
+    return "".join(result)
+
 
 class TestGeneratorAgent(BaseAgent):
     """Agent specialised in generating test cases from user stories.
@@ -560,14 +699,33 @@ class TestGeneratorAgent(BaseAgent):
             },
         }
 
+        # ---------------------------------------------------------------
+        # Manual-First: always generate manual tests before automation.
+        # When test_type is "automation" only, we still build a minimal
+        # manual spec internally so the automation has proper steps to
+        # translate — it is just not written to disk by the caller.
+        # ---------------------------------------------------------------
         if test_type in ("manual", "both"):
             result["manual_tests"] = self._generate_manual_tests(
                 user_story, application_url, acceptance_criteria, risk_level
             )
+            manual_tests_for_automation = result["manual_tests"]
+        elif test_type == "automation":
+            # Generate manual internally as input to automation
+            manual_tests_for_automation = self._generate_manual_tests(
+                user_story, application_url, acceptance_criteria, risk_level
+            )
+        else:
+            manual_tests_for_automation = []
 
         if test_type in ("automation", "both"):
             result["automation_tests"] = self._generate_automation_tests(
-                user_story, application_url, acceptance_criteria, knowledge_context, risk_level
+                user_story=user_story,
+                application_url=application_url,
+                acceptance_criteria=acceptance_criteria,
+                knowledge_context=knowledge_context,
+                risk_level=risk_level,
+                manual_tests=manual_tests_for_automation,
             )
 
         self.cache.set(cache_key, result, ttl=3600)
@@ -606,23 +764,30 @@ class TestGeneratorAgent(BaseAgent):
         """Call the LLM using the versioned manual_test_generator prompt."""
         system_prompt = _prompt_loader.get("manual_test_generator")
 
+        # Group criteria thematically so the LLM can see what a consolidated test covers
         criteria_text = "\n".join(f"  {i}. {c}" for i, c in enumerate(acceptance_criteria, 1))
+        n_criteria = len(acceptance_criteria)
         risk_instruction = (
-            f"\nFocus on generating '{risk_level}' level tests." if risk_level else ""
+            f"\nGenerate at least one '{risk_level}' level test." if risk_level else ""
         )
 
         user_prompt = (
-            f"Generate structured manual test cases for the following user story.\n\n"
+            f"Generate consolidated manual test cases for the following user story.\n\n"
             f"## User Story\n{user_story}\n\n"
             f"## Application URL\n{application_url or 'Not specified'}\n\n"
-            f"## Acceptance Criteria\n{criteria_text or '  (none provided)'}"
+            f"## Acceptance Criteria ({n_criteria} total — group related ones into the same test)\n"
+            f"{criteria_text or '  (none provided)'}"
             f"{risk_instruction}\n\n"
+            f"## HARD LIMIT\n"
+            f"Return AT MOST {_MAX_MANUAL_TESTS} test cases in the JSON array.\n"
+            f"Do NOT create one test per criterion. Group related criteria into one test.\n"
+            f"Each test must cover a complete end-to-end workflow including login.\n\n"
             f"Return a JSON array of test case objects as specified in the system prompt."
         )
 
         knowledge_context = self.get_knowledge_context(query=user_story)
         if knowledge_context:
-            user_prompt += f"\n\n## Additional Context (Knowledge Base)\n{knowledge_context[:1500]}"
+            user_prompt += f"\n\n## Context\n{knowledge_context[:1000]}"
 
         logger.info("Generating manual tests via LLM for: %s", user_story[:80])
         raw = self.llm_client.generate(system_prompt, user_prompt)
@@ -646,7 +811,9 @@ class TestGeneratorAgent(BaseAgent):
                 }
             )
 
-        logger.info("LLM generated %d manual test(s)", len(normalised))
+        # Hard-enforce the cap regardless of what the LLM returned
+        normalised = _cap_and_consolidate(normalised)
+        logger.info("Final manual test count: %d", len(normalised))
         return normalised
 
     def _generate_manual_tests_fallback(
@@ -662,11 +829,16 @@ class TestGeneratorAgent(BaseAgent):
         emitting the generic placeholder 'Step completes as expected'.
         """
         steps = []
-        if application_url:
+        # Only add a bare navigate step if the first criterion isn't already a login/navigate step
+        first_criterion = acceptance_criteria[0] if acceptance_criteria else ""
+        first_is_login = _classify_control(first_criterion, application_url) in (
+            ControlType.LOGIN, ControlType.NAVIGATE
+        )
+        if application_url and not first_is_login:
             steps.append(
                 {
                     "step_number": 1,
-                    "action": f"Navigate to {application_url}",
+                    "action": f"Navigate to {application_url} and log in",
                     "expected_result": (
                         f"Page at {application_url} loads successfully "
                         "with visible content and no error messages"
@@ -698,7 +870,7 @@ class TestGeneratorAgent(BaseAgent):
         ]
 
     # ------------------------------------------------------------------
-    # Automation tests - LLM + MCP powered
+    # Automation tests — derived from manual tests (1 script per manual test)
     # ------------------------------------------------------------------
 
     def _generate_automation_tests(
@@ -708,140 +880,334 @@ class TestGeneratorAgent(BaseAgent):
         acceptance_criteria: List[str],
         knowledge_context: str,
         risk_level: Optional[str],
+        manual_tests: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
-        if not self.llm_client:
-            raise RuntimeError(
-                "LLM client is not configured. Set PHOENIX_LLM_PROVIDER and the matching API key, then restart the server."
+        """Generate one automation script for each manual test.
+
+        Each script is a direct translation of the manual test's numbered steps
+        into Playwright code.  This guarantees:
+          - Login is always step 1 (it's in the manual test)
+          - Steps are in the correct order
+          - 1 manual test → 1 automation script
+        """
+        if not manual_tests:
+            # No manual tests available — fall back to single criteria-based script
+            logger.warning("No manual tests provided — generating single fallback script")
+            return self._generate_single_automation_fallback(
+                user_story, application_url, acceptance_criteria, risk_level
             )
 
-        try:
-            page_snapshot = ""
-            if self.mcp_client and application_url:
+        # Fetch the page snapshot once for all tests
+        page_snapshot = ""
+        if self.mcp_client and application_url:
+            try:
                 logger.info("Inspecting page via MCP: %s", application_url)
                 page_snapshot = self.mcp_client.inspect_page(application_url)
                 if page_snapshot:
                     logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
-                else:
-                    logger.warning("MCP returned empty snapshot for %s", application_url)
+            except Exception as exc:
+                logger.warning("MCP page inspection failed: %s", exc)
 
-            system_prompt_template = _prompt_loader.get("test_generator")
-            system_prompt = system_prompt_template.format(
-                knowledge_context=knowledge_context
-                if knowledge_context
-                else "(no additional context)"
+        results = []
+        for manual_test in manual_tests:
+            script_code = self._generate_script_for_manual_test(
+                manual_test=manual_test,
+                application_url=application_url,
+                knowledge_context=knowledge_context,
+                page_snapshot=page_snapshot,
+            )
+            test_name = self._derive_short_name(manual_test.get("name", user_story))
+            results.append(
+                {
+                    "name": test_name,
+                    "description": manual_test.get("description", user_story),
+                    "manual_test_name": manual_test.get("name", ""),
+                    "script_template": "playwright",
+                    "script_code": script_code,
+                    "test_steps": [
+                        s.get("action", "") for s in manual_test.get("steps", [])
+                    ],
+                    "locators": [],
+                    "application_url": application_url,
+                    "risk_level": manual_test.get("risk_level", risk_level or "regression"),
+                    "tags": ["automation", "generated", "manual-derived"],
+                }
+            )
+            logger.info(
+                "Generated automation script for manual test: %s", manual_test.get("name", "")
             )
 
-            criteria_text = "\n".join(f"  {i}. {c}" for i, c in enumerate(acceptance_criteria, 1))
+        return results
+
+    def _generate_script_for_manual_test(
+        self,
+        manual_test: Dict[str, Any],
+        application_url: Optional[str],
+        knowledge_context: str,
+        page_snapshot: str = "",
+    ) -> str:
+        """Translate a single manual test into a Playwright script via LLM or fallback."""
+        if not self.llm_client:
+            script = self._build_fallback_script_from_manual_test(
+                manual_test=manual_test,
+                application_url=application_url,
+            )
+            return _strip_automation_placeholders(script)
+
+        try:
+            system_prompt_template = _prompt_loader.get("automation_from_manual")
+            system_prompt = system_prompt_template.format(
+                knowledge_context=knowledge_context or "(no additional context)"
+            )
+
+            # Format the manual test steps clearly for the LLM
+            steps_text = self._format_manual_steps_for_prompt(manual_test)
+
             user_parts = [
-                "Generate a complete pytest + Playwright test script for the following user story.",
+                "Translate the following manual test case into a complete pytest + Playwright script.",
+                "Follow EVERY step in order. Do not skip steps. Do not add steps not in the spec.",
                 "",
-                f"## User Story\n{user_story}",
+                f"## Manual Test: {manual_test.get('name', 'Test Case')}",
+                "",
+                f"**Description:** {manual_test.get('description', '')}",
+                f"**Risk Level:** {manual_test.get('risk_level', 'regression')}",
+                f"**Preconditions:** {manual_test.get('preconditions', '')}",
+                "",
+                "## Steps (translate each one into Playwright code)",
+                "",
+                steps_text,
+                "",
+                f"**Overall Expected Result:** {manual_test.get('expected_result', '')}",
                 "",
                 f"## Application URL\n{application_url or 'N/A'}",
-                "",
-                f"## Acceptance Criteria\n{criteria_text}",
             ]
 
             if page_snapshot:
                 user_parts += [
                     "",
-                    "## Page Accessibility Snapshot (live inspection of the target page)",
-                    "Use the element roles, names, and values below to choose accurate locators.",
-                    "",
-                    page_snapshot,
+                    "## Live Page Snapshot (use these roles/names for accurate locators)",
+                    page_snapshot[:3000],
                 ]
             else:
                 user_parts += [
                     "",
                     "## Page Snapshot",
-                    "No live page snapshot available. Use your best judgement for locators "
-                    "based on common web patterns and the acceptance criteria.",
+                    "No live snapshot. Use the OrangeHRM locator table from the system prompt.",
                 ]
 
             user_parts += [
                 "",
-                "## Instructions",
-                "- Write ONE test function that covers all acceptance criteria.",
-                "- Use the locator priority order defined in the system prompt.",
-                "- If the page snapshot contains exact element names/roles, use them directly.",
-                "- Include meaningful assertions for each acceptance criterion.",
-                "- Return ONLY the Python source code, nothing else.",
+                "## Output instructions",
+                "- Return ONLY Python source code. No markdown fences.",
+                "- One test function with a comment block for each manual step.",
+                "- Include a full login sequence as step 1 (credentials from the step text).",
             ]
 
             user_prompt = "\n".join(user_parts)
-
-            logger.info("Generating automation script via LLM for: %s", user_story[:80])
+            logger.info(
+                "Generating automation via LLM for manual test: %s", manual_test.get("name", "")
+            )
             raw = self.llm_client.generate(system_prompt, user_prompt)
-            script_code = _strip_code_fences(raw)
+            script = _strip_code_fences(raw)
+            return _strip_automation_placeholders(script)
+
         except Exception as exc:
             logger.warning(
-                "LLM automation generation failed, using fallback script: %s",
+                "LLM script generation failed for '%s', using fallback: %s",
+                manual_test.get("name", ""),
                 exc,
                 exc_info=True,
             )
-            script_code = self._build_automation_fallback_script(
-                user_story=user_story,
+            script = self._build_fallback_script_from_manual_test(
+                manual_test=manual_test,
                 application_url=application_url,
-                acceptance_criteria=acceptance_criteria,
             )
+            return _strip_automation_placeholders(script)
 
+    def _build_fallback_script_from_manual_test(
+        self,
+        manual_test: Dict[str, Any],
+        application_url: Optional[str],
+    ) -> str:
+        """Build a Playwright script by translating manual steps heuristically.
+
+        Each step's action text is classified and mapped to Playwright code,
+        preserving the manual test's order (including login as step 1).
+        """
+        logger.warning(
+            "⚠  Using heuristic fallback for manual test '%s'. "
+            "Set ANTHROPIC_API_KEY for LLM-powered generation.",
+            manual_test.get("name", ""),
+        )
+        steps: List[Dict[str, Any]] = manual_test.get("steps", [])
+        url = application_url or "https://example.com"
+
+        body_lines: List[str] = []
+
+        # If steps exist, translate them in order
+        if steps:
+            for step in steps:
+                action = step.get("action", "")
+                step_num = step.get("step_number", 1)
+                expected = step.get("expected_result", "")
+                body_lines.append(f"    # --- Step {step_num}: {action} ---")
+                # Translate this step
+                playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
+                # Remove the header comment (already added above)
+                playwright_lines = [ln for ln in playwright_lines if not ln.startswith(f"    # Step {step_num}:")]
+                body_lines.extend(playwright_lines)
+                if expected:
+                    body_lines.append(f"    # Expected: {expected}")
+        else:
+            # No steps at all — bare navigate
+            body_lines += [
+                "    # No manual steps provided — navigate to URL only",
+                f'    page.goto("{url}", timeout=60_000)',
+                '    page.wait_for_load_state("domcontentloaded")',
+            ]
+
+        body = "\n".join(body_lines)
+        test_func_name = self._derive_short_name(manual_test.get("name", "test"))
+        description = manual_test.get("description", manual_test.get("name", ""))
+
+        return (
+            f'"""{description.replace(chr(34), chr(39))} — automated by Phoenix."""\n'
+            "import re\n"
+            "import pytest\n"
+            "from playwright.sync_api import Page, expect\n"
+            "\n"
+            "\n"
+            f"def test_{test_func_name}(page: Page) -> None:\n"
+            f'    """{description.replace(chr(34), chr(39))}"""\n'
+            f"{body}\n"
+        )
+
+    def _generate_single_automation_fallback(
+        self,
+        user_story: str,
+        application_url: Optional[str],
+        acceptance_criteria: List[str],
+        risk_level: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Legacy single-script fallback used only when no manual tests exist."""
+        url = application_url or "https://example.com"
+        body_lines: List[str] = [
+            "    # Navigate to target URL",
+            f'    page.goto("{url}", timeout=60_000)',
+            '    page.wait_for_load_state("domcontentloaded")',
+            "",
+        ]
+        for idx, criterion in enumerate(acceptance_criteria, 1):
+            body_lines.extend(_criterion_to_playwright_lines(criterion, idx, application_url))
+
+        body = "\n".join(body_lines)
         test_name = self._derive_short_name(user_story)
+
+        script_code = (
+            "# WARNING: No manual tests — heuristic fallback from acceptance criteria.\n"
+            "import re\n"
+            "import pytest\n"
+            "from playwright.sync_api import Page, expect\n"
+            "\n\n"
+            f"def test_{test_name}(page: Page) -> None:\n"
+            f'    """{user_story.replace(chr(34), chr(39))}"""\n'
+            f"{body}\n"
+        )
 
         return [
             {
                 "name": test_name,
                 "description": user_story,
                 "script_template": "playwright",
-                "script_code": script_code,
+                "script_code": _strip_automation_placeholders(script_code),
                 "test_steps": acceptance_criteria,
                 "locators": [],
                 "application_url": application_url,
                 "risk_level": risk_level or "regression",
-                "tags": ["automation", "generated", "llm"],
+                "tags": ["automation", "generated", "fallback"],
             }
         ]
 
-    def _build_automation_fallback_script(
+    @staticmethod
+    def _format_manual_steps_for_prompt(manual_test: Dict[str, Any]) -> str:
+        """Format manual test steps as numbered list for the LLM prompt."""
+        steps: List[Dict[str, Any]] = manual_test.get("steps", [])
+        if not steps:
+            return "(no steps provided)"
+        lines = []
+        for step in steps:
+            num = step.get("step_number", "?")
+            action = step.get("action", "")
+            expected = step.get("expected_result", "")
+            test_data = step.get("test_data", "")
+            lines.append(f"**Step {num}:** {action}")
+            if test_data:
+                lines.append(f"  - Test data: {test_data}")
+            lines.append(f"  - Expected: {expected}")
+            lines.append("")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Public entry point: automate from pre-written manual tests
+    # ------------------------------------------------------------------
+
+    def automate_from_manual_tests(
         self,
-        user_story: str,
-        application_url: Optional[str],
-        acceptance_criteria: List[str],
-    ) -> str:
-        """Build a heuristic Playwright test from acceptance criteria when LLM fails.
+        manual_tests: List[Dict[str, Any]],
+        application_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate one automation script for each supplied manual test.
 
-        Uses the criteria-to-action mapping layer (RC-01 / RC-02) to emit real
-        Playwright interactions rather than comment-only stubs.
+        This is the entry point for ``phoenix automate`` — the user has already
+        reviewed / edited the manual tests on disk and now wants scripts derived
+        directly from those tests, with no LLM re-generation of the spec.
+
+        Args:
+            manual_tests:    Parsed manual test dicts (from manual_parser).
+            application_url: Optional URL for context in the automation prompt.
+
+        Returns:
+            dict with key ``automation_tests`` (list of automation test dicts).
         """
-        logger.warning(
-            "⚠  LLM generation failed — building heuristic script from acceptance criteria. "
-            "Set ANTHROPIC_API_KEY (or OPENAI_API_KEY / GOOGLE_API_KEY) for real generation."
-        )
-        url = application_url or "https://example.com"
+        if not manual_tests:
+            return {"automation_tests": []}
 
-        body_lines: List[str] = [
-            "    # Navigate to target URL",
-            f'    page.goto("{url}")',
-            '    page.wait_for_load_state("networkidle")',
-            "",
-        ]
+        knowledge_context = self.get_knowledge_context(query="playwright automation")
 
-        for idx, criterion in enumerate(acceptance_criteria, 1):
-            body_lines.extend(_criterion_to_playwright_lines(criterion, idx, application_url))
+        page_snapshot = ""
+        if self.mcp_client and application_url:
+            try:
+                page_snapshot = self.mcp_client.inspect_page(application_url) or ""
+            except Exception as exc:
+                logger.warning("MCP page inspection failed: %s", exc)
 
-        body = "\n".join(body_lines)
+        results = []
+        for manual_test in manual_tests:
+            script_code = self._generate_script_for_manual_test(
+                manual_test=manual_test,
+                application_url=application_url,
+                knowledge_context=knowledge_context,
+                page_snapshot=page_snapshot,
+            )
+            test_name = self._derive_short_name(manual_test.get("name", "test"))
+            results.append(
+                {
+                    "name": test_name,
+                    "description": manual_test.get("description", ""),
+                    "manual_test_name": manual_test.get("name", ""),
+                    "source_file": manual_test.get("source_file", ""),
+                    "script_template": "playwright",
+                    "script_code": script_code,
+                    "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
+                    "locators": [],
+                    "application_url": application_url,
+                    "risk_level": manual_test.get("risk_level", "regression"),
+                    "tags": ["automation", "generated", "manual-derived"],
+                }
+            )
+            logger.info("Automated manual test: %s", manual_test.get("name", ""))
 
-        return (
-            "# WARNING: This is heuristic fallback output — LLM generation failed.\n"
-            "# Set ANTHROPIC_API_KEY (or OPENAI_API_KEY / GOOGLE_API_KEY) for LLM-powered scripts.\n"
-            "import re\n"
-            "import pytest\n"
-            "from playwright.sync_api import Page, expect\n"
-            "\n"
-            "\n"
-            "def test_generated_automation_flow(page: Page):\n"
-            f'    """Heuristic fallback script for: {user_story.replace(chr(34), chr(39))}"""\n'
-            f"{body}\n"
-        )
+        return {"automation_tests": results}
 
     # ------------------------------------------------------------------
     # Helpers

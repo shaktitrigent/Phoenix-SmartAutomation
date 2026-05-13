@@ -16,6 +16,8 @@ from phoenix.storage.models import (
     ExecutionStatus,
 )
 from phoenix.sdk.intelligence_client import IntelligenceClient
+from phoenix.locators.extractor import extract_locators_from_script, page_name_from_script_path
+from phoenix.locators.registry import LocatorRegistry
 from datetime import datetime, timezone
 
 
@@ -113,9 +115,31 @@ class PhoenixClient:
         manual_tests_payload = intelligence_result.get("manual_tests", [])
         automation_tests_payload = intelligence_result.get("automation_tests", [])
 
-        # Generate manual tests
+        # ------------------------------------------------------------------
+        # Manual-First Pipeline: generate + validate manual tests first.
+        # Automation is only attempted when manual tests pass the gate.
+        # ------------------------------------------------------------------
         manual_tests = []
+        gate_passed = True  # True when manual gate passes (or not applicable)
+
         if test_type in ["manual", "both"]:
+            # Validate before writing — surface failures to caller
+            passing, failures = self._manual_generator.validate(manual_tests_payload)
+            if failures:
+                import logging as _logging
+
+                _log = _logging.getLogger(__name__)
+                for name, violations in failures:
+                    _log.warning(
+                        "Manual test '%s' failed quality gate: %s",
+                        name,
+                        "; ".join(violations),
+                    )
+                # In "both" mode: proceed with passing tests only
+                # In "manual" mode: still proceed so caller sees partial results
+                manual_tests_payload = passing
+                gate_passed = bool(passing)  # False only if *all* tests failed
+
             manual_test_data = self._manual_generator.generate(
                 manual_tests=manual_tests_payload,
                 user_story=user_story,
@@ -142,9 +166,9 @@ class PhoenixClient:
                     session.flush()
                     manual_tests.append({"id": test_case.id, **test_data})
 
-        # Generate automation tests
+        # Generate automation tests — skip if manual-first gate produced zero passing tests
         automation_tests = []
-        if test_type in ["automation", "both"]:
+        if test_type in ["automation", "both"] and gate_passed:
             automation_test_data = self._automation_generator.generate(
                 automation_tests=automation_tests_payload,
                 user_story=user_story,
@@ -172,6 +196,30 @@ class PhoenixClient:
                     session.flush()
                     automation_tests.append({"id": test_case.id, **test_data})
 
+        # ------------------------------------------------------------------
+        # Extract and save locators from every generated automation script
+        # ------------------------------------------------------------------
+        locators_saved = 0
+        if automation_tests:
+            locators_dir = Path(self.config.project.test_output_dir).parent / "locators"
+            locators_dir.mkdir(parents=True, exist_ok=True)
+            registry = LocatorRegistry()
+            for test in automation_tests:
+                script_path = test.get("script_path")
+                if not script_path or not Path(script_path).exists():
+                    continue
+                try:
+                    script_code = Path(script_path).read_text(encoding="utf-8")
+                    page = page_name_from_script_path(script_path)
+                    bundles = extract_locators_from_script(script_code, page_name=page)
+                    for bundle in bundles:
+                        registry.upsert(bundle)
+                    locators_saved += len(bundles)
+                except Exception:
+                    pass
+            if locators_saved:
+                registry.save_all(locators_dir)
+
         return {
             "manual_tests": manual_tests,
             "automation_tests": automation_tests,
@@ -181,6 +229,7 @@ class PhoenixClient:
                 "acceptance_criteria": acceptance_criteria,
                 "test_type": test_type,
                 "risk_level": risk_level,
+                "locators_saved": locators_saved,
             },
         }
 

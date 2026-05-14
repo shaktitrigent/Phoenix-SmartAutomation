@@ -67,7 +67,7 @@ alembic/versions/*.pyc
 manual_tests/
 reports/
 test_results/
-locators/
+locators/*.json
 
 # Linter cache
 .ruff_cache/

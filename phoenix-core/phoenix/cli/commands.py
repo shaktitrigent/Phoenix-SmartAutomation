@@ -1015,34 +1015,92 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
 
 
 @click.command()
-@click.option("--project", "-p", help="Project name (uses default if not specified)")
+@click.option("--run-id", "-r", default=None, help="Run ID to show (default: latest run)")
 @click.option(
-    "--execution-id",
-    "-e",
-    help="Execution ID to show (default: latest)",
+    "--logs-dir",
+    "-l",
+    default="logs",
+    type=click.Path(),
+    help="Directory containing JSONL execution logs (default: logs/)",
 )
 @click.pass_context
-def report(ctx, project, execution_id):
-    """Show execution report summary"""
-    config_path = ctx.obj.get("config_path")
-    verbose = ctx.obj.get("verbose", False)
+def report(ctx, run_id, logs_dir):
+    """Show a formatted summary report for the latest (or specified) test run."""
+    from phoenix.execution.logger import ExecutionLogger
+    from rich.table import Table
+    from rich import box as rich_box
 
-    client = PhoenixClient(config_path=config_path)
-    if project:
-        client.set_project(project)
+    exec_logger = ExecutionLogger(logs_dir=logs_dir)
+    runs = exec_logger.list_runs()
 
-    try:
-        result = client.get_execution_results(execution_id=execution_id)
-        if not result:
-            print_warning("No execution results found.")
+    if not runs:
+        print_warning("No execution results found. Run 'phoenix run' first.")
+        return
+
+    # Pick the target run
+    if run_id:
+        run = next((r for r in runs if r.get("run_id") == run_id), None)
+        if not run:
+            print_error(f"Run ID '{run_id}' not found in {logs_dir}/")
             return
-        print_report_summary(result)
-        if result.get("report_path"):
-            print_info(f"Full HTML report: {result['report_path']}")
-    except Exception as exc:
-        print_error(f"Error retrieving report: {exc}")
-        if verbose:
-            import traceback
+    else:
+        run = runs[0]
 
-            err_console.print(traceback.format_exc())
-        raise click.Abort() from exc
+    # Header
+    rid      = run.get("run_id", "—")
+    total    = run.get("total", 0)
+    passed   = run.get("passed", 0)
+    failed   = run.get("failed", 0)
+    skipped  = run.get("skipped", 0)
+    duration = run.get("duration_seconds", 0.0)
+    status   = run.get("status", "unknown")
+    started  = run.get("started_at", "")[:19].replace("T", " ")
+
+    click.echo("")
+    print_header(f"Run Report  —  {rid}")
+    click.echo(f"  Started : {started}")
+    click.echo(f"  Duration: {duration:.1f}s")
+    click.echo("")
+
+    status_line = (
+        f"[green]PASSED[/green]" if status == "passed"
+        else f"[red]FAILED[/red]" if status == "failed"
+        else status.upper()
+    )
+    from rich.console import Console as _Console
+    _con = _Console(highlight=False)
+    _con.print(
+        f"  Result  : {status_line}   "
+        f"[green]{passed} passed[/green]  "
+        f"[red]{failed} failed[/red]  "
+        f"[yellow]{skipped} skipped[/yellow]  "
+        f"(total: {total})"
+    )
+    click.echo("")
+
+    # Per-test breakdown
+    attempts = exec_logger.get_attempts(rid)
+    if attempts:
+        # Keep only the final attempt per test
+        final: dict = {}
+        for a in attempts:
+            if a.test_name not in final or a.attempt > final[a.test_name].attempt:
+                final[a.test_name] = a
+
+        table = Table(box=rich_box.SIMPLE, show_header=True, header_style="bold")
+        table.add_column("", width=4)
+        table.add_column("Test", no_wrap=False)
+        table.add_column("Attempts", justify="right", width=9)
+        table.add_column("Duration", justify="right", width=9)
+        table.add_column("Error", style="dim red", no_wrap=False)
+
+        for a in sorted(final.values(), key=lambda x: x.test_name):
+            icon = "[green]✓[/green]" if a.status == "passed" else "[red]✗[/red]"
+            err  = (a.error_message or "")[:80] if a.status != "passed" else ""
+            table.add_row(icon, a.test_name, str(a.attempt), f"{a.duration_seconds:.1f}s", err)
+
+        _con.print(table)
+
+    click.echo("")
+    if len(runs) > 1:
+        print_info(f"Showing run {rid}. Use --run-id to pick a different run.")

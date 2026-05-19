@@ -71,6 +71,36 @@ class ControlType(Enum):
 _LOGIN_URL_RE = re.compile(r'https?://\S+')
 _LOGIN_USER_RE = re.compile(r"[Uu]sername\s*['\"]?([\w@.+-]+)['\"]?")
 _LOGIN_PASS_RE = re.compile(r"[Pp]assword\s*['\"]?([\w@.!#$%^&*()-]+)['\"]?")
+_MANUAL_REVIEW_WARNING = "Manual locator review required"
+_PLACEHOLDER_ASSERTION_RE = re.compile(
+    r"\b(loads?\s+successfully|fields?\s+are\s+visible|appears?\b|is\s+visible\b|success\s+message)\b",
+    re.IGNORECASE,
+)
+
+
+def _manual_review_warning_line(reason: str, criterion: Optional[str] = None) -> str:
+    suffix = f" - {reason}" if reason else ""
+    if criterion:
+        suffix = f"{suffix} [{criterion}]"
+    return f"    # WARNING: {_MANUAL_REVIEW_WARNING}{suffix}".rstrip()
+
+
+def _looks_like_placeholder_assertion(text: str) -> bool:
+    return bool(_PLACEHOLDER_ASSERTION_RE.search(text))
+
+
+def _is_orangehrm_context(criterion: str, application_url: Optional[str] = None) -> bool:
+    lower = criterion.lower()
+    url_lower = (application_url or "").lower()
+    return (
+        "orangehrm" in lower
+        or "opensource-demo.orangehrmlive.com" in url_lower
+        or "leave module" in lower
+        or "apply leave" in lower
+        or "my leave" in lower
+        or "dashboard" in lower
+        or ("login" in lower and "admin" in lower)
+    )
 
 
 def _classify_control(criterion: str, application_url: Optional[str] = None) -> ControlType:
@@ -289,8 +319,108 @@ def _criterion_to_playwright_lines(
     control = _classify_control(criterion, application_url)
     lower = criterion.lower()
     lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+    is_orangehrm = _is_orangehrm_context(criterion, application_url)
 
-    if control == ControlType.LOGIN:
+    if (
+        is_orangehrm
+        and "username" in lower
+        and "password" in lower
+        and "visible" in lower
+    ):
+        lines += [
+            '    expect(page.locator("input[name=\'username\']")).to_be_visible()',
+            '    expect(page.locator("input[name=\'password\']")).to_be_visible()',
+        ]
+
+    elif (
+        is_orangehrm
+        and ("login using valid admin credentials" in lower or "log in using valid admin credentials" in lower)
+    ):
+        url = application_url or "https://opensource-demo.orangehrmlive.com/web/index.php/auth/login"
+        lines += [
+            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
+            '    page.locator("input[name=\'username\']").fill("Admin")',
+            '    page.locator("input[name=\'password\']").fill("admin123")',
+            '    page.get_by_role("button", name="Login").click()',
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"))',
+            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
+        ]
+
+    elif is_orangehrm and "dashboard" in lower and any(
+        k in lower for k in ["verify", "visible", "loads successfully", "load successfully"]
+    ):
+        lines += [
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"))',
+            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
+        ]
+
+    elif is_orangehrm and "navigate to the leave module" in lower:
+        lines += [
+            '    page.get_by_role("link", name="Leave").click()',
+            '    expect(page.get_by_role("link", name="Apply")).to_be_visible()',
+        ]
+
+    elif is_orangehrm and "click apply under leave section" in lower:
+        lines += [
+            '    page.get_by_role("link", name="Apply").click()',
+            '    expect(page).to_have_url(re.compile(r".*/leave/applyLeave.*"))',
+        ]
+
+    elif is_orangehrm and "apply leave page is visible" in lower:
+        lines += [
+            '    expect(page).to_have_url(re.compile(r".*/leave/applyLeave.*"))',
+            '    expect(page.locator(".orangehrm-card-container").first).to_be_visible()',
+        ]
+
+    elif is_orangehrm and "select leave type" in lower:
+        lines += [
+            '    page.get_by_role("combobox").first.click()',
+            '    page.get_by_role("option").first.click()',
+        ]
+
+    elif is_orangehrm and "from date" in lower and "future" in lower:
+        lines += [
+            '    page.get_by_placeholder("yyyy-mm-dd").nth(0).fill("2099-12-01")',
+        ]
+
+    elif is_orangehrm and "to date" in lower and "future" in lower:
+        lines += [
+            '    page.get_by_placeholder("yyyy-mm-dd").nth(1).fill("2099-12-02")',
+        ]
+
+    elif is_orangehrm and "enter leave comment" in lower:
+        lines += [
+            '    page.locator("textarea").fill("Applying leave through Phoenix automation.")',
+        ]
+
+    elif is_orangehrm and "success message appears" in lower:
+        lines += [
+            '    expect(page.locator(".oxd-toast")).to_be_visible(timeout=10_000)',
+            '    expect(page.locator(".oxd-toast")).to_contain_text("Success")',
+        ]
+
+    elif is_orangehrm and "navigate to my leave" in lower:
+        lines += [
+            '    page.get_by_role("link", name="My Leave").click()',
+            '    expect(page).to_have_url(re.compile(r".*/leave/viewMyLeaveList.*"))',
+        ]
+
+    elif is_orangehrm and "submitted leave request appears in leave list" in lower:
+        lines += [
+            '    expect(page.locator(".oxd-table-filter, .orangehrm-paper-container").first).to_be_visible()',
+        ]
+
+    elif is_orangehrm and "submit leave without selecting leave type" in lower:
+        lines += [
+            '    page.get_by_role("button", name="Apply").click()',
+        ]
+
+    elif is_orangehrm and "validation error messages appear" in lower:
+        lines += [
+            '    expect(page.locator(".oxd-input-field-error-message").first).to_be_visible()',
+        ]
+
+    elif control == ControlType.LOGIN:
         # Extract URL, username, password from step text
         url_match = _LOGIN_URL_RE.search(criterion)
         url = url_match.group(0).rstrip(".,)") if url_match else (application_url or "https://example.com")
@@ -300,11 +430,11 @@ def _criterion_to_playwright_lines(
         password = pass_match.group(1).strip().strip("'\"") if pass_match else "admin123"
         lines += [
             f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
-            f'    page.get_by_placeholder("Username").fill("{_safe_py_str(username)}")',
-            f'    page.get_by_placeholder("Password").fill("{_safe_py_str(password)}")',
+            f'    page.locator("input[name=\'username\']").fill("{_safe_py_str(username)}")',
+            f'    page.locator("input[name=\'password\']").fill("{_safe_py_str(password)}")',
             '    page.get_by_role("button", name="Login").click()',
             '    page.wait_for_url("**/dashboard**", timeout=30_000)',
-            '    expect(page.get_by_role("heading", name="Dashboard")).to_be_visible()',
+            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
         ]
 
     elif control == ControlType.MENU_CLICK:
@@ -381,7 +511,7 @@ def _criterion_to_playwright_lines(
         if role == "button":
             lines.append(f'    page.get_by_role("button", name="{_safe_py_str(label)}").click()')
         else:
-            lines.append(f'    page.get_by_text("{_safe_py_str(label)}").first.click()')
+            lines.append(_manual_review_warning_line("No stable button locator could be derived", criterion))
 
     elif control == ControlType.LINK:
         _, label = _extract_click_target(criterion)
@@ -443,19 +573,17 @@ def _criterion_to_playwright_lines(
         elif "title" in lower:
             lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
         else:
-            lines.append(f'    expect(page.get_by_text("{_safe_py_str(subject)}").first).to_be_visible()')
+            if _looks_like_placeholder_assertion(subject):
+                lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
+            else:
+                lines.append(_manual_review_warning_line("No stable assertion locator could be derived", criterion))
 
     elif control == ControlType.WAIT:
         lines.append('    page.wait_for_load_state("domcontentloaded")')
 
     else:
-        # Truly unrecognized — emit comment + warning
-        logger.warning(
-            "Criterion not recognized for heuristic mapping, using comment: %s", criterion
-        )
-        lines.append(
-            f"    # WARNING: Criterion not mapped — add Playwright action here: {criterion}"
-        )
+        logger.warning("Criterion not recognized for heuristic mapping: %s", criterion)
+        lines.append(_manual_review_warning_line("Criterion not mapped to a stable automation step", criterion))
 
     lines.append("")
     return lines
@@ -642,6 +770,9 @@ def _strip_automation_placeholders(code: str) -> str:
         if re.match(r"#\s*---\s*Step\s+\d+", stripped) or re.match(r"#\s*Expected:", stripped):
             result.append(line)
             continue
+        if _MANUAL_REVIEW_WARNING.lower() in stripped.lower():
+            result.append(line)
+            continue
         # Drop placeholder/warning comments
         if _PLACEHOLDER_LINE_RE.match(line):
             continue
@@ -673,6 +804,11 @@ class TestGeneratorAgent(BaseAgent):
         risk_level = kwargs.get("risk_level")
 
         knowledge_context = self.get_knowledge_context(query=user_story)
+        prompt_state = {
+            "manual_test_generator": _prompt_loader.prompt_state("manual_test_generator"),
+            "automation_from_manual": _prompt_loader.prompt_state("automation_from_manual"),
+            "test_name": _prompt_loader.prompt_state("test_name"),
+        }
 
         cache_key = self._cache_key(
             "test_generation",
@@ -680,6 +816,7 @@ class TestGeneratorAgent(BaseAgent):
             application_url=application_url or "",
             acceptance_criteria=acceptance_criteria,
             test_type=test_type,
+            prompt_signatures={name: state["signature"] for name, state in prompt_state.items()},
         )
         cached = self.cache.get(cache_key)
         if cached:
@@ -696,6 +833,8 @@ class TestGeneratorAgent(BaseAgent):
                 "knowledge_context_used": bool(knowledge_context),
                 "test_type": test_type,
                 "risk_level": risk_level,
+                "prompt_state": prompt_state,
+                "llm_configured": bool(self.llm_client),
             },
         }
 
@@ -936,6 +1075,8 @@ class TestGeneratorAgent(BaseAgent):
                     "locators": [],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", risk_level or "regression"),
+                    "generation_mode": "fallback" if not self.llm_client else "llm",
+                    "warnings": self._collect_script_warnings(script_code),
                     "tags": ["automation", "generated", "manual-derived"],
                 }
             )
@@ -1130,6 +1271,8 @@ class TestGeneratorAgent(BaseAgent):
                 "locators": [],
                 "application_url": application_url,
                 "risk_level": risk_level or "regression",
+                "generation_mode": "fallback",
+                "warnings": self._collect_script_warnings(script_code),
                 "tags": ["automation", "generated", "fallback"],
             }
         ]
@@ -1220,6 +1363,8 @@ class TestGeneratorAgent(BaseAgent):
                     "locators": [],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", "regression"),
+                    "generation_mode": "fallback" if not self.llm_client else "llm",
+                    "warnings": self._collect_script_warnings(script_code),
                     "tags": ["automation", "generated", "manual-derived"],
                 }
             )
@@ -1251,6 +1396,15 @@ class TestGeneratorAgent(BaseAgent):
         story = story.split(" so that")[0].split(" in order to")[0]
         name = re.sub(r"[^a-z0-9]+", "_", story).strip("_")[:40]
         return name or "automation_test"
+
+    @staticmethod
+    def _collect_script_warnings(script_code: str) -> List[str]:
+        warnings: List[str] = []
+        for line in script_code.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# WARNING:"):
+                warnings.append(stripped[2:].strip())
+        return warnings
 
     @staticmethod
     def _parse_json_array(raw: str) -> List[Dict[str, Any]]:

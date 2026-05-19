@@ -1,0 +1,178 @@
+[
+  {
+    "element_name": "username_input",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "username_input",
+      "strategy": "css",
+      "value": "input[name='username']",
+      "confidence": 0.98,
+      "fallback": false,
+      "description": "Stable OrangeHRM username field"
+    },
+    "alternates": [
+      {
+        "element_name": "username_input",
+        "strategy": "placeholder",
+        "value": "Username",
+        "confidence": 0.8,
+        "fallback": true,
+        "description": "Placeholder fallback for the username field"
+      }
+    ],
+    "notes": "Curated for stable OrangeHRM login automation"
+  },
+  {
+    "element_name": "password_input",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "password_input",
+      "strategy": "css",
+      "value": "input[name='password']",
+      "confidence": 0.98,
+      "fallback": false,
+      "description": "Stable OrangeHRM password field"
+    },
+    "alternates": [
+      {
+        "element_name": "password_input",
+        "strategy": "placeholder",
+        "value": "Password",
+        "confidence": 0.8,
+        "fallback": true,
+        "description": "Placeholder fallback for the password field"
+      }
+    ],
+    "notes": "Curated for stable OrangeHRM login automation"
+  },
+  {
+    "element_name": "login_button",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "login_button",
+      "strategy": "role",
+      "value": "button[name=Login]",
+      "confidence": 0.96,
+      "fallback": false,
+      "description": "Role-backed OrangeHRM login button"
+    },
+    "alternates": [],
+    "notes": "Curated for stable OrangeHRM login automation"
+  },
+  {
+    "element_name": "dashboard_breadcrumb",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "dashboard_breadcrumb",
+      "strategy": "css",
+      "value": ".oxd-topbar-header-breadcrumb-module",
+      "confidence": 0.92,
+      "fallback": false,
+      "description": "Stable dashboard breadcrumb container"
+    },
+    "alternates": [
+      {
+        "element_name": "dashboard_breadcrumb",
+        "strategy": "role",
+        "value": "link[name=Leave]",
+        "confidence": 0.75,
+        "fallback": true,
+        "description": "Fallback post-login navigation marker"
+      }
+    ],
+    "notes": "Use with URL assertion for dashboard validation"
+  },
+  {
+    "element_name": "invalid_credentials_banner",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "invalid_credentials_banner",
+      "strategy": "css",
+      "value": ".oxd-alert-content-text",
+      "confidence": 0.9,
+      "fallback": false,
+      "description": "OrangeHRM invalid credential banner"
+    },
+    "alternates": [
+      {
+        "element_name": "invalid_credentials_banner",
+        "strategy": "text",
+        "value": "Invalid credentials",
+        "confidence": 0.7,
+        "fallback": true,
+        "description": "Fallback exact banner text"
+      }
+    ],
+    "notes": "Use for negative login validation"
+  },
+  {
+    "element_name": "leave_menu_link",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "leave_menu_link",
+      "strategy": "role",
+      "value": "link[name=Leave]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "OrangeHRM Leave menu entry"
+    },
+    "alternates": [],
+    "notes": "Curated navigation locator"
+  },
+  {
+    "element_name": "apply_link",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "apply_link",
+      "strategy": "role",
+      "value": "link[name=Apply]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "OrangeHRM Apply Leave sub-navigation link"
+    },
+    "alternates": [],
+    "notes": "Curated navigation locator"
+  },
+  {
+    "element_name": "leave_type_dropdown",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "leave_type_dropdown",
+      "strategy": "css",
+      "value": "div.oxd-input-group:has-text('Leave Type') .oxd-select-text",
+      "confidence": 0.88,
+      "fallback": false,
+      "description": "Scoped Leave Type dropdown trigger"
+    },
+    "alternates": [],
+    "notes": "Curated for Apply Leave form synchronization"
+  },
+  {
+    "element_name": "comment_box",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "comment_box",
+      "strategy": "css",
+      "value": "textarea",
+      "confidence": 0.82,
+      "fallback": false,
+      "description": "Apply Leave comment textarea"
+    },
+    "alternates": [],
+    "notes": "Curated for Apply Leave form synchronization"
+  },
+  {
+    "element_name": "apply_button",
+    "page": "001_tc_001_apply_for_leave",
+    "primary": {
+      "element_name": "apply_button",
+      "strategy": "role",
+      "value": "button[name=Apply]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "Apply Leave submission button"
+    },
+    "alternates": [],
+    "notes": "Curated action locator"
+  }
+]

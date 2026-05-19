@@ -1,0 +1,297 @@
+[
+  {
+    "element_name": "login_button",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "login_button",
+      "strategy": "role",
+      "value": "button[name=Login]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "Role 'button' name 'Login'"
+    },
+    "alternates": [
+      {
+        "element_name": "login_button",
+        "strategy": "text",
+        "value": "Login",
+        "confidence": 0.7,
+        "fallback": true,
+        "description": "Text fallback for role 'button' name 'Login'"
+      },
+      {
+        "element_name": "login_button",
+        "strategy": "css",
+        "value": "button:has-text(\"Login\")",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "CSS :has-text fallback for button 'Login'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "leave_link",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "leave_link",
+      "strategy": "role",
+      "value": "link[name=Leave]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "Role 'link' name 'Leave'"
+    },
+    "alternates": [
+      {
+        "element_name": "leave_link",
+        "strategy": "text",
+        "value": "Leave",
+        "confidence": 0.7,
+        "fallback": true,
+        "description": "Text fallback for role 'link' name 'Leave'"
+      },
+      {
+        "element_name": "leave_link",
+        "strategy": "css",
+        "value": "link:has-text(\"Leave\")",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "CSS :has-text fallback for link 'Leave'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "apply_link",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "apply_link",
+      "strategy": "role",
+      "value": "link[name=Apply]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "Role 'link' name 'Apply'"
+    },
+    "alternates": [
+      {
+        "element_name": "apply_link",
+        "strategy": "text",
+        "value": "Apply",
+        "confidence": 0.7,
+        "fallback": true,
+        "description": "Text fallback for role 'link' name 'Apply'"
+      },
+      {
+        "element_name": "apply_link",
+        "strategy": "css",
+        "value": "link:has-text(\"Apply\")",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "CSS :has-text fallback for link 'Apply'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "apply_button",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "apply_button",
+      "strategy": "role",
+      "value": "button[name=Apply]",
+      "confidence": 0.95,
+      "fallback": false,
+      "description": "Role 'button' name 'Apply'"
+    },
+    "alternates": [
+      {
+        "element_name": "apply_button",
+        "strategy": "text",
+        "value": "Apply",
+        "confidence": 0.7,
+        "fallback": true,
+        "description": "Text fallback for role 'button' name 'Apply'"
+      },
+      {
+        "element_name": "apply_button",
+        "strategy": "css",
+        "value": "button:has-text(\"Apply\")",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "CSS :has-text fallback for button 'Apply'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "oxd-topbar-header-breadcrumb-module",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "oxd-topbar-header-breadcrumb-module",
+      "strategy": "css",
+      "value": ".oxd-topbar-header-breadcrumb-module",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: '.oxd-topbar-header-breadcrumb-module'"
+    },
+    "alternates": [
+      {
+        "element_name": "oxd-topbar-header-breadcrumb-module",
+        "strategy": "css",
+        "value": "[class*='oxd-topbar-header-breadcrumb-module']",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "Partial class fallback for '.oxd-topbar-header-breadcrumb-module'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "orangehrm-card-container",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "orangehrm-card-container",
+      "strategy": "css",
+      "value": ".orangehrm-card-container",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: '.orangehrm-card-container'"
+    },
+    "alternates": [
+      {
+        "element_name": "orangehrm-card-container",
+        "strategy": "css",
+        "value": "[class*='orangehrm-card-container']",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "Partial class fallback for '.orangehrm-card-container'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "div_oxd-input-group",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "div_oxd-input-group",
+      "strategy": "css",
+      "value": "div.oxd-input-group",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: 'div.oxd-input-group'"
+    },
+    "alternates": [],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "oxd-select-text",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "oxd-select-text",
+      "strategy": "css",
+      "value": ".oxd-select-text",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: '.oxd-select-text'"
+    },
+    "alternates": [
+      {
+        "element_name": "oxd-select-text",
+        "strategy": "css",
+        "value": "[class*='oxd-select-text']",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "Partial class fallback for '.oxd-select-text'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "oxd-select-dropdown",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "oxd-select-dropdown",
+      "strategy": "css",
+      "value": ".oxd-select-dropdown",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: '.oxd-select-dropdown'"
+    },
+    "alternates": [
+      {
+        "element_name": "oxd-select-dropdown",
+        "strategy": "css",
+        "value": "[class*='oxd-select-dropdown']",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "Partial class fallback for '.oxd-select-dropdown'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "oxd-select-dropdown _oxd-select-option",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "oxd-select-dropdown _oxd-select-option",
+      "strategy": "css",
+      "value": ".oxd-select-dropdown .oxd-select-option",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: '.oxd-select-dropdown .oxd-select-option'"
+    },
+    "alternates": [],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "input",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "input",
+      "strategy": "css",
+      "value": "input",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: 'input'"
+    },
+    "alternates": [],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "textarea",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "textarea",
+      "strategy": "css",
+      "value": "textarea",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: 'textarea'"
+    },
+    "alternates": [],
+    "notes": "Auto-extracted from script during phoenix generate"
+  },
+  {
+    "element_name": "oxd-toast",
+    "page": "005_leave_application_boundary_cases",
+    "primary": {
+      "element_name": "oxd-toast",
+      "strategy": "css",
+      "value": ".oxd-toast",
+      "confidence": 0.65,
+      "fallback": false,
+      "description": "CSS/XPath selector: '.oxd-toast'"
+    },
+    "alternates": [
+      {
+        "element_name": "oxd-toast",
+        "strategy": "css",
+        "value": "[class*='oxd-toast']",
+        "confidence": 0.5,
+        "fallback": true,
+        "description": "Partial class fallback for '.oxd-toast'"
+      }
+    ],
+    "notes": "Auto-extracted from script during phoenix generate"
+  }
+]

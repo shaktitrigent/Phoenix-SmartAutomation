@@ -52,6 +52,11 @@ _LABEL_RE = re.compile(r'get_by_label\(["\']([^"\']+)["\']\)')
 _TEXT_RE = re.compile(r'get_by_text\(["\']([^"\']+)["\']\)')
 _TESTID_RE = re.compile(r'get_by_test_id\(["\']([^"\']+)["\']\)')
 _LOCATOR_RE = re.compile(r'(?<!\w)locator\(["\']([^"\']+)["\']\)')
+_IGNORE_TEXT_RE = re.compile(
+    r"\b(loads?\s+successfully|fields?\s+are\s+visible|manual locator review required"
+    r"|criterion not mapped|success message appears|validation error messages appear)\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +252,10 @@ def extract_locators_from_script(
         description: str,
         alternates: List[Locator],
     ) -> None:
+        if strategy == LocatorStrategy.TEXT and _IGNORE_TEXT_RE.search(value):
+            return
+        if strategy == LocatorStrategy.ROLE and value == "heading":
+            return
         dedup_key = (strategy.value, value)
         if dedup_key in seen:
             return

@@ -8,6 +8,9 @@
 
 **Never hardcode real credentials.** All usernames, passwords, and tokens come from environment variables or fixtures. Test data uses obviously synthetic values and `@example.com` domains.
 
+**Positive and negative login scenarios must not share authenticated browser state.**
+Use a fresh browser context or a fresh `page` fixture for invalid-credential scenarios so a prior successful login cannot leak into a negative-path test.
+
 ---
 
 ## 1. Auth Fixture — Reusable Login Setup
@@ -533,3 +536,5 @@ When generating login flow tests, follow these rules strictly:
 10. **Always add `import re` and `import os`** at the top of generated test files.
 11. **Test emails must use `@example.com`** (RFC 2606 reserved). Never use real email domains.
 12. **For password reset tests**, assert the confirmation message without verifying whether the email exists — this validates the security practice of not leaking user enumeration.
+13. **For OrangeHRM specifically, use `input[name='username']`, `input[name='password']`, `get_by_role("button", name="Login")`, breadcrumb-based dashboard validation, and `.oxd-alert-content-text` for invalid credentials.**
+14. **For invalid-login tests, explicitly start from a fresh page/context and assert the app remains on `/auth/login`.**

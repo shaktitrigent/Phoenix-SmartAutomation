@@ -225,6 +225,7 @@ class PhoenixClient:
             "automation_tests": automation_tests,
             "project": project_name,
             "metadata": {
+                **intelligence_result.get("metadata", {}),
                 "user_story": user_story,
                 "acceptance_criteria": acceptance_criteria,
                 "test_type": test_type,

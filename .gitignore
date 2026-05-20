@@ -68,14 +68,7 @@ manual_tests/
 reports/
 test_results/
 locators/*.json
-foco/
-logs/
-**/manual_tests/
-**/reports/
-**/test_results/
-**/logs/
-**/locators/*.json
-**/debug_screenshots/
+
 
 # Linter cache
 .ruff_cache/

@@ -69,6 +69,7 @@ reports/
 test_results/
 locators/*.json
 
+
 # Linter cache
 .ruff_cache/
 

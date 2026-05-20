@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import textwrap
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -71,6 +72,36 @@ class ControlType(Enum):
 _LOGIN_URL_RE = re.compile(r'https?://\S+')
 _LOGIN_USER_RE = re.compile(r"[Uu]sername\s*['\"]?([\w@.+-]+)['\"]?")
 _LOGIN_PASS_RE = re.compile(r"[Pp]assword\s*['\"]?([\w@.!#$%^&*()-]+)['\"]?")
+_MANUAL_REVIEW_WARNING = "Manual locator review required"
+_PLACEHOLDER_ASSERTION_RE = re.compile(
+    r"\b(loads?\s+successfully|fields?\s+are\s+visible|appears?\b|is\s+visible\b|success\s+message)\b",
+    re.IGNORECASE,
+)
+
+
+def _manual_review_warning_line(reason: str, criterion: Optional[str] = None) -> str:
+    suffix = f" - {reason}" if reason else ""
+    if criterion:
+        suffix = f"{suffix} [{criterion}]"
+    return f"    # WARNING: {_MANUAL_REVIEW_WARNING}{suffix}".rstrip()
+
+
+def _looks_like_placeholder_assertion(text: str) -> bool:
+    return bool(_PLACEHOLDER_ASSERTION_RE.search(text))
+
+
+def _is_orangehrm_context(criterion: str, application_url: Optional[str] = None) -> bool:
+    lower = criterion.lower()
+    url_lower = (application_url or "").lower()
+    return (
+        "orangehrm" in lower
+        or "opensource-demo.orangehrmlive.com" in url_lower
+        or "leave module" in lower
+        or "apply leave" in lower
+        or "my leave" in lower
+        or "dashboard" in lower
+        or ("login" in lower and "admin" in lower)
+    )
 
 
 def _classify_control(criterion: str, application_url: Optional[str] = None) -> ControlType:
@@ -289,8 +320,108 @@ def _criterion_to_playwright_lines(
     control = _classify_control(criterion, application_url)
     lower = criterion.lower()
     lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+    is_orangehrm = _is_orangehrm_context(criterion, application_url)
 
-    if control == ControlType.LOGIN:
+    if (
+        is_orangehrm
+        and "username" in lower
+        and "password" in lower
+        and "visible" in lower
+    ):
+        lines += [
+            '    expect(page.locator("input[name=\'username\']")).to_be_visible()',
+            '    expect(page.locator("input[name=\'password\']")).to_be_visible()',
+        ]
+
+    elif (
+        is_orangehrm
+        and ("login using valid admin credentials" in lower or "log in using valid admin credentials" in lower)
+    ):
+        url = application_url or "https://opensource-demo.orangehrmlive.com/web/index.php/auth/login"
+        lines += [
+            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
+            '    page.locator("input[name=\'username\']").fill("Admin")',
+            '    page.locator("input[name=\'password\']").fill("admin123")',
+            '    page.get_by_role("button", name="Login").click()',
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"))',
+            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
+        ]
+
+    elif is_orangehrm and "dashboard" in lower and any(
+        k in lower for k in ["verify", "visible", "loads successfully", "load successfully"]
+    ):
+        lines += [
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"))',
+            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
+        ]
+
+    elif is_orangehrm and "navigate to the leave module" in lower:
+        lines += [
+            '    page.get_by_role("link", name="Leave").click()',
+            '    expect(page.get_by_role("link", name="Apply")).to_be_visible()',
+        ]
+
+    elif is_orangehrm and "click apply under leave section" in lower:
+        lines += [
+            '    page.get_by_role("link", name="Apply").click()',
+            '    expect(page).to_have_url(re.compile(r".*/leave/applyLeave.*"))',
+        ]
+
+    elif is_orangehrm and "apply leave page is visible" in lower:
+        lines += [
+            '    expect(page).to_have_url(re.compile(r".*/leave/applyLeave.*"))',
+            '    expect(page.locator(".orangehrm-card-container").first).to_be_visible()',
+        ]
+
+    elif is_orangehrm and "select leave type" in lower:
+        lines += [
+            '    click_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("Leave Type", exact=True)).locator(".oxd-select-text").first, "Leave Type dropdown")',
+            '    click_ready(page, page.get_by_role("option").first, "Leave Type option")',
+        ]
+
+    elif is_orangehrm and "from date" in lower and "future" in lower:
+        lines += [
+            '    fill_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("From Date", exact=True)).locator("input").first, "2099-12-01", "From Date input")',
+        ]
+
+    elif is_orangehrm and "to date" in lower and "future" in lower:
+        lines += [
+            '    fill_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("To Date", exact=True)).locator("input").first, "2099-12-02", "To Date input")',
+        ]
+
+    elif is_orangehrm and "enter leave comment" in lower:
+        lines += [
+            '    page.locator("textarea").fill("Applying leave through Phoenix automation.")',
+        ]
+
+    elif is_orangehrm and "success message appears" in lower:
+        lines += [
+            '    expect(page.locator(".oxd-toast")).to_be_visible(timeout=10_000)',
+            '    expect(page.locator(".oxd-toast")).to_contain_text("Success")',
+        ]
+
+    elif is_orangehrm and "navigate to my leave" in lower:
+        lines += [
+            '    page.get_by_role("link", name="My Leave").click()',
+            '    expect(page).to_have_url(re.compile(r".*/leave/viewMyLeaveList.*"))',
+        ]
+
+    elif is_orangehrm and "submitted leave request appears in leave list" in lower:
+        lines += [
+            '    expect(page.locator(".oxd-table-filter, .orangehrm-paper-container").first).to_be_visible()',
+        ]
+
+    elif is_orangehrm and "submit leave without selecting leave type" in lower:
+        lines += [
+            '    page.get_by_role("button", name="Apply").click()',
+        ]
+
+    elif is_orangehrm and "validation error messages appear" in lower:
+        lines += [
+            '    expect(page.locator(".oxd-input-field-error-message").first).to_be_visible()',
+        ]
+
+    elif control == ControlType.LOGIN:
         # Extract URL, username, password from step text
         url_match = _LOGIN_URL_RE.search(criterion)
         url = url_match.group(0).rstrip(".,)") if url_match else (application_url or "https://example.com")
@@ -299,12 +430,12 @@ def _criterion_to_playwright_lines(
         pass_match = _LOGIN_PASS_RE.search(criterion)
         password = pass_match.group(1).strip().strip("'\"") if pass_match else "admin123"
         lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
-            f'    page.get_by_placeholder("Username").fill("{_safe_py_str(username)}")',
-            f'    page.get_by_placeholder("Password").fill("{_safe_py_str(password)}")',
-            '    page.get_by_role("button", name="Login").click()',
-            '    page.wait_for_url("**/dashboard**", timeout=30_000)',
-            '    expect(page.get_by_role("heading", name="Dashboard")).to_be_visible()',
+            f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    fill_ready(page, page.locator("input[name=\'username\']"), "{_safe_py_str(username)}", "Username input")',
+            f'    fill_ready(page, page.locator("input[name=\'password\']"), "{_safe_py_str(password)}", "Password input")',
+            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
+            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
         ]
 
     elif control == ControlType.MENU_CLICK:
@@ -325,28 +456,34 @@ def _criterion_to_playwright_lines(
         # Prefer quoted value if present
         label = _extract_quoted_value(criterion) or label
         lines += [
-            f'    page.get_by_role("link", name="{_safe_py_str(label)}").click()',
-            f'    expect(page.get_by_role("link", name="{_safe_py_str(label)}")).to_be_visible()',
+            f'    click_ready(page, page.get_by_role("link", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} navigation link")',
+            f'    expect(page.get_by_role("link", name="{_safe_py_str(label)}", exact=True)).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.NAVIGATE:
         url = _extract_quoted_value(criterion) or application_url or "https://example.com"
         lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
-            '    page.wait_for_load_state("domcontentloaded")',
+            f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.TEXT_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").fill("{_safe_py_str(value)}")')
+        lines.append(
+            f'    fill_ready(page, page.get_by_label("{_safe_py_str(field)}", exact=True), "{_safe_py_str(value)}", "{_safe_py_str(field)} field")'
+        )
 
     elif control == ControlType.PASSWORD_INPUT:
         _, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("Password").fill("{_safe_py_str(value)}")')
+        lines.append(
+            f'    fill_ready(page, page.get_by_label("Password", exact=True), "{_safe_py_str(value)}", "Password field")'
+        )
 
     elif control == ControlType.EMAIL_INPUT:
         _, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("Email").fill("{_safe_py_str(value)}")')
+        lines.append(
+            f'    fill_ready(page, page.get_by_label("Email", exact=True), "{_safe_py_str(value)}", "Email field")'
+        )
 
     elif control == ControlType.CHECKBOX:
         if any(k in lower for k in ["uncheck", "untick"]):
@@ -371,7 +508,9 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.SELECT_DROPDOWN:
         field, option = _extract_select_option(criterion)
-        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").select_option("{_safe_py_str(option)}")')
+        lines += [
+            f'    unique_visible(page.get_by_label("{_safe_py_str(field)}", exact=True), "{_safe_py_str(field)} dropdown").select_option("{_safe_py_str(option)}")',
+        ]
 
     elif control == ControlType.FILE_INPUT:
         lines.append("    page.locator('input[type=\"file\"]').set_input_files('test_file.txt')")
@@ -379,47 +518,53 @@ def _criterion_to_playwright_lines(
     elif control == ControlType.BUTTON:
         role, label = _extract_click_target(criterion)
         if role == "button":
-            lines.append(f'    page.get_by_role("button", name="{_safe_py_str(label)}").click()')
+            lines.append(
+                f'    click_ready(page, page.get_by_role("button", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} button")'
+            )
         else:
-            lines.append(f'    page.get_by_text("{_safe_py_str(label)}").first.click()')
+            lines.append(_manual_review_warning_line("No stable button locator could be derived", criterion))
 
     elif control == ControlType.LINK:
         _, label = _extract_click_target(criterion)
-        lines.append(f'    page.get_by_role("link", name="{_safe_py_str(label)}").click()')
+        lines.append(
+            f'    click_ready(page, page.get_by_role("link", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} link")'
+        )
 
     elif control == ControlType.FORM_SUBMIT:
-        lines.append('    page.get_by_role("button", name="Submit").click()')
+        lines.append('    click_ready(page, page.get_by_role("button", name="Submit", exact=True), "Submit button")')
 
     elif control == ControlType.BROWSER_ALERT:
         if "dismiss" in lower:
             lines += [
-                '    page.on("dialog", lambda dialog: dialog.dismiss())',
+                '    page.once("dialog", lambda dialog: dialog.dismiss())',
                 "    # Trigger the alert",
-                '    page.get_by_role("button").first.click()',
+                '    click_ready(page, page.get_by_role("button").first, "Alert trigger button")',
             ]
         else:
             lines += [
-                '    page.on("dialog", lambda dialog: dialog.accept())',
+                '    page.once("dialog", lambda dialog: dialog.accept())',
                 "    # Trigger the alert",
-                '    page.get_by_role("button").first.click()',
+                '    click_ready(page, page.get_by_role("button").first, "Alert trigger button")',
             ]
 
     elif control == ControlType.BROWSER_CONFIRM:
         if "dismiss" in lower or "cancel" in lower:
-            lines.append('    page.on("dialog", lambda dialog: dialog.dismiss())')
+            lines.append('    page.once("dialog", lambda dialog: dialog.dismiss())')
         else:
-            lines.append('    page.on("dialog", lambda dialog: dialog.accept())')
+            lines.append('    page.once("dialog", lambda dialog: dialog.accept())')
 
     elif control == ControlType.BROWSER_PROMPT:
         prompt_val = _extract_quoted_value(criterion) or "response text"
-        lines.append(f'    page.on("dialog", lambda dialog: dialog.accept("{_safe_py_str(prompt_val)}"))')
+        lines.append(f'    page.once("dialog", lambda dialog: dialog.accept("{_safe_py_str(prompt_val)}"))')
 
     elif control == ControlType.HOVER_TARGET:
         cleaned = re.sub(
             r"^(?:hover|mouse over)\s+(?:over\s+)?(?:the\s+)?", "", criterion, flags=re.IGNORECASE
         ).strip()
         target = _extract_quoted_value(criterion) or cleaned or "element"
-        lines.append(f'    page.get_by_text("{_safe_py_str(target)}").hover()')
+        lines.append(
+            f'    unique_visible(page.get_by_text("{_safe_py_str(target)}", exact=True), "{_safe_py_str(target)} hover target").hover()'
+        )
 
     elif control == ControlType.DRAG_DROP:
         lines += [
@@ -443,19 +588,22 @@ def _criterion_to_playwright_lines(
         elif "title" in lower:
             lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
         else:
-            lines.append(f'    expect(page.get_by_text("{_safe_py_str(subject)}").first).to_be_visible()')
+            if _looks_like_placeholder_assertion(subject):
+                lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
+            else:
+                lines.append(
+                    f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=True), "{_safe_py_str(subject)} assertion target")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)'
+                )
 
     elif control == ControlType.WAIT:
-        lines.append('    page.wait_for_load_state("domcontentloaded")')
+        lines += [
+            '    dismiss_known_overlays(page)',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
+        ]
 
     else:
-        # Truly unrecognized — emit comment + warning
-        logger.warning(
-            "Criterion not recognized for heuristic mapping, using comment: %s", criterion
-        )
-        lines.append(
-            f"    # WARNING: Criterion not mapped — add Playwright action here: {criterion}"
-        )
+        logger.warning("Criterion not recognized for heuristic mapping: %s", criterion)
+        lines.append(_manual_review_warning_line("Criterion not mapped to a stable automation step", criterion))
 
     lines.append("")
     return lines
@@ -580,6 +728,153 @@ _PLACEHOLDER_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GLOB_URL_WAIT_RE = re.compile(
+    r'(?P<indent>\s*)page\.wait_for_url\("(?P<glob>\*\*[^"]+)",\s*timeout=(?P<timeout>\d+)\)'
+)
+
+_FALLBACK_RUNTIME_HELPERS = textwrap.dedent(
+    """
+    ACTION_TIMEOUT_MS = 30_000
+    NAVIGATION_TIMEOUT_MS = 60_000
+    ASSERTION_TIMEOUT_MS = 15_000
+    OVERLAY_SELECTORS = [
+        "[role='dialog']",
+        "[aria-modal='true']",
+        "[data-testid*='modal']",
+        "[data-testid*='overlay']",
+        "[class*='modal']",
+        "[class*='overlay']",
+        "[class*='backdrop']",
+    ]
+
+
+    def configure_page(page: Page) -> None:
+        page.set_default_timeout(ACTION_TIMEOUT_MS)
+        page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+
+
+    def dismiss_known_overlays(page: Page) -> None:
+        for selector in OVERLAY_SELECTORS:
+            overlay = page.locator(selector)
+            try:
+                if overlay.count() == 0:
+                    continue
+                close_button = overlay.get_by_role(
+                    "button",
+                    name=re.compile(r"close|dismiss|cancel|not now|skip|got it", re.IGNORECASE),
+                ).first
+                if close_button.is_visible(timeout=1_000):
+                    close_button.click(timeout=2_000)
+            except Exception:
+                continue
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+
+    def unique_visible(locator: Locator, description: str) -> Locator:
+        expect(locator).to_have_count(1, timeout=ASSERTION_TIMEOUT_MS)
+        expect(locator).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)
+        return locator
+
+
+    def click_ready(page: Page, locator: Locator, description: str) -> None:
+        dismiss_known_overlays(page)
+        target = unique_visible(locator, description)
+        expect(target).to_be_enabled(timeout=ASSERTION_TIMEOUT_MS)
+        target.scroll_into_view_if_needed()
+        target.click(timeout=ACTION_TIMEOUT_MS)
+
+
+    def fill_ready(page: Page, locator: Locator, value: str, description: str) -> None:
+        dismiss_known_overlays(page)
+        target = unique_visible(locator, description)
+        target.scroll_into_view_if_needed()
+        target.fill(value, timeout=ACTION_TIMEOUT_MS)
+
+
+    def expect_url_path(page: Page, path_fragment: str) -> None:
+        expect(
+            page,
+        ).to_have_url(
+            re.compile(rf".*{re.escape(path_fragment.strip('/'))}.*"),
+            timeout=NAVIGATION_TIMEOUT_MS,
+        )
+    """
+).strip()
+
+
+def _glob_to_url_regex(glob_pattern: str) -> str:
+    """Convert a simple Playwright glob URL pattern into a regex fragment."""
+    pattern = glob_pattern
+    if pattern.startswith("**/"):
+        pattern = pattern[3:]
+    pattern = pattern.strip("*")
+    pattern = pattern.strip("/")
+    escaped_pattern = re.escape(pattern).replace("\\/", "/")
+    return rf".*{escaped_pattern}.*"
+
+
+def _inject_runtime_helpers(script: str) -> str:
+    """Add shared Playwright helper functions and stronger imports to generated scripts."""
+    if "def configure_page(page: Page)" in script:
+        return script
+
+    script = re.sub(
+        r"from playwright\.sync_api import Page, expect",
+        "from playwright.sync_api import Locator, Page, expect",
+        script,
+    )
+
+    if "from playwright.sync_api import Locator, Page, expect" not in script:
+        script = script.replace(
+            "from playwright.sync_api import Page, expect",
+            "from playwright.sync_api import Locator, Page, expect",
+        )
+
+    helper_block = f"\n\n{_FALLBACK_RUNTIME_HELPERS}\n\n"
+
+    import_anchor = "from playwright.sync_api import Locator, Page, expect\n"
+    if import_anchor in script:
+        script = script.replace(import_anchor, import_anchor + helper_block, 1)
+    else:
+        script = helper_block + script
+
+    return script
+
+
+def _normalise_generated_script(script: str) -> str:
+    """Tighten generated Playwright code for dynamic UIs and strict-mode safety."""
+    script = _strip_automation_placeholders(script)
+    script = _inject_runtime_helpers(script)
+
+    script = _GLOB_URL_WAIT_RE.sub(
+        lambda m: (
+            f'{m.group("indent")}expect(page).to_have_url('
+            f're.compile(r"{_glob_to_url_regex(m.group("glob"))}"), '
+            f'timeout={m.group("timeout")})'
+        ),
+        script,
+    )
+
+    script = re.sub(
+        r'(?m)^(\s*)page\.wait_for_load_state\("networkidle"(?:,\s*timeout=\d+)?\)\s*$',
+        r'\1expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
+        script,
+    )
+
+    if "configure_page(page)" not in script:
+        script = re.sub(
+            r'(^def test_[^(]+\([^)]*\)\s*->\s*None:\n(?:\s+""".*?"""\n)?)',
+            r"\1    configure_page(page)\n    dismiss_known_overlays(page)\n",
+            script,
+            count=1,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+
+    return script
+
 
 def _cap_and_consolidate(tests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Enforce maximum _MAX_MANUAL_TESTS tests, prioritising coverage diversity.
@@ -642,6 +937,9 @@ def _strip_automation_placeholders(code: str) -> str:
         if re.match(r"#\s*---\s*Step\s+\d+", stripped) or re.match(r"#\s*Expected:", stripped):
             result.append(line)
             continue
+        if _MANUAL_REVIEW_WARNING.lower() in stripped.lower():
+            result.append(line)
+            continue
         # Drop placeholder/warning comments
         if _PLACEHOLDER_LINE_RE.match(line):
             continue
@@ -673,6 +971,11 @@ class TestGeneratorAgent(BaseAgent):
         risk_level = kwargs.get("risk_level")
 
         knowledge_context = self.get_knowledge_context(query=user_story)
+        prompt_state = {
+            "manual_test_generator": _prompt_loader.prompt_state("manual_test_generator"),
+            "automation_from_manual": _prompt_loader.prompt_state("automation_from_manual"),
+            "test_name": _prompt_loader.prompt_state("test_name"),
+        }
 
         cache_key = self._cache_key(
             "test_generation",
@@ -680,6 +983,7 @@ class TestGeneratorAgent(BaseAgent):
             application_url=application_url or "",
             acceptance_criteria=acceptance_criteria,
             test_type=test_type,
+            prompt_signatures={name: state["signature"] for name, state in prompt_state.items()},
         )
         cached = self.cache.get(cache_key)
         if cached:
@@ -696,6 +1000,8 @@ class TestGeneratorAgent(BaseAgent):
                 "knowledge_context_used": bool(knowledge_context),
                 "test_type": test_type,
                 "risk_level": risk_level,
+                "prompt_state": prompt_state,
+                "llm_configured": bool(self.llm_client),
             },
         }
 
@@ -936,6 +1242,8 @@ class TestGeneratorAgent(BaseAgent):
                     "locators": [],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", risk_level or "regression"),
+                    "generation_mode": "fallback" if not self.llm_client else "llm",
+                    "warnings": self._collect_script_warnings(script_code),
                     "tags": ["automation", "generated", "manual-derived"],
                 }
             )
@@ -958,7 +1266,7 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
             )
-            return _strip_automation_placeholders(script)
+            return _normalise_generated_script(script)
 
         try:
             system_prompt_template = _prompt_loader.get("automation_from_manual")
@@ -1015,7 +1323,7 @@ class TestGeneratorAgent(BaseAgent):
             )
             raw = self.llm_client.generate(system_prompt, user_prompt)
             script = _strip_code_fences(raw)
-            return _strip_automation_placeholders(script)
+            return _normalise_generated_script(script)
 
         except Exception as exc:
             logger.warning(
@@ -1028,7 +1336,7 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
             )
-            return _strip_automation_placeholders(script)
+            return _normalise_generated_script(script)
 
     def _build_fallback_script_from_manual_test(
         self,
@@ -1125,11 +1433,13 @@ class TestGeneratorAgent(BaseAgent):
                 "name": test_name,
                 "description": user_story,
                 "script_template": "playwright",
-                "script_code": _strip_automation_placeholders(script_code),
+                "script_code": _normalise_generated_script(script_code),
                 "test_steps": acceptance_criteria,
                 "locators": [],
                 "application_url": application_url,
                 "risk_level": risk_level or "regression",
+                "generation_mode": "fallback",
+                "warnings": self._collect_script_warnings(script_code),
                 "tags": ["automation", "generated", "fallback"],
             }
         ]
@@ -1220,6 +1530,8 @@ class TestGeneratorAgent(BaseAgent):
                     "locators": [],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", "regression"),
+                    "generation_mode": "fallback" if not self.llm_client else "llm",
+                    "warnings": self._collect_script_warnings(script_code),
                     "tags": ["automation", "generated", "manual-derived"],
                 }
             )
@@ -1251,6 +1563,15 @@ class TestGeneratorAgent(BaseAgent):
         story = story.split(" so that")[0].split(" in order to")[0]
         name = re.sub(r"[^a-z0-9]+", "_", story).strip("_")[:40]
         return name or "automation_test"
+
+    @staticmethod
+    def _collect_script_warnings(script_code: str) -> List[str]:
+        warnings: List[str] = []
+        for line in script_code.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("# WARNING:"):
+                warnings.append(stripped[2:].strip())
+        return warnings
 
     @staticmethod
     def _parse_json_array(raw: str) -> List[Dict[str, Any]]:

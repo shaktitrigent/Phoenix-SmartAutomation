@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
@@ -12,17 +14,56 @@ from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 BASE_URL = "{{ base_url }}"
 DEFAULT_BROWSER = "{{ browser }}"
+ACTION_TIMEOUT_MS = 30_000
+NAVIGATION_TIMEOUT_MS = 60_000
+
+
+def _parser_has_option(parser, option_name: str) -> bool:
+    option_groups = []
+    anonymous = getattr(parser, "_anonymous", None)
+    if anonymous is not None:
+        option_groups.append(anonymous)
+    option_groups.extend(getattr(parser, "_groups", []))
+
+    for group in option_groups:
+        for option in getattr(group, "options", []):
+            if option_name in getattr(option, "_long_opts", []):
+                return True
+    return False
+
+
+def _addoption_if_missing(parser, option_name: str, *aliases, **kwargs) -> None:
+    if _parser_has_option(parser, option_name):
+        return
+    try:
+        parser.addoption(option_name, *aliases, **kwargs)
+    except ValueError as exc:
+        if option_name not in str(exc):
+            raise
 
 
 def pytest_addoption(parser):
-    parser.addoption("--base-url", default=BASE_URL, help="Base URL for tests")
-    parser.addoption(
+    _addoption_if_missing(
+        parser,
+        "--base-url",
+        action="store",
+        default=None,
+        help="Base URL for Phoenix-generated tests when pytest-playwright is not installed.",
+    )
+    _addoption_if_missing(
+        parser,
         "--browser-type",
         default=DEFAULT_BROWSER,
         choices=["chromium", "firefox", "webkit"],
         help="Browser to use",
     )
-    parser.addoption("--headless", action="store_true", default=True, help="Run headless")
+    _addoption_if_missing(
+        parser,
+        "--headless",
+        action="store_true",
+        default=True,
+        help="Run headless",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +72,8 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def base_url(request) -> str:
-    return request.config.getoption("--base-url")
+    configured_base_url = request.config.getoption("--base-url", default=None)
+    return configured_base_url or BASE_URL
 
 
 @pytest.fixture(scope="session")
@@ -49,23 +91,37 @@ def browser_type_name(request) -> str:
 def browser(playwright_instance, browser_type_name, request) -> Browser:
     headless = request.config.getoption("--headless")
     browser_type = getattr(playwright_instance, browser_type_name)
-    b = browser_type.launch(headless=headless)
+    b = browser_type.launch(
+        headless=headless,
+        args=[
+            "--disable-save-password-bubble",
+            "--disable-features=PasswordManager",
+        ],
+    )
     yield b
-    b.close()
+    with suppress(Exception):
+        b.close()
 
 
 @pytest.fixture
 def context(browser) -> BrowserContext:
     ctx = browser.new_context()
+    ctx.set_default_timeout(ACTION_TIMEOUT_MS)
+    ctx.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
     yield ctx
-    ctx.close()
+    with suppress(Exception):
+        ctx.close()
 
 
 @pytest.fixture
 def page(context) -> Page:
     p = context.new_page()
+    p.set_default_timeout(ACTION_TIMEOUT_MS)
+    p.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+    p.on("dialog", lambda dialog: dialog.dismiss())
     yield p
-    p.close()
+    with suppress(Exception):
+        p.close()
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +138,7 @@ def authenticated_page(page, base_url) -> Page:
         page.get_by_label("Username").fill("admin")
         page.get_by_label("Password").fill("admin123")
         page.get_by_role("button", name="Login").click()
-        page.wait_for_url("**/dashboard")
+        expect(page).to_have_url(re.compile(r".*/dashboard.*"))
     """
     # TODO: implement login
     return page

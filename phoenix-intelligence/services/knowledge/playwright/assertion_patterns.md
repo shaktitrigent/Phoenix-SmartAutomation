@@ -11,6 +11,10 @@
 **Never assume the element type, role, or text of a success/error indicator.
 Always derive assertions from what you can observe in the DOM snapshot.**
 
+**Never convert manual-test narration into an assertion locator.**
+Phrases like `Dashboard loads successfully`, `fields are visible`, or `success message appears`
+must become URL checks, real control visibility checks, or stable container assertions.
+
 ---
 
 ## Form Submission Assertions
@@ -193,3 +197,4 @@ expect(page.locator(".inventory_item")).to_have_count(6)
 4. **Always use progressive detection for form submissions**: check URL change first, then visible text, then form visibility.
 5. **Use `expect().to_have_url()` after navigation** — it retries automatically and is more reliable than checking `page.url` directly.
 6. **Wrap regex patterns in `re.compile()`** when using `to_have_url` or `to_contain_text` with regex.
+7. **Never assert on literal prose copied from a manual step.** Assertions must be backed by a role, label, stable CSS selector, or snapshot-backed locator.

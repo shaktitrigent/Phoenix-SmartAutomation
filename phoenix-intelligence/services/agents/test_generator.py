@@ -812,7 +812,8 @@ def _glob_to_url_regex(glob_pattern: str) -> str:
         pattern = pattern[3:]
     pattern = pattern.strip("*")
     pattern = pattern.strip("/")
-    return rf".*{re.escape(pattern).replace(r'\\/', '/')}.*"
+    escaped_pattern = re.escape(pattern).replace("\\/", "/")
+    return rf".*{escaped_pattern}.*"
 
 
 def _inject_runtime_helpers(script: str) -> str:

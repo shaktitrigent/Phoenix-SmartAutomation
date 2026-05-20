@@ -280,7 +280,7 @@ def extract_locators_from_script(
             page=page_name,
             primary=primary,
             alternates=fixed_alts,
-            notes=f"Auto-extracted from script during phoenix generate",
+            notes="Auto-extracted from script during phoenix generate",
         )
 
     # --- get_by_placeholder ---

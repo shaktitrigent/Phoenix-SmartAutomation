@@ -3,7 +3,7 @@
 import shutil
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import click
 from phoenix import PhoenixClient
@@ -891,7 +891,6 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
 
     After fixing, re-run with: phoenix run --failed-only
     """
-    import json as _json
     import requests as _requests
     from phoenix.execution.logger import ExecutionLogger
     from phoenix.sdk.config import PhoenixConfig

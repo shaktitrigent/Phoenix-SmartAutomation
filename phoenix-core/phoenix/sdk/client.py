@@ -1,5 +1,6 @@
 """Phoenix SDK Client - Main entry point"""
 
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from phoenix.sdk.config import PhoenixConfig
 from phoenix.storage.database import Database

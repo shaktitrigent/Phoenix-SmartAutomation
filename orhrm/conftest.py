@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
@@ -12,6 +13,8 @@ from orhrm.orangehrm_leave_flow import login
 
 BASE_URL = "https://opensource-demo.orangehrmlive.com/web/index.php/auth/login"
 DEFAULT_BROWSER = "chromium"
+ACTION_TIMEOUT_MS = 30_000
+NAVIGATION_TIMEOUT_MS = 60_000
 
 
 def _parser_has_option(parser, option_name: str) -> bool:
@@ -92,23 +95,37 @@ def browser_type_name(request) -> str:
 def browser(playwright_instance, browser_type_name, request) -> Browser:
     headless = request.config.getoption("--headless")
     browser_type = getattr(playwright_instance, browser_type_name)
-    launched_browser = browser_type.launch(headless=headless)
+    launched_browser = browser_type.launch(
+        headless=headless,
+        args=[
+            "--disable-save-password-bubble",
+            "--disable-features=PasswordManager",
+        ],
+    )
     yield launched_browser
-    launched_browser.close()
+    with suppress(Exception):
+        launched_browser.close()
 
 
 @pytest.fixture
 def context(browser) -> BrowserContext:
     isolated_context = browser.new_context()
+    isolated_context.set_default_timeout(ACTION_TIMEOUT_MS)
+    isolated_context.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
     yield isolated_context
-    isolated_context.close()
+    with suppress(Exception):
+        isolated_context.close()
 
 
 @pytest.fixture
 def page(context) -> Page:
     created_page = context.new_page()
+    created_page.set_default_timeout(ACTION_TIMEOUT_MS)
+    created_page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+    created_page.on("dialog", lambda dialog: dialog.dismiss())
     yield created_page
-    created_page.close()
+    with suppress(Exception):
+        created_page.close()
 
 
 @pytest.fixture

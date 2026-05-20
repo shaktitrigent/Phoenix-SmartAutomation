@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import textwrap
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -374,18 +375,18 @@ def _criterion_to_playwright_lines(
 
     elif is_orangehrm and "select leave type" in lower:
         lines += [
-            '    page.get_by_role("combobox").first.click()',
-            '    page.get_by_role("option").first.click()',
+            '    click_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("Leave Type", exact=True)).locator(".oxd-select-text").first, "Leave Type dropdown")',
+            '    click_ready(page, page.get_by_role("option").first, "Leave Type option")',
         ]
 
     elif is_orangehrm and "from date" in lower and "future" in lower:
         lines += [
-            '    page.get_by_placeholder("yyyy-mm-dd").nth(0).fill("2099-12-01")',
+            '    fill_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("From Date", exact=True)).locator("input").first, "2099-12-01", "From Date input")',
         ]
 
     elif is_orangehrm and "to date" in lower and "future" in lower:
         lines += [
-            '    page.get_by_placeholder("yyyy-mm-dd").nth(1).fill("2099-12-02")',
+            '    fill_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("To Date", exact=True)).locator("input").first, "2099-12-02", "To Date input")',
         ]
 
     elif is_orangehrm and "enter leave comment" in lower:
@@ -429,11 +430,11 @@ def _criterion_to_playwright_lines(
         pass_match = _LOGIN_PASS_RE.search(criterion)
         password = pass_match.group(1).strip().strip("'\"") if pass_match else "admin123"
         lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
-            f'    page.locator("input[name=\'username\']").fill("{_safe_py_str(username)}")',
-            f'    page.locator("input[name=\'password\']").fill("{_safe_py_str(password)}")',
-            '    page.get_by_role("button", name="Login").click()',
-            '    page.wait_for_url("**/dashboard**", timeout=30_000)',
+            f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    fill_ready(page, page.locator("input[name=\'username\']"), "{_safe_py_str(username)}", "Username input")',
+            f'    fill_ready(page, page.locator("input[name=\'password\']"), "{_safe_py_str(password)}", "Password input")',
+            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
             '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
         ]
 
@@ -455,28 +456,34 @@ def _criterion_to_playwright_lines(
         # Prefer quoted value if present
         label = _extract_quoted_value(criterion) or label
         lines += [
-            f'    page.get_by_role("link", name="{_safe_py_str(label)}").click()',
-            f'    expect(page.get_by_role("link", name="{_safe_py_str(label)}")).to_be_visible()',
+            f'    click_ready(page, page.get_by_role("link", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} navigation link")',
+            f'    expect(page.get_by_role("link", name="{_safe_py_str(label)}", exact=True)).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.NAVIGATE:
         url = _extract_quoted_value(criterion) or application_url or "https://example.com"
         lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
-            '    page.wait_for_load_state("domcontentloaded")',
+            f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.TEXT_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").fill("{_safe_py_str(value)}")')
+        lines.append(
+            f'    fill_ready(page, page.get_by_label("{_safe_py_str(field)}", exact=True), "{_safe_py_str(value)}", "{_safe_py_str(field)} field")'
+        )
 
     elif control == ControlType.PASSWORD_INPUT:
         _, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("Password").fill("{_safe_py_str(value)}")')
+        lines.append(
+            f'    fill_ready(page, page.get_by_label("Password", exact=True), "{_safe_py_str(value)}", "Password field")'
+        )
 
     elif control == ControlType.EMAIL_INPUT:
         _, value = _extract_fill_target_and_value(criterion)
-        lines.append(f'    page.get_by_label("Email").fill("{_safe_py_str(value)}")')
+        lines.append(
+            f'    fill_ready(page, page.get_by_label("Email", exact=True), "{_safe_py_str(value)}", "Email field")'
+        )
 
     elif control == ControlType.CHECKBOX:
         if any(k in lower for k in ["uncheck", "untick"]):
@@ -501,7 +508,9 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.SELECT_DROPDOWN:
         field, option = _extract_select_option(criterion)
-        lines.append(f'    page.get_by_label("{_safe_py_str(field)}").select_option("{_safe_py_str(option)}")')
+        lines += [
+            f'    unique_visible(page.get_by_label("{_safe_py_str(field)}", exact=True), "{_safe_py_str(field)} dropdown").select_option("{_safe_py_str(option)}")',
+        ]
 
     elif control == ControlType.FILE_INPUT:
         lines.append("    page.locator('input[type=\"file\"]').set_input_files('test_file.txt')")
@@ -509,47 +518,53 @@ def _criterion_to_playwright_lines(
     elif control == ControlType.BUTTON:
         role, label = _extract_click_target(criterion)
         if role == "button":
-            lines.append(f'    page.get_by_role("button", name="{_safe_py_str(label)}").click()')
+            lines.append(
+                f'    click_ready(page, page.get_by_role("button", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} button")'
+            )
         else:
             lines.append(_manual_review_warning_line("No stable button locator could be derived", criterion))
 
     elif control == ControlType.LINK:
         _, label = _extract_click_target(criterion)
-        lines.append(f'    page.get_by_role("link", name="{_safe_py_str(label)}").click()')
+        lines.append(
+            f'    click_ready(page, page.get_by_role("link", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} link")'
+        )
 
     elif control == ControlType.FORM_SUBMIT:
-        lines.append('    page.get_by_role("button", name="Submit").click()')
+        lines.append('    click_ready(page, page.get_by_role("button", name="Submit", exact=True), "Submit button")')
 
     elif control == ControlType.BROWSER_ALERT:
         if "dismiss" in lower:
             lines += [
-                '    page.on("dialog", lambda dialog: dialog.dismiss())',
+                '    page.once("dialog", lambda dialog: dialog.dismiss())',
                 "    # Trigger the alert",
-                '    page.get_by_role("button").first.click()',
+                '    click_ready(page, page.get_by_role("button").first, "Alert trigger button")',
             ]
         else:
             lines += [
-                '    page.on("dialog", lambda dialog: dialog.accept())',
+                '    page.once("dialog", lambda dialog: dialog.accept())',
                 "    # Trigger the alert",
-                '    page.get_by_role("button").first.click()',
+                '    click_ready(page, page.get_by_role("button").first, "Alert trigger button")',
             ]
 
     elif control == ControlType.BROWSER_CONFIRM:
         if "dismiss" in lower or "cancel" in lower:
-            lines.append('    page.on("dialog", lambda dialog: dialog.dismiss())')
+            lines.append('    page.once("dialog", lambda dialog: dialog.dismiss())')
         else:
-            lines.append('    page.on("dialog", lambda dialog: dialog.accept())')
+            lines.append('    page.once("dialog", lambda dialog: dialog.accept())')
 
     elif control == ControlType.BROWSER_PROMPT:
         prompt_val = _extract_quoted_value(criterion) or "response text"
-        lines.append(f'    page.on("dialog", lambda dialog: dialog.accept("{_safe_py_str(prompt_val)}"))')
+        lines.append(f'    page.once("dialog", lambda dialog: dialog.accept("{_safe_py_str(prompt_val)}"))')
 
     elif control == ControlType.HOVER_TARGET:
         cleaned = re.sub(
             r"^(?:hover|mouse over)\s+(?:over\s+)?(?:the\s+)?", "", criterion, flags=re.IGNORECASE
         ).strip()
         target = _extract_quoted_value(criterion) or cleaned or "element"
-        lines.append(f'    page.get_by_text("{_safe_py_str(target)}").hover()')
+        lines.append(
+            f'    unique_visible(page.get_by_text("{_safe_py_str(target)}", exact=True), "{_safe_py_str(target)} hover target").hover()'
+        )
 
     elif control == ControlType.DRAG_DROP:
         lines += [
@@ -576,10 +591,15 @@ def _criterion_to_playwright_lines(
             if _looks_like_placeholder_assertion(subject):
                 lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
             else:
-                lines.append(_manual_review_warning_line("No stable assertion locator could be derived", criterion))
+                lines.append(
+                    f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=True), "{_safe_py_str(subject)} assertion target")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)'
+                )
 
     elif control == ControlType.WAIT:
-        lines.append('    page.wait_for_load_state("domcontentloaded")')
+        lines += [
+            '    dismiss_known_overlays(page)',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
+        ]
 
     else:
         logger.warning("Criterion not recognized for heuristic mapping: %s", criterion)
@@ -707,6 +727,152 @@ _PLACEHOLDER_LINE_RE = re.compile(
     r"|placeholder|replace this|implement|step completes|needs manual review)",
     re.IGNORECASE,
 )
+
+_GLOB_URL_WAIT_RE = re.compile(
+    r'(?P<indent>\s*)page\.wait_for_url\("(?P<glob>\*\*[^"]+)",\s*timeout=(?P<timeout>\d+)\)'
+)
+
+_FALLBACK_RUNTIME_HELPERS = textwrap.dedent(
+    """
+    ACTION_TIMEOUT_MS = 30_000
+    NAVIGATION_TIMEOUT_MS = 60_000
+    ASSERTION_TIMEOUT_MS = 15_000
+    OVERLAY_SELECTORS = [
+        "[role='dialog']",
+        "[aria-modal='true']",
+        "[data-testid*='modal']",
+        "[data-testid*='overlay']",
+        "[class*='modal']",
+        "[class*='overlay']",
+        "[class*='backdrop']",
+    ]
+
+
+    def configure_page(page: Page) -> None:
+        page.set_default_timeout(ACTION_TIMEOUT_MS)
+        page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+
+
+    def dismiss_known_overlays(page: Page) -> None:
+        for selector in OVERLAY_SELECTORS:
+            overlay = page.locator(selector)
+            try:
+                if overlay.count() == 0:
+                    continue
+                close_button = overlay.get_by_role(
+                    "button",
+                    name=re.compile(r"close|dismiss|cancel|not now|skip|got it", re.IGNORECASE),
+                ).first
+                if close_button.is_visible(timeout=1_000):
+                    close_button.click(timeout=2_000)
+            except Exception:
+                continue
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+
+    def unique_visible(locator: Locator, description: str) -> Locator:
+        expect(locator).to_have_count(1, timeout=ASSERTION_TIMEOUT_MS)
+        expect(locator).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)
+        return locator
+
+
+    def click_ready(page: Page, locator: Locator, description: str) -> None:
+        dismiss_known_overlays(page)
+        target = unique_visible(locator, description)
+        expect(target).to_be_enabled(timeout=ASSERTION_TIMEOUT_MS)
+        target.scroll_into_view_if_needed()
+        target.click(timeout=ACTION_TIMEOUT_MS)
+
+
+    def fill_ready(page: Page, locator: Locator, value: str, description: str) -> None:
+        dismiss_known_overlays(page)
+        target = unique_visible(locator, description)
+        target.scroll_into_view_if_needed()
+        target.fill(value, timeout=ACTION_TIMEOUT_MS)
+
+
+    def expect_url_path(page: Page, path_fragment: str) -> None:
+        expect(
+            page,
+        ).to_have_url(
+            re.compile(rf".*{re.escape(path_fragment.strip('/'))}.*"),
+            timeout=NAVIGATION_TIMEOUT_MS,
+        )
+    """
+).strip()
+
+
+def _glob_to_url_regex(glob_pattern: str) -> str:
+    """Convert a simple Playwright glob URL pattern into a regex fragment."""
+    pattern = glob_pattern
+    if pattern.startswith("**/"):
+        pattern = pattern[3:]
+    pattern = pattern.strip("*")
+    pattern = pattern.strip("/")
+    return rf".*{re.escape(pattern).replace(r'\\/', '/')}.*"
+
+
+def _inject_runtime_helpers(script: str) -> str:
+    """Add shared Playwright helper functions and stronger imports to generated scripts."""
+    if "def configure_page(page: Page)" in script:
+        return script
+
+    script = re.sub(
+        r"from playwright\.sync_api import Page, expect",
+        "from playwright.sync_api import Locator, Page, expect",
+        script,
+    )
+
+    if "from playwright.sync_api import Locator, Page, expect" not in script:
+        script = script.replace(
+            "from playwright.sync_api import Page, expect",
+            "from playwright.sync_api import Locator, Page, expect",
+        )
+
+    helper_block = f"\n\n{_FALLBACK_RUNTIME_HELPERS}\n\n"
+
+    import_anchor = "from playwright.sync_api import Locator, Page, expect\n"
+    if import_anchor in script:
+        script = script.replace(import_anchor, import_anchor + helper_block, 1)
+    else:
+        script = helper_block + script
+
+    return script
+
+
+def _normalise_generated_script(script: str) -> str:
+    """Tighten generated Playwright code for dynamic UIs and strict-mode safety."""
+    script = _strip_automation_placeholders(script)
+    script = _inject_runtime_helpers(script)
+
+    script = _GLOB_URL_WAIT_RE.sub(
+        lambda m: (
+            f'{m.group("indent")}expect(page).to_have_url('
+            f're.compile(r"{_glob_to_url_regex(m.group("glob"))}"), '
+            f'timeout={m.group("timeout")})'
+        ),
+        script,
+    )
+
+    script = re.sub(
+        r'(?m)^(\s*)page\.wait_for_load_state\("networkidle"(?:,\s*timeout=\d+)?\)\s*$',
+        r'\1expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
+        script,
+    )
+
+    if "configure_page(page)" not in script:
+        script = re.sub(
+            r'(^def test_[^(]+\([^)]*\)\s*->\s*None:\n(?:\s+""".*?"""\n)?)',
+            r"\1    configure_page(page)\n    dismiss_known_overlays(page)\n",
+            script,
+            count=1,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+
+    return script
 
 
 def _cap_and_consolidate(tests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1099,7 +1265,7 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
             )
-            return _strip_automation_placeholders(script)
+            return _normalise_generated_script(script)
 
         try:
             system_prompt_template = _prompt_loader.get("automation_from_manual")
@@ -1156,7 +1322,7 @@ class TestGeneratorAgent(BaseAgent):
             )
             raw = self.llm_client.generate(system_prompt, user_prompt)
             script = _strip_code_fences(raw)
-            return _strip_automation_placeholders(script)
+            return _normalise_generated_script(script)
 
         except Exception as exc:
             logger.warning(
@@ -1169,7 +1335,7 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
             )
-            return _strip_automation_placeholders(script)
+            return _normalise_generated_script(script)
 
     def _build_fallback_script_from_manual_test(
         self,
@@ -1266,7 +1432,7 @@ class TestGeneratorAgent(BaseAgent):
                 "name": test_name,
                 "description": user_story,
                 "script_template": "playwright",
-                "script_code": _strip_automation_placeholders(script_code),
+                "script_code": _normalise_generated_script(script_code),
                 "test_steps": acceptance_criteria,
                 "locators": [],
                 "application_url": application_url,

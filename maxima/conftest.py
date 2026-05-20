@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
@@ -12,6 +14,8 @@ from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 BASE_URL = "https://maximaapparel.com"
 DEFAULT_BROWSER = "chromium"
+ACTION_TIMEOUT_MS = 30_000
+NAVIGATION_TIMEOUT_MS = 60_000
 
 
 def _parser_has_option(parser, option_name: str) -> bool:
@@ -87,23 +91,37 @@ def browser_type_name(request) -> str:
 def browser(playwright_instance, browser_type_name, request) -> Browser:
     headless = request.config.getoption("--headless")
     browser_type = getattr(playwright_instance, browser_type_name)
-    b = browser_type.launch(headless=headless)
+    b = browser_type.launch(
+        headless=headless,
+        args=[
+            "--disable-save-password-bubble",
+            "--disable-features=PasswordManager",
+        ],
+    )
     yield b
-    b.close()
+    with suppress(Exception):
+        b.close()
 
 
 @pytest.fixture
 def context(browser) -> BrowserContext:
     ctx = browser.new_context()
+    ctx.set_default_timeout(ACTION_TIMEOUT_MS)
+    ctx.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
     yield ctx
-    ctx.close()
+    with suppress(Exception):
+        ctx.close()
 
 
 @pytest.fixture
 def page(context) -> Page:
     p = context.new_page()
+    p.set_default_timeout(ACTION_TIMEOUT_MS)
+    p.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+    p.on("dialog", lambda dialog: dialog.dismiss())
     yield p
-    p.close()
+    with suppress(Exception):
+        p.close()
 
 
 # ---------------------------------------------------------------------------

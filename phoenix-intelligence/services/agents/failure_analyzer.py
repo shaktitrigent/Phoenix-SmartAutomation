@@ -100,14 +100,22 @@ class FailureAnalyzerAgent(BaseAgent):
             root_cause = "Element not found within the timeout period"
             fix = (
                 "Replace time-based waits with Playwright's built-in auto-waiting. "
-                "Use expect(locator).to_be_visible() instead of page.wait_for_timeout()."
+                "Use expect(locator).to_be_visible() instead of page.wait_for_timeout(), "
+                "and verify overlays or modals are not intercepting the action."
+            )
+        elif any(token in error_lower for token in ["overlay", "intercepts pointer events", "another element"]):
+            category = "overlay"
+            root_cause = "An overlay, modal, or blocking element prevented interaction"
+            fix = (
+                "Dismiss or scope to the active dialog before acting. "
+                "Validate the target is unique and visible, then retry the action."
             )
         elif "strict mode" in error_lower or "resolved to" in error_lower:
             category = "locator"
             root_cause = "Locator matched multiple elements (strict mode violation)"
             fix = (
-                "Add exact=True to text locators, or scope to a parent container: "
-                "page.locator('.form').get_by_role('button', name='Submit')"
+                "Scope the locator to a stable parent container, add exact=True where appropriate, "
+                "and validate uniqueness with expect(locator).to_have_count(1) before acting."
             )
         elif "not found" in error_lower or "locator" in error_lower:
             category = "locator"

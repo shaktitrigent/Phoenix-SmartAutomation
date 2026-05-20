@@ -97,6 +97,25 @@ _agent_registry = AgentRegistry(
 )
 
 
+def _decorate_metadata(result: dict) -> dict:
+    result.setdefault("metadata", {})
+    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
+    result["metadata"]["version"] = "2.0.0"
+    result["metadata"]["llm_configured"] = _llm_client is not None
+    result["metadata"]["prompt_hot_reload"] = True
+
+    warnings = list(result["metadata"].get("warnings", []))
+    for test in result.get("automation_tests", []):
+        warnings.extend(test.get("warnings", []))
+    if warnings:
+        deduped = []
+        for warning in warnings:
+            if warning not in deduped:
+                deduped.append(warning)
+        result["metadata"]["warnings"] = deduped
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -141,10 +160,7 @@ def generate_tests(payload: TestGenerationRequest):
         risk_level=risk_level,
     )
 
-    result.setdefault("metadata", {})
-    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
-    result["metadata"]["version"] = "2.0.0"
-    return result
+    return _decorate_metadata(result)
 
 
 @app.post("/api/v1/locators/discover", response_model=LocatorDiscoveryResponse)
@@ -174,10 +190,7 @@ def analyze_failure(payload: FailureAnalysisRequest):
         error_message=payload.error_message,
         traceback=payload.traceback,
     )
-    result.setdefault("metadata", {})
-    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
-    result["metadata"]["version"] = "2.0.0"
-    return result
+    return _decorate_metadata(result)
 
 
 @app.post("/api/v1/tests/automate", response_model=AutomateResponse)
@@ -187,10 +200,7 @@ def automate_from_manual(payload: AutomateRequest):
         manual_tests=payload.manual_tests,
         application_url=payload.application_url,
     )
-    result.setdefault("metadata", {})
-    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
-    result["metadata"]["version"] = "2.0.0"
-    return result
+    return _decorate_metadata(result)
 
 
 @app.post("/api/v1/tests/fix", response_model=ScriptFixResponse)
@@ -203,10 +213,7 @@ def fix_script(payload: ScriptFixRequest):
         test_name=payload.test_name,
         application_url=payload.application_url,
     )
-    result.setdefault("metadata", {})
-    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
-    result["metadata"]["version"] = "2.0.0"
-    return result
+    return _decorate_metadata(result)
 
 
 # ---------------------------------------------------------------------------

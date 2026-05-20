@@ -3,7 +3,7 @@
 import shutil
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import click
 from phoenix import PhoenixClient
@@ -19,6 +19,13 @@ from phoenix.cli.output import (
     print_warning,
 )
 from phoenix.sdk.config import PhoenixConfig
+
+
+def _print_intelligence_metadata_warnings(metadata: dict | None) -> None:
+    if not metadata:
+        return
+    for warning in metadata.get("warnings", []):
+        print_warning(warning)
 
 
 def _clean_project_directory(manual_dir: Path, test_dir: Path, verbose: bool = False) -> bool:
@@ -376,6 +383,8 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
         all_manual = [t for r in results for t in r.get("manual_tests", [])]
         all_automation = [t for r in results for t in r.get("automation_tests", [])]
         total_locators = sum(r.get("metadata", {}).get("locators_saved", 0) for r in results)
+        for result in results:
+            _print_intelligence_metadata_warnings(result.get("metadata"))
         print_generate_results(all_manual, all_automation, verbose=verbose)
         if total_locators:
             locators_dir = Path(client.config.project.test_output_dir).parent / "locators"
@@ -481,6 +490,10 @@ def automate(ctx, manual_dir, url, project, clean):
     if not automation_tests:
         print_warning("No automation scripts were generated.")
         return
+    _print_intelligence_metadata_warnings(result.get("metadata"))
+    for test in automation_tests:
+        for warning in test.get("warnings", []):
+            print_warning(f"{test.get('name', 'automation_test')}: {warning}")
 
     # Write scripts to test_results/
     auto_gen = AutomationTestGenerator(output_dir=config.project.test_output_dir)
@@ -878,7 +891,6 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
 
     After fixing, re-run with: phoenix run --failed-only
     """
-    import json as _json
     import requests as _requests
     from phoenix.execution.logger import ExecutionLogger
     from phoenix.sdk.config import PhoenixConfig

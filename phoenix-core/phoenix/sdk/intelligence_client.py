@@ -60,7 +60,15 @@ class IntelligenceClient:
                     continue
 
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                metadata = data.get("metadata", {})
+                if metadata.get("warnings"):
+                    logger.warning(
+                        "Intelligence server returned %d warning(s): %s",
+                        len(metadata["warnings"]),
+                        "; ".join(metadata["warnings"][:3]),
+                    )
+                return data
 
             except requests.ConnectionError as exc:
                 logger.warning(

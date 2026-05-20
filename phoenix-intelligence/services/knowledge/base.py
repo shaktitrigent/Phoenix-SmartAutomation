@@ -35,6 +35,7 @@ class KnowledgeBase:
 
         self.base_path = Path(base_path)
         self._cache: Dict[str, List[KnowledgeEntry]] = {}
+        self._cache_signatures: Dict[str, tuple] = {}
 
         # Knowledge folders
         self.test_patterns_path = self.base_path / "test_patterns"
@@ -127,6 +128,26 @@ class KnowledgeBase:
 
         return entries
 
+    @staticmethod
+    def _directory_signature(directory: Path) -> tuple:
+        if not directory.exists():
+            return ()
+        signature = []
+        for file_path in sorted(directory.rglob("*")):
+            if file_path.is_file() and file_path.suffix in [".md", ".json", ".yaml", ".yml"]:
+                stat = file_path.stat()
+                signature.append((str(file_path.relative_to(directory)), stat.st_mtime_ns, stat.st_size))
+        return tuple(signature)
+
+    def _cached_or_load(self, cache_key: str, directory: Path, category: str) -> List[KnowledgeEntry]:
+        signature = self._directory_signature(directory)
+        if cache_key in self._cache and self._cache_signatures.get(cache_key) == signature:
+            return self._cache[cache_key]
+        entries = self._load_directory(directory, category)
+        self._cache[cache_key] = entries
+        self._cache_signatures[cache_key] = signature
+        return entries
+
     def get_test_patterns(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
         """
         Get test patterns.
@@ -138,10 +159,7 @@ class KnowledgeBase:
             List of test pattern entries
         """
         cache_key = f"test_patterns:{query or 'all'}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        entries = self._load_directory(self.test_patterns_path, "test_patterns")
+        entries = self._cached_or_load(cache_key, self.test_patterns_path, "test_patterns")
 
         if query:
             query_lower = query.lower()
@@ -153,7 +171,6 @@ class KnowledgeBase:
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
 
-        self._cache[cache_key] = entries
         return entries
 
     def get_locator_strategies(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
@@ -167,10 +184,9 @@ class KnowledgeBase:
             List of locator strategy entries
         """
         cache_key = f"locator_strategies:{query or 'all'}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        entries = self._load_directory(self.locator_strategies_path, "locator_strategies")
+        entries = self._cached_or_load(
+            cache_key, self.locator_strategies_path, "locator_strategies"
+        )
 
         if query:
             query_lower = query.lower()
@@ -182,7 +198,6 @@ class KnowledgeBase:
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
 
-        self._cache[cache_key] = entries
         return entries
 
     def get_domain_knowledge(self, domain: Optional[str] = None) -> List[KnowledgeEntry]:
@@ -196,10 +211,7 @@ class KnowledgeBase:
             List of domain knowledge entries
         """
         cache_key = f"domain_knowledge:{domain or 'all'}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        entries = self._load_directory(self.domain_knowledge_path, "domain_knowledge")
+        entries = self._cached_or_load(cache_key, self.domain_knowledge_path, "domain_knowledge")
 
         if domain:
             domain_lower = domain.lower()
@@ -212,7 +224,6 @@ class KnowledgeBase:
                 or any(domain_lower in tag.lower() for tag in e.tags)
             ]
 
-        self._cache[cache_key] = entries
         return entries
 
     def get_best_practices(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
@@ -226,10 +237,7 @@ class KnowledgeBase:
             List of best practice entries
         """
         cache_key = f"best_practices:{query or 'all'}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        entries = self._load_directory(self.best_practices_path, "best_practices")
+        entries = self._cached_or_load(cache_key, self.best_practices_path, "best_practices")
 
         if query:
             query_lower = query.lower()
@@ -241,7 +249,6 @@ class KnowledgeBase:
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
 
-        self._cache[cache_key] = entries
         return entries
 
     def get_playwright_knowledge(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
@@ -255,10 +262,7 @@ class KnowledgeBase:
             List of Playwright knowledge entries
         """
         cache_key = f"playwright:{query or 'all'}"
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-
-        entries = self._load_directory(self.playwright_path, "playwright")
+        entries = self._cached_or_load(cache_key, self.playwright_path, "playwright")
 
         if query:
             query_lower = query.lower()
@@ -270,7 +274,6 @@ class KnowledgeBase:
                 or any(query_lower in tag.lower() for tag in e.tags)
             ]
 
-        self._cache[cache_key] = entries
         return entries
 
     def search(self, query: str, categories: Optional[List[str]] = None) -> List[KnowledgeEntry]:

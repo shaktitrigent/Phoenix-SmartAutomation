@@ -8,6 +8,17 @@
 
 Attempt each tier in order. Move to the next ONLY when the current tier cannot uniquely identify the element.
 
+Phoenix generation priority is:
+1. `get_by_role()`
+2. `get_by_label()`
+3. `get_by_placeholder()`
+4. Stable CSS selectors using `name`, `type`, `href`, `id`, or `data-*`
+5. `get_by_test_id()`
+6. Snapshot-backed locators derived from the inspected DOM
+
+Never convert manual-test narration such as `Dashboard loads successfully` or `fields are visible`
+into locator text. If no stable DOM-backed locator exists, emit a manual-review warning instead.
+
 ### 1. `get_by_role` — Default Choice for All Interactive Elements
 
 ```python

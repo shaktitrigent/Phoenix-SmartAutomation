@@ -24,6 +24,8 @@ class AgentRegistry:
         self.knowledge_base = knowledge_base
         self.cache = cache
         self._agents: Dict[str, BaseAgent] = {}
+        self._mcp_client = mcp_client
+        self._llm_client = llm_client
         self._init_agents(mcp_client, llm_client)
 
     def _init_agents(self, mcp_client=None, llm_client=None) -> None:
@@ -51,7 +53,15 @@ class AgentRegistry:
         agent = self.get_agent(agent_name)
         if agent is None:
             raise ValueError(f"Unknown agent: '{agent_name}'. Available: {self.list_agents()}")
-        return agent.process(input_data, **kwargs)
+        result = agent.process(input_data, **kwargs)
+        return self._with_runtime_metadata(result, agent_name)
+
+    def _with_runtime_metadata(self, result: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+        result.setdefault("metadata", {})
+        result["metadata"].setdefault("agent", agent_name)
+        result["metadata"].setdefault("llm_configured", self._llm_client is not None)
+        result["metadata"].setdefault("mcp_configured", self._mcp_client is not None)
+        return result
 
     # ------------------------------------------------------------------
     # Convenience methods used by the API server
@@ -112,10 +122,11 @@ class AgentRegistry:
         application_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         agent = self._agents.get("test_generator")
-        return agent.automate_from_manual_tests(
+        result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,
             application_url=application_url,
         )
+        return self._with_runtime_metadata(result, "test_generator")
 
     def fix_script(
         self,

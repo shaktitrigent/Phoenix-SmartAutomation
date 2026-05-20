@@ -62,6 +62,8 @@ class AutomationTestCase(BaseModel):
     script_template: Optional[str] = None
     script_code: Optional[str] = None
     risk_level: Optional[str] = None
+    generation_mode: str = "llm"
+    warnings: List[str] = []
     tags: List[str] = []
 
 

@@ -3,15 +3,31 @@
 Creates a canonical Phoenix project layout:
 
     <name>/
-    ├── .phoenixrc            (TOML config)
-    ├── conftest.py           (pytest + Playwright fixtures)
-    ├── manual_tests/         (generated manual test docs)
-    ├── test_results/         (generated automation scripts)
-    ├── reports/              (HTML execution reports)
-    ├── locators/             (per-page LocatorBundle JSON files)
-    ├── logs/                 (JSONL execution logs)
-    └── tests/
-        └── test_example.py   (starter Playwright test)
+    ├── .phoenixrc              (TOML config — module-aware schema)
+    ├── .env                    (environment variables template)
+    ├── pyproject.toml          (project metadata + pytest markers)
+    ├── Makefile                (common dev tasks)
+    ├── conftest.py             (module-aware pytest + Playwright fixtures)
+    ├── config/
+    │   ├── settings.yaml
+    │   └── environments/
+    │       ├── qa.yaml
+    │       ├── staging.yaml
+    │       └── prod.yaml
+    ├── user_stories/
+    │   └── login.txt           (starter user story)
+    ├── fixtures/
+    │   ├── auth.py
+    │   └── browser.py
+    ├── tests/
+    │   └── login/
+    │       └── test_login.py   (starter generated test)
+    ├── test_data/
+    │   └── login.json          (generated test data)
+    ├── locators/               (per-module LocatorBundle JSON)
+    ├── manual_tests/           (per-module Markdown specs)
+    ├── reports/                (HTML execution reports)
+    └── logs/                   (JSONL execution logs)
 
 The global project registry lives at ~/.phoenix/projects.json so that
 `phoenix` can discover projects from any working directory.
@@ -37,11 +53,14 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates" / "project"
 # Canonical subdirectories created for every new project
 _PROJECT_DIRS = [
     "manual_tests",
-    "test_results",
+    "test_data",
     "reports",
     "locators",
     "logs",
-    "tests",
+    "tests/login",
+    "config/environments",
+    "user_stories",
+    "fixtures",
 ]
 
 
@@ -182,8 +201,19 @@ def scaffold_project(
     # Render and write template files
     template_map = {
         "phoenixrc.j2": target_dir / ".phoenixrc",
+        "gitignore.j2": target_dir / ".gitignore",
         "conftest.py.j2": target_dir / "conftest.py",
-        "test_example.py.j2": target_dir / "tests" / "test_example.py",
+        "pyproject.toml.j2": target_dir / "pyproject.toml",
+        "Makefile.j2": target_dir / "Makefile",
+        "env.j2": target_dir / ".env",
+        "test_example.py.j2": target_dir / "tests" / "login" / "test_login.py",
+        "fixtures_auth.py.j2": target_dir / "fixtures" / "auth.py",
+        "fixtures_browser.py.j2": target_dir / "fixtures" / "browser.py",
+        "config_settings.yaml.j2": target_dir / "config" / "settings.yaml",
+        "config_env_qa.yaml.j2": target_dir / "config" / "environments" / "qa.yaml",
+        "config_env_staging.yaml.j2": target_dir / "config" / "environments" / "staging.yaml",
+        "config_env_prod.yaml.j2": target_dir / "config" / "environments" / "prod.yaml",
+        "user_story_login.txt.j2": target_dir / "user_stories" / "login.txt",
     }
 
     for template_name, dest in template_map.items():
@@ -234,10 +264,10 @@ def migrate_project(source_dir: Path, dry_run: bool = False) -> ScaffoldResult:
                 with open(rc_path, "rb") as fh:
                     data = tomli.load(fh)
             proj = data.get("project", {})
-            name = proj.get("default_project", name)
-            base_url = proj.get("application_url", "")
-            exec_cfg = data.get("execution", {})
-            browser = exec_cfg.get("default_browser", "chromium")
+            # Support both old (default_project/application_url) and new (name/base_url) schema
+            name = proj.get("name", proj.get("default_project", name))
+            base_url = proj.get("base_url", proj.get("application_url", ""))
+            browser = proj.get("default_browser", data.get("execution", {}).get("default_browser", "chromium"))
         except Exception:
             pass
 

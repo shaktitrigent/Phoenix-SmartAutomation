@@ -1,30 +1,17 @@
-# Python
+# Python build artifacts
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
+dist/
+build/
+.eggs/
 
-# Virtual Environment
+# Virtual environments
 venv/
+.venv/
 env/
 ENV/
-.venv
 
 # IDE
 .vscode/
@@ -33,45 +20,49 @@ ENV/
 *.swo
 *~
 
-# Claude Code (local settings with machine-specific paths)
+# Claude Code (local settings)
 .claude/
 
-# Testing
+# Test / lint caches
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
+.ruff_cache/
+.mypy_cache/
 
-# Database
+# Databases
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
-# Logs
-*.log
-logs/
-
-# Environment
+# Environment / secrets
 .env
 .env.local
 
-# Playwright
+# Playwright runtime
 .playwright/
 .playwright-mcp/
 
-# Alembic
-alembic/versions/*.pyc
-
-# Project specific — generated runtime output
-.phoenix/
+# Generated consumer project output — these belong in a project dir, not here
+logs/
 manual_tests/
-reports/
 test_results/
-locators/*.json
+test_data/
+tests/
+reports/
+locators/
+user_stories/
+fixtures/
+config/
+.phoenixrc
+phoenix.yaml
+config.yaml
 
-
-# Linter cache
-.ruff_cache/
+# Phoenix registry
+.phoenix/
 
 # OS
 .DS_Store

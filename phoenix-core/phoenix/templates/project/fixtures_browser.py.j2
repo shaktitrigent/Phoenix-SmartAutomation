@@ -1,0 +1,25 @@
+"""Browser and context fixtures for {{ project_name }}.
+
+These override the defaults in conftest.py when you need non-standard
+viewport sizes, locale, or storage state.
+"""
+
+from __future__ import annotations
+
+import pytest
+from playwright.sync_api import BrowserContext
+
+
+@pytest.fixture
+def mobile_context(browser) -> BrowserContext:
+    """A phone-sized browser context (375 × 812, iPhone 13 viewport)."""
+    ctx = browser.new_context(
+        viewport={"width": 375, "height": 812},
+        user_agent=(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 "
+            "Mobile/15E148 Safari/604.1"
+        ),
+    )
+    yield ctx
+    ctx.close()

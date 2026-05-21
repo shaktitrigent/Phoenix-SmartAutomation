@@ -40,9 +40,15 @@ def _preflight_check() -> List[str]:
 class TestRunner:
     """Test runner using pytest"""
 
-    def __init__(self, test_output_dir: str = "./test_results"):
+    def __init__(
+        self,
+        test_output_dir: str = "./test_results",
+        reports_dir: str = "./reports",
+    ):
         self.test_output_dir = Path(test_output_dir)
         self.test_output_dir.mkdir(parents=True, exist_ok=True)
+        self.reports_dir = Path(reports_dir)
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
 
     def run_tests(
         self, test_paths: List[str], project_name: Optional[str] = None, **kwargs
@@ -73,14 +79,14 @@ class TestRunner:
         # Build pytest command
         cmd = ["pytest", "-v", "--tb=short"]
 
-        json_report_path = (
-            self.test_output_dir / f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        )
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        json_report_path = self.test_output_dir / f"report_{ts}.json"
         cmd.extend(["--json-report", f"--json-report-file={json_report_path}"])
 
-        html_report_dir = self.test_output_dir / "html_reports"
-        html_report_dir.mkdir(exist_ok=True)
-        cmd.extend(["--html", str(html_report_dir / "report.html"), "--self-contained-html"])
+        html_report_path = self.reports_dir / f"report_{ts}.html"
+        cmd.extend(["--html", str(html_report_path), "--self-contained-html"])
+
+        cmd.extend(["--screenshot=only-on-failure", "--output=test-results"])
 
         cmd.extend(test_paths)
 
@@ -129,7 +135,7 @@ class TestRunner:
                 "skipped_tests": 0,
             }
 
-        return self._parse_results(result, json_report_path, html_report_dir / "report.html")
+        return self._parse_results(result, json_report_path, html_report_path)
 
     def _parse_results(
         self,

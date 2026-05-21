@@ -1,58 +1,171 @@
-# Phoenix Smart Automation - Architecture
+# Phoenix SmartAutomation — Architecture
 
 ## Overview
-`phoenix-smart-automation` is a monorepo with strict domain isolation between **phoenix-core** (client SDK/CLI), **phoenix-intelligence** (server-side AI/MCP), and **phoenix-usage** (generated project outputs).
 
-## Design Goals
-- Deterministic execution on client machines
-- No AI/MCP dependencies in phoenix-core
-- Centralized governance of LLM/MCP in phoenix-intelligence
-- Versioned API contract in `/contracts`
-- CI/CD friendly, Git friendly outputs
-
-## Monorepo Layout
+Phoenix is a monorepo with three packages and strict dependency isolation:
 
 ```
-phoenix-smart-automation/
-├── phoenix-core/                 # Client SDK + CLI (pip install phoenix-core)
-├── phoenix-intelligence/         # Server-side LLM + MCP + agents
-├── contracts/                    # Versioned API schemas
-├── examples/                     # Sample consumer projects
-├── docs/                         # Architecture + ADRs
-└── README.md
+Phoenix-SmartAutomation/
+├── shared/                  # Pydantic contracts (zero runtime deps beyond pydantic)
+├── phoenix-core/            # CLI + SDK (pip install phoenix-core)
+├── phoenix-intelligence/    # AI server (FastAPI, port 8001)
+└── docs/                    # Architecture docs
 ```
 
-## Layer Responsibilities
+**Dependency rule:** `shared` ← `phoenix-core` ← user project.
+`phoenix-intelligence` imports `shared` but **never** imports from `phoenix-core`.
+`phoenix-core` contains **no AI, LLM, or MCP code** — only HTTP calls to the intelligence server.
 
-### Phoenix Core (Client)
-- CLI: `phoenix init`, `phoenix generate`, `phoenix run`
-- Input: user story, URL, acceptance criteria
-- Output: manual tests, Playwright scripts, HTML reports
-- Execution: pytest + Playwright (local only)
-- Communication: HTTP/stdio to phoenix-intelligence
-- **No AI/LLM/MCP code, no API keys**
+---
 
-### Phoenix Intelligence (Server)
-- Hosts LLMs and Playwright MCP
-- Agent reasoning (test design, locator discovery, synthesis)
-- Prompt governance, caching, audit logs, cost control
-- Exposes versioned API consumed by phoenix-core
+## Package responsibilities
 
-### Phoenix Usage (Generated Project)
-- Manual tests in Markdown
-- Automation scripts in pytest + Playwright
-- Execution results and HTML reports
-- CI/CD compatible and AI-independent at runtime
+### `shared/`
+Pydantic models that define the API contract between `phoenix-core` and `phoenix-intelligence`. Both packages import from here. Changing a model here is a breaking change.
 
-## Core → Intelligence Contract
-- Defined in `/contracts/openapi.yaml`
-- Versioned endpoints (e.g., `/api/v1/tests/generate`)
-- Supports test generation, locator discovery, failure analysis
+### `phoenix-core/`
+The user-facing package. Users `pip install phoenix-core` in their projects.
 
-## Thin-Slice Workflow
-1. `phoenix init` → create workspace + config
-2. `phoenix generate` → call intelligence, write tests
-3. `phoenix run` → execute locally, generate reports
+| Component | Path | Role |
+|---|---|---|
+| CLI commands | `phoenix/cli/commands.py` | `phoenix generate`, `phoenix automate`, `phoenix run`, `phoenix fix`, `phoenix report` |
+| PhoenixClient | `phoenix/sdk/client.py` | HTTP client for the intelligence API |
+| ProjectConfig | `phoenix/sdk/config.py` | Reads `.phoenixrc` TOML, env vars, defaults |
+| ModuleAwareWriter | `phoenix/generators/writer.py` | Writes one consolidated file per module: `tests/{module}/test_{module}.py`, `locators/{module}.json`, `manual_tests/{module}.md` |
+| TestDataEngine | `phoenix/test_data/engine.py` | stdlib-only test data generator — 3 happy-path scenarios + field-level edge cases |
+| HealingEngine | `phoenix/execution/healing.py` | Retry loop with self-healing for failed tests; captures failure screenshots via `--screenshot=only-on-failure` |
+| ExecutionLogger | `phoenix/execution/logger.py` | Writes per-attempt JSONL records to `logs/run_<ts>_<run_id>.jsonl` |
+| LocatorRegistry | `phoenix/locators/registry.py` | Loads `locators/{module}.json` and provides `registry.get("element_id")` |
+| Scaffold | `phoenix/scaffold.py` | `phoenix init` — renders Jinja2 templates into a new project directory |
+| Reporting | `phoenix/reporting/` | HTML report pipeline: `DataLoader` reads JSONL logs, `RunAggregator`/`TrendAggregator` compute metrics, `render_run_report()` produces the self-contained HTML |
 
-## ADRs
-See `docs/adrs/` for architectural decisions.
+### `phoenix-intelligence/`
+AI server. Runs on port 8001. Never called directly by users — only via `phoenix-core`.
+
+| Component | Path | Role |
+|---|---|---|
+| FastAPI app | `api/server.py` | REST endpoints (`/api/v1/tests/generate`, `/automate`, `/fix`, `/locators/discover`) |
+| TestGeneratorAgent | `services/agents/test_generator.py` | LLM-powered manual test + automation script generation |
+| ScriptFixer | `services/agents/script_fixer.py` | Fixes failing scripts using error output |
+| LocatorExpert | `services/agents/locator_expert.py` | Discovers stable locators for an element |
+| FailureAnalyzer | `services/agents/failure_analyzer.py` | Root-cause analysis for failing tests |
+| LLM router | `services/llm/router.py` | Routes to Anthropic / OpenAI / Gemini / Ollama |
+| PromptLoader | `services/llm/prompt_loader.py` | Loads versioned prompt files from `prompts/` — auto-selects latest |
+| MCPClient | `services/mcp/client.py` | Connects to `@playwright/mcp` via stdio, calls `browser_snapshot` to get DOM accessibility tree |
+| KnowledgeBase | `services/knowledge/` | Markdown files loaded as context for agent prompts |
+
+---
+
+## Workflow
+
+```
+user_stories/login.txt
+        │
+        ▼  phoenix generate
+    intelligence server
+        ├── manual_test_generator prompt (LLM)
+        └── writes manual_tests/login.md + test_data/login.json
+        │
+        ▼  (user reviews manual_tests/login.md)
+        │
+        ▼  phoenix automate
+    intelligence server
+        ├── MCPClient → browser_snapshot(url) → DOM accessibility tree
+        ├── automation_from_manual prompt v2.0 (LLM)
+        │     ├── ### SCRIPT  → test function
+        │     ├── ### LOCATORS → locator entries JSON
+        │     └── ### RECOMMENDATIONS → issues for review
+        └── writes tests/login/test_login.py
+                  locators/login.json
+        │
+        ▼  phoenix run
+    pytest + Playwright (local, no AI)
+        ├── HealingEngine (retry on failure)
+        │     └── captures failure screenshots → test-results/**/*.png
+        ├── writes logs/run_<ts>_<run_id>.jsonl
+        └── auto-generates reports/report_<run_id>.html (10-section rich report)
+        │
+        ▼  phoenix fix (if failures)
+    intelligence server
+        ├── script_fixer prompt (LLM)
+        └── rewrites failing tests
+```
+
+---
+
+## Reporting subsystem (`phoenix/reporting/`)
+
+The reporting package is pure-Python (no external runtime dependencies). It reads from JSONL logs and produces a self-contained HTML report that works on `file://` with no server required.
+
+| Module | Role |
+|---|---|
+| `data_loader.py` | `DataLoader` — reads `logs/run_*.jsonl`; provides `load_run(run_id)`, `load_last_n_runs(n)`, `list_run_ids()` |
+| `aggregator.py` | `RunAggregator` — pass rate, healed count, module breakdown, per-test summary, error-type counts; `TrendAggregator` — trend series, flakiness detection, delta vs previous run |
+| `render.py` | `render_run_report()` — produces the full 10-section HTML; Chart.js loaded from CDN with offline fallback; all data embedded as a JSON blob so the file works on `file://` |
+| `generator.py` | `ReportGenerator` — high-level API: `generate_run_report(run_id, open_browser)`, `generate_trend_report(last_n_runs)` |
+
+The 10 report sections are: Run Summary · Module Breakdown · Test Results (filterable/searchable) · Failure Analysis · Healing Insights · Error Type Distribution · Trend Charts (pass-rate, duration, healing stacked) · Flakiness Report · Attempt Detail · Environment Info.
+
+---
+
+## Locator strategy (v2.0)
+
+All generated locators follow this priority. Lower tiers are only used when higher tiers cannot uniquely identify the element in the DOM snapshot.
+
+| Priority | Locator | Condition |
+|---|---|---|
+| 1 | `[data-testid="..."]` | Always preferred when present |
+| 2 | `#stable-id` | Only non-framework-generated IDs (no `ember*`, `react-select-*`) |
+| 3 | `[name="field"]` | Reliable for form inputs |
+| 4 | `get_by_placeholder()` | Placeholder text from DOM snapshot |
+| 5 | `get_by_label()` | Only if real `<label>` exists in DOM snapshot |
+| 6 | `get_by_role()` | Scoped to a container; last resort for interactive elements |
+| 7 | `get_by_text()` | Static read-only text only; ≤6 words; not from criterion prose |
+
+XPath, dynamic IDs, `networkidle`, `time.sleep()`, and app-specific CSS classes (`.oxd-*`, `.mat-*`) are explicitly forbidden.
+
+---
+
+## Prompt versioning
+
+Prompts live in `phoenix-intelligence/prompts/<agent>/<version>.md` with YAML front-matter.
+`PromptLoader.get(agent)` auto-selects the highest semantic version. Adding a new version file is all that is needed to upgrade — no code change required.
+
+Current versions:
+
+| Prompt | Version | Purpose |
+|---|---|---|
+| `automation_from_manual` | 2.0 | Translates manual test → Playwright script (v2.0 = DOM-grounded locators) |
+| `manual_test_generator` | 1.0 | Generates structured manual test cases from a user story |
+| `script_fixer` | 1.0 | Fixes a failing Playwright script using its error output |
+| `locator_expert` | 1.0 | Discovers stable locators for a page element |
+| `failure_analyzer` | 1.0 | Root-cause analysis for a failing test |
+| `test_name` | 1.0 | Derives a short snake_case function name from a test description |
+| `test_quality_standards` | 1.0 | Assertion, waiting, marker, and security rules injected into **every** generation pass |
+
+---
+
+## Generated project structure
+
+A project created with `phoenix init` has this layout:
+
+```
+my-project/
+├── .phoenixrc               ← TOML config (base_url, browser, LLM model)
+├── .env / .env.local        ← env var template (APP_URL, TEST_USERNAME, TEST_PASSWORD)
+├── pyproject.toml           ← pytest markers: smoke, regression, sanity, {module}
+├── Makefile                 ← make smoke / regression / report / clean
+├── conftest.py              ← page fixture, test_data fixture, locator_registry fixture
+├── user_stories/            ← input: plain-text user stories
+├── manual_tests/            ← output: one .md file per module
+├── test_data/               ← output: one .json file per module
+├── tests/{module}/          ← output: one test_{module}.py per module
+├── locators/                ← output: one {module}.json per module
+├── fixtures/                ← auth.py, browser.py
+├── config/                  ← settings.yaml, environments/
+├── reports/                 ← HTML test reports (report_<run_id>.html)
+├── logs/                    ← JSONL execution logs (run_<ts>_<run_id>.jsonl)
+└── test-results/            ← Playwright failure screenshots (auto-created)
+```
+
+Credentials are **never hardcoded** — always read from `os.environ["APP_URL"]`, `os.environ["TEST_USERNAME"]`, `os.environ["TEST_PASSWORD"]`.

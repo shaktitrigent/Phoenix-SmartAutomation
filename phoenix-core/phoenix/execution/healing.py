@@ -42,7 +42,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from phoenix.execution.logger import AttemptRecord, ExecutionLogger
 
@@ -359,7 +359,7 @@ class HealingEngine:
 
         for attempt_num in range(1, self._max_attempts + 1):
             t0 = time.monotonic()
-            stdout, stderr, rc = self._run_pytest(test_path, browser=browser)
+            stdout, stderr, rc, screenshot_path = self._run_pytest(test_path, browser=browser)
             duration = time.monotonic() - t0
 
             status = "passed" if rc == 0 else "failed"
@@ -379,6 +379,7 @@ class HealingEngine:
                 status=status,
                 error_type=last_error_class if status != "passed" else None,
                 error_message=error_msg[:500] if error_msg else None,
+                screenshot_path=screenshot_path if status != "passed" else None,
                 duration_seconds=round(duration, 2),
             )
             attempt_records.append(record)
@@ -421,7 +422,7 @@ class HealingEngine:
 
     def _run_pytest(
         self, test_path: str, browser: str = "chromium"
-    ) -> tuple[str, str, int]:
+    ) -> Tuple[str, str, int, Optional[str]]:
         cmd = [
             "pytest",
             test_path,
@@ -429,14 +430,35 @@ class HealingEngine:
             "--tb=short",
             "--no-header",
             f"--browser={browser}",
+            "--screenshot=only-on-failure",
+            "--output=test-results",
         ]
+        t_before = time.time()
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            return result.stdout, result.stderr, result.returncode
+            screenshot = self._find_screenshot_since(t_before)
+            return result.stdout, result.stderr, result.returncode, screenshot
         except subprocess.TimeoutExpired:
-            return "", "Subprocess timed out after 300 seconds", 2
+            return "", "Subprocess timed out after 300 seconds", 2, None
         except Exception as exc:
-            return "", str(exc), 3
+            return "", str(exc), 3, None
+
+    def _find_screenshot_since(self, since: float) -> Optional[str]:
+        """Return path of the newest PNG written to test-results/ after `since`."""
+        results_dir = Path("test-results")
+        if not results_dir.exists():
+            return None
+        newest: Optional[Path] = None
+        newest_mtime = since
+        for png in results_dir.rglob("*.png"):
+            try:
+                mtime = png.stat().st_mtime
+                if mtime > newest_mtime:
+                    newest_mtime = mtime
+                    newest = png
+            except OSError:
+                pass
+        return str(newest.resolve()) if newest else None
 
     def _extract_error(self, stdout: str, stderr: str) -> str:
         combined = (stdout or "") + "\n" + (stderr or "")

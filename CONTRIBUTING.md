@@ -1,4 +1,4 @@
-# Contributing to Phoenix Smart Automation
+# Contributing to Phoenix SmartAutomation
 
 ## Repository Layout
 
@@ -7,9 +7,7 @@ Phoenix-SmartAutomation/
 ├── shared/                  # Pydantic contracts — zero runtime deps beyond pydantic
 ├── phoenix-core/            # pip-installable SDK + CLI (no AI/LLM imports)
 ├── phoenix-intelligence/    # Hosted FastAPI server; all AI/LLM logic lives here
-├── examples/                # Sample consumer projects
-├── docs/                    # Architecture docs, ADRs, guides
-└── infra/                   # Docker, Kubernetes, Terraform
+└── docs/                    # Architecture docs and guides
 ```
 
 **Dependency rule**: `shared` ← `phoenix-core` ← user project.
@@ -21,12 +19,11 @@ Phoenix-SmartAutomation/
 
 | Tool | Version |
 |------|---------|
-| Python | ≥ 3.9 |
-| Node.js | ≥ 18 (for Playwright MCP) |
-| Docker | ≥ 24 (optional, for infra) |
-| pre-commit | ≥ 3.6 |
+| Python | ≥ 3.11 |
+| Node.js | ≥ 18 (for Playwright MCP page inspection) |
+| pre-commit | ≥ 3.6 (optional but recommended) |
 
-```bash
+```powershell
 pip install pre-commit
 pre-commit install
 ```
@@ -37,27 +34,26 @@ pre-commit install
 
 ### 1. Clone and create a virtual environment
 
-```bash
+```powershell
 git clone <repo-url>
 cd Phoenix-SmartAutomation
 python -m venv venv
-# Windows
-venv\Scripts\activate
-# Linux/macOS
-source venv/bin/activate
+venv\Scripts\activate          # Windows
+# source venv/bin/activate     # macOS / Linux
 ```
 
 ### 2. Install packages in editable mode
 
-```bash
+```powershell
 pip install -e shared/
 pip install -e "phoenix-core/[dev]"
 pip install -e "phoenix-intelligence/[dev]"
+playwright install chromium
 ```
 
 ### 3. Configure the intelligence server
 
-```bash
+```powershell
 # Windows PowerShell
 $env:ANTHROPIC_API_KEY = "sk-ant-your-key-here"
 
@@ -69,7 +65,7 @@ export ANTHROPIC_API_KEY="sk-ant-your-key-here"
 
 ## Running Tests
 
-```bash
+```powershell
 # All tests
 pytest
 
@@ -88,7 +84,7 @@ pytest --cov=phoenix --cov-report=term-missing
 All code is formatted and linted with [Ruff](https://docs.astral.sh/ruff/).
 Black-compatible formatting is enforced automatically via pre-commit hooks.
 
-```bash
+```powershell
 # Manually run linting
 ruff check . --fix
 ruff format .
@@ -128,6 +124,7 @@ docs(contributing): add setup instructions for Windows
 - [ ] `shared/` models updated if the API contract changed
 - [ ] README updated if user-facing behaviour changed
 - [ ] No new direct imports of `anthropic` / LLM libraries in `phoenix-core`
+- [ ] Prompt changes use a new version file (`prompts/<agent>/2.0.md`) not an edit to `1.0.md`
 
 ---
 
@@ -137,29 +134,17 @@ docs(contributing): add setup instructions for Windows
    implementing the `LLMProvider` protocol (see `services/llm/router.py`).
 2. Register it in `services/llm/router.py` → `_PROVIDERS` dict.
 3. Set `PHOENIX_LLM_PROVIDER=<provider>` and the matching `*_API_KEY` env var.
-4. Add integration test under `phoenix-intelligence/tests/`.
+4. Add an integration test under `phoenix-intelligence/tests/`.
 
 ---
 
-## Architecture Decision Records
+## Versioning Prompts
 
-New ADRs go in `docs/adrs/`. Use the next available number and the template:
+Prompt files live in `phoenix-intelligence/prompts/<agent>/`. The `PromptLoader` auto-selects the highest semantic version. To update a prompt:
 
-```markdown
-# ADR-XXXX: Title
-
-## Status
-Proposed | Accepted | Deprecated | Superseded by ADR-YYYY
-
-## Context
-...
-
-## Decision
-...
-
-## Consequences
-...
-```
+1. Create a new file `<version+1>.md` — do **not** edit existing version files.
+2. Add YAML front-matter with `version:` matching the filename.
+3. The server picks up the new version on the next request (no restart needed).
 
 ---
 

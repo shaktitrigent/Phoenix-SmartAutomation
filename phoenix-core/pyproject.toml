@@ -58,6 +58,12 @@ phoenix = "phoenix.cli.main:main"
 where = ["."]
 include = ["phoenix*"]
 
+[tool.setuptools.package-data]
+phoenix = [
+    "templates/**/*",
+    "templates/**/*.j2",
+]
+
 [tool.black]
 line-length = 100
 target-version = ['py39']

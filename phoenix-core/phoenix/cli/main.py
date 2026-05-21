@@ -5,6 +5,7 @@ from phoenix.cli.commands import doctor, fix, generate, execute, init, locators,
 
 
 @click.group()
+@click.version_option(version="0.1.0", prog_name="phoenix")
 @click.option("--config", "-c", type=click.Path(exists=True), help="Path to configuration file")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.pass_context

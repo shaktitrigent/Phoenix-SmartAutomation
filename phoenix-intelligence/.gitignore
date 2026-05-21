@@ -1,0 +1,44 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Test / IDE caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime artifacts that belong in a consumer project, not here
+locators/
+logs/
+manual_tests/
+test_results/
+test_data/
+reports/
+user_stories/
+*.db
+*.db-shm
+*.db-wal
+
+# Playwright MCP runtime snapshots
+.playwright-mcp/
+
+# Environment / secrets
+.env
+.env.local
+*.env
+
+# OS noise
+.DS_Store
+Thumbs.db

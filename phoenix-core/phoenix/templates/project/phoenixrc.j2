@@ -2,21 +2,33 @@
 # https://github.com/your-org/Phoenix-SmartAutomation
 
 [project]
-default_project    = "{{ project_name }}"
-application_url    = "{{ base_url }}"
-manual_output_dir  = "./manual_tests"
-test_output_dir    = "./test_results"
-report_output_dir  = "./reports"
+name             = "{{ project_name }}"
+base_url         = "{{ base_url }}"
+default_browser  = "{{ browser }}"
+
+[input]
+source      = "user_stories"
+stories_dir = "./user_stories"
+
+[llm]
+provider       = "anthropic"
+model          = "claude-sonnet-4-6"
+fallback_model = "claude-haiku-4-5-20251001"
 
 [intelligence]
 base_url    = "http://localhost:8001/api/v1"
 timeout     = 300
 retry_count = 3
 
-[database]
-url = "sqlite:///./phoenix.db"
+[healing]
+enabled      = true
+max_attempts = 3
 
-[execution]
-default_browser  = "{{ browser }}"
-headless         = true
-screenshot_on_failure = true
+[test_data]
+strategy           = "generated"
+locale             = "en_US"
+include_edge_cases = true
+
+[reporting]
+format     = "html"
+output_dir = "./reports"

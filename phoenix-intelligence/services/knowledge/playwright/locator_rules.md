@@ -8,16 +8,17 @@
 
 Attempt each tier in order. Move to the next ONLY when the current tier cannot uniquely identify the element.
 
-Phoenix generation priority is:
-1. `get_by_role()`
-2. `get_by_label()`
-3. `get_by_placeholder()`
-4. Stable CSS selectors using `name`, `type`, `href`, `id`, or `data-*`
-5. `get_by_test_id()`
-6. Snapshot-backed locators derived from the inspected DOM
+Phoenix generation priority (v2.0):
+1. `[data-testid="..."]` — most stable; always preferred when present
+2. `#stable-id` — only for IDs without framework-generated digit patterns (`ember*`, `react-select-*`, `ng-model-*`)
+3. `[name="field"]` — reliable for form inputs
+4. `get_by_placeholder()` — placeholder text verbatim from the DOM snapshot
+5. `get_by_label()` — ONLY when the DOM snapshot shows a real `<label>` or `aria-labelledby`
+6. `get_by_role()` — scoped to a container; last resort for interactive elements
+7. `get_by_text()` — static read-only text only: ≤ 6 words, no action verbs, must appear verbatim in the DOM snapshot
 
 Never convert manual-test narration such as `Dashboard loads successfully` or `fields are visible`
-into locator text. If no stable DOM-backed locator exists, emit a manual-review warning instead.
+into locator text. If no stable DOM-backed locator exists, emit `# UNGROUNDABLE: <reason>` instead of guessing.
 
 ### 1. `get_by_role` — Default Choice for All Interactive Elements
 
@@ -496,17 +497,17 @@ page.locator("form").filter(has=page.get_by_role("heading", name="Contact")).fil
 
 When generating or modifying Playwright locators, follow these rules strictly:
 
-1. **Always start with `get_by_role`.** Only fall to lower priorities when role-based cannot work.
-2. **Always provide `name=`** with `get_by_role` for specificity.
-3. **Use `get_by_label` for form fields** when a label exists. Prefer it over `get_by_placeholder`.
-4. **Use `get_by_test_id` only for non-semantic/dynamic elements** — never as a shortcut when role or label works.
-5. **Never generate `page.query_selector`, `page.$`, `page.wait_for_selector`, `time.sleep()`, or `asyncio.sleep()`.**
-6. **Never use visual/utility CSS classes** in locators.
-7. **Never write CSS chains deeper than 2 levels.** Use chaining and filtering instead.
-8. **Resolve strict mode violations** with scoping, filtering, or `exact=True` — never suppress the error.
-9. **Prefer `.filter()` over `.nth()`** — positional selectors are fragile.
-10. **If forced to use CSS or XPath**, add an inline `# comment` explaining why and what would replace it.
-11. **Use `exact=True`** when text could substring-match unintended elements.
-12. **For dropdowns**, use `get_by_label(...).select_option(...)` or `get_by_role("combobox", name=...)`.
-13. **For file inputs**, use `get_by_label(...).set_input_files(...)` or `locator("input[type='file']").set_input_files(...)`.
+1. **Follow v2.0 locator priority** — `data-testid` → stable `#id` → `[name]` → placeholder → label (only if real `<label>`) → role (scoped) → text (static, ≤6 words).
+2. **Every locator must be grounded in the DOM snapshot.** If an element is absent from the snapshot, emit `# UNGROUNDABLE: <description>` — never guess.
+3. **Never use criterion/step prose as locator text.** Manual test text describes intent, not DOM state.
+4. **Never generate `page.query_selector`, `page.$`, `page.wait_for_selector`, `time.sleep()`, or `asyncio.sleep()`.**
+5. **Never use `wait_for_load_state("networkidle")`** — use `expect()` assertions instead.
+6. **Never use visual/utility CSS classes** (`.btn-primary`, `.mt-4`, `.oxd-*`, `.mat-*`).
+7. **Never use dynamic/framework-generated IDs** (`ember123`, `react-select-2`, `ng-model-1`).
+8. **Never use XPath** — if unavoidable, add an inline `# comment` explaining why.
+9. **`get_by_label()` requires a real `<label>` in the DOM snapshot.** If no `<label>` exists, use `get_by_placeholder()` or `[name]` instead.
+10. **`get_by_text()` limits:** ≤ 6 words, no action verbs, text must appear verbatim in the snapshot. Use only for static, non-interactive content.
+11. **Resolve strict mode violations** with scoping, filtering, or `exact=True` — never suppress the error.
+12. **Prefer `.filter()` over `.nth()`** — positional selectors break when DOM order changes.
+13. **For custom dropdowns (non-native `<select>`)**, click the trigger then select the option — do not use `.select_option()`.
 14. **For dialogs/modals**, always scope with `get_by_role("dialog", name=...)` before targeting child elements.

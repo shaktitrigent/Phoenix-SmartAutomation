@@ -1,5 +1,6 @@
 """CLI commands"""
 
+import re as _re
 import shutil
 import sys
 from pathlib import Path
@@ -19,6 +20,103 @@ from phoenix.cli.output import (
     print_warning,
 )
 from phoenix.sdk.config import PhoenixConfig
+
+
+def _module_from_file(path: Path) -> str:
+    """Derive a module name from a file path stem.
+
+    user_stories/login.txt      → "login"
+    manual_tests/checkout.md    → "checkout"
+    tests/employee_mgmt.py      → "employee_mgmt"
+    """
+    stem = path.stem.lower()
+    return _re.sub(r"[^a-z0-9]+", "_", stem).strip("_") or "generated"
+
+
+def _dict_to_manual_case(data: dict):
+    """Convert a manual test dict (from intelligence or generator) to a ManualCase."""
+    from phoenix.generators.writer import ManualCase
+
+    return ManualCase(
+        case_id=data.get("case_id", data.get("name", "TC-000")),
+        name=data.get("name", ""),
+        description=data.get("description", ""),
+        steps=data.get("steps", []),
+        expected_result=data.get("expected_result", ""),
+        preconditions=data.get("preconditions", ""),
+        postconditions=data.get("postconditions", ""),
+        tags=data.get("tags", []),
+        risk_level=data.get("risk_level", "regression"),
+    )
+
+
+def _write_module_artifacts(
+    module: str,
+    all_manual: list,
+    all_automation: list,
+    project_root: Path,
+    verbose: bool = False,
+) -> None:
+    """Write consolidated module files via ModuleAwareWriter and generate test data."""
+    try:
+        from phoenix.generators.writer import (
+            ModuleAwareWriter,
+            LocatorElement,
+            TestFunction,
+            _extract_test_functions,
+        )
+        from phoenix.test_data.engine import TestDataEngine
+    except ImportError as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Module-aware writing unavailable: %s", exc)
+        return
+
+    writer = ModuleAwareWriter(project_root=project_root)
+
+    # Manual test cases
+    if all_manual:
+        cases = [_dict_to_manual_case(t) for t in all_manual]
+        path = writer.write_manual(module, cases)
+        if verbose:
+            print_info(f"  Module manual:  {path}")
+
+    # Automation test functions (extracted from already-written individual scripts)
+    test_funcs: list[TestFunction] = []
+    for test in all_automation:
+        script_path = test.get("script_path", "")
+        if script_path and Path(script_path).exists():
+            try:
+                code = Path(script_path).read_text(encoding="utf-8")
+                for name, body in _extract_test_functions(code).items():
+                    test_funcs.append(TestFunction(name=name, body=body))
+            except Exception:
+                pass
+    if test_funcs:
+        path = writer.write_tests(module, test_funcs)
+        if verbose:
+            print_info(f"  Module tests:   {path}")
+
+    # Locators from v2.0 structured output
+    locator_elements: list[LocatorElement] = []
+    for test in all_automation:
+        for entry in test.get("locators", []):
+            element_id = entry.get("element_id", "")
+            if element_id:
+                locator_elements.append(LocatorElement(element_id=element_id, data=entry))
+    if locator_elements:
+        path = writer.write_locators(module, locator_elements)
+        if verbose:
+            print_info(f"  Module locators:{path}")
+
+    # Test data
+    try:
+        engine = TestDataEngine(project_root=project_root)
+        data_path = engine.generate(module)
+        if verbose:
+            print_info(f"  Test data:      {data_path}")
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("TestDataEngine failed: %s", exc)
 
 
 def _print_intelligence_metadata_warnings(metadata: dict | None) -> None:
@@ -108,7 +206,11 @@ def doctor(ctx):
     import requests as _requests
 
     intel_url = config.intelligence.base_url.rstrip("/")
-    health_url = f"{intel_url}/health"
+    # Health endpoint is always at the server root, not under /api/v1
+    from urllib.parse import urlparse
+    _parsed = urlparse(intel_url)
+    _server_root = f"{_parsed.scheme}://{_parsed.netloc}"
+    health_url = f"{_server_root}/health"
     try:
         resp = _requests.get(health_url, timeout=5)
         data = resp.json()
@@ -235,13 +337,6 @@ def init(ctx, name, project_name, base_url, browser, force, dry_run, non_interac
         print_info(f"{prefix}Created:  {path}")
     for path in result.skipped_files:
         print_warning(f"{prefix}Skipped (exists): {path}")
-
-    # Initialize database (skip in dry-run)
-    if not dry_run:
-        from phoenix.storage.database import Database
-
-        db = Database(config)
-        db.create_tables()
 
     print_success(
         f"{prefix}Phoenix project '{resolved_name}' initialised in {resolved_dir}"
@@ -393,6 +488,16 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
                 " — run 'phoenix locators' to inspect them."
             )
 
+        # Module-aware consolidated output
+        if story_file:
+            _write_module_artifacts(
+                module=_module_from_file(Path(story_file)),
+                all_manual=all_manual,
+                all_automation=all_automation,
+                project_root=Path(config_path).parent if config_path else Path.cwd(),
+                verbose=verbose,
+            )
+
     except Exception as exc:
         print_error(f"Error generating tests: {exc}")
         if verbose:
@@ -410,6 +515,21 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
     type=click.Path(),
     help="Directory containing manual test Markdown files (default: manual_tests/)",
 )
+@click.option(
+    "--file",
+    "-f",
+    "manual_file",
+    default=None,
+    type=click.Path(exists=True),
+    help="Automate a single manual test file instead of the whole manual_tests/ directory",
+)
+@click.option(
+    "--test-case",
+    "-tc",
+    "test_case",
+    default=None,
+    help="Automate only the test case whose name contains this string (case-insensitive)",
+)
 @click.option("--url", "-u", default=None, help="Application URL (passed to LLM for context)")
 @click.option("--project", "-p", default=None, help="Project name")
 @click.option(
@@ -418,7 +538,7 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
     help="Delete existing test_results/ scripts before generating",
 )
 @click.pass_context
-def automate(ctx, manual_dir, url, project, clean):
+def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     """Generate automation scripts from reviewed manual test cases.
 
     Reads every manual_test_*.md file from the manual_tests/ directory,
@@ -431,9 +551,21 @@ def automate(ctx, manual_dir, url, project, clean):
          (review / edit manual_tests/*.md as needed)
       2. phoenix automate --url <app>
       3. phoenix run
+
+    Examples:
+
+    \b
+      # Automate all manual tests
+      phoenix automate --url https://app.com
+
+      # Automate a single file
+      phoenix automate --file manual_tests/login.md --url https://app.com
+
+      # Automate one specific test case by name
+      phoenix automate --test-case "valid login" --url https://app.com
     """
     from phoenix.generators.automation import AutomationTestGenerator
-    from phoenix.generators.manual_parser import load_manual_tests_from_dir
+    from phoenix.generators.manual_parser import load_manual_tests_from_dir, load_manual_tests_from_file
     from phoenix.locators.extractor import extract_locators_from_script, page_name_from_script_path
     from phoenix.locators.registry import LocatorRegistry
     from phoenix.sdk.config import PhoenixConfig
@@ -443,19 +575,36 @@ def automate(ctx, manual_dir, url, project, clean):
     verbose = ctx.obj.get("verbose", False)
     config = PhoenixConfig.load(config_path) if config_path else PhoenixConfig.from_env()
 
-    # Resolve manual_dir relative to config if not absolute
-    manual_path = Path(manual_dir)
-    if not manual_path.is_absolute() and config_path:
-        manual_path = Path(config_path).parent / manual_dir
+    # Load from a single file or the whole directory
+    if manual_file:
+        manual_tests = load_manual_tests_from_file(Path(manual_file))
+        source_label = manual_file
+    else:
+        manual_path = Path(manual_dir)
+        if not manual_path.is_absolute() and config_path:
+            manual_path = Path(config_path).parent / manual_dir
+        manual_tests = load_manual_tests_from_dir(manual_path)
+        source_label = str(manual_path)
 
-    # Load and parse manual tests from disk
-    manual_tests = load_manual_tests_from_dir(manual_path)
     if not manual_tests:
         print_warning(
-            f"No manual test files found in '{manual_path}'. "
+            f"No manual test files found in '{source_label}'. "
             "Run 'phoenix generate' first to create manual tests."
         )
         return
+
+    # Filter by test case name if --test-case was given
+    if test_case:
+        filtered = [t for t in manual_tests if test_case.lower() in t.get("name", "").lower()]
+        if not filtered:
+            available = "\n  ".join(t.get("name", "") for t in manual_tests)
+            print_error(
+                f"No test case matching '{test_case}' found.\n"
+                f"Available test cases:\n  {available}"
+            )
+            raise click.Abort()
+        manual_tests = filtered
+        print_info(f"Filtered to {len(manual_tests)} test case(s) matching '{test_case}'")
 
     print_header(f"Automating {len(manual_tests)} manual test(s) from '{manual_path}'")
     for t in manual_tests:
@@ -495,7 +644,7 @@ def automate(ctx, manual_dir, url, project, clean):
         for warning in test.get("warnings", []):
             print_warning(f"{test.get('name', 'automation_test')}: {warning}")
 
-    # Write scripts to test_results/
+    # Write scripts — individual files for legacy runner + consolidated via ModuleAwareWriter
     auto_gen = AutomationTestGenerator(output_dir=config.project.test_output_dir)
     written = auto_gen.generate(
         automation_tests=automation_tests,
@@ -524,6 +673,16 @@ def automate(ctx, manual_dir, url, project, clean):
             pass
     if total_locators:
         registry.save_all(locators_dir)
+
+    # Module-aware consolidated output (groups by module derived from manual file path)
+    project_root = Path(config_path).parent if config_path else Path.cwd()
+    _write_module_artifacts(
+        module=_module_from_file(manual_path),
+        all_manual=[],
+        all_automation=written,
+        project_root=project_root,
+        verbose=verbose,
+    )
 
     # Summary
     click.echo("")
@@ -799,13 +958,26 @@ def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_
         click.echo(msg)
 
     duration = _time.monotonic() - start_all
-    exec_logger.finish_run(
+    run_record = exec_logger.finish_run(
         run_id,
         passed=passed,
         failed=failed,
         total=total,
         duration_seconds=round(duration, 2),
     )
+
+    # Generate HTML report in reports/
+    try:
+        from phoenix.execution.reporter import generate_html_report
+
+        reports_dir = Path("reports")
+        if config_path:
+            reports_dir = Path(config_path).parent / "reports"
+        attempts = exec_logger.get_attempts(run_id)
+        html_path = generate_html_report(run_id, run_record.model_dump(), attempts, reports_dir)
+        print_info(f"HTML report: {html_path}")
+    except Exception:
+        pass  # Report generation is best-effort; never block the run
 
     print_info(f"\nRun ID: {run_id}  |  logs/{run_id}")
     if healed:
@@ -1003,13 +1175,8 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
             unchanged += 1
             continue
 
-        # Write fixed script back, keeping a .bak of the original
-        bak_path = script_path.with_suffix(".py.bak")
-        bak_path.write_text(script_code, encoding="utf-8")
         script_path.write_text(data["fixed_script"], encoding="utf-8")
         click.echo(f"    Fixed ({data.get('fix_summary', '')})")
-        if verbose:
-            click.echo(f"    Original backed up to: {bak_path.name}")
         fixed += 1
 
     click.echo("")
@@ -1017,7 +1184,7 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
         print_info(f"[dry-run] Would fix {fixed} script(s). No files written.")
     else:
         if fixed:
-            print_success(f"Fixed {fixed} script(s). Originals saved as .py.bak")
+            print_success(f"Fixed {fixed} script(s).")
         if unchanged:
             print_warning(f"{unchanged} script(s) had no applicable fix (error type not matched)")
         if skipped:
@@ -1027,7 +1194,7 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
 
 
 @click.command()
-@click.option("--run-id", "-r", default=None, help="Run ID to show (default: latest run)")
+@click.option("--run-id", "-r", default=None, help="Run ID to report on (default: latest run)")
 @click.option(
     "--logs-dir",
     "-l",
@@ -1035,9 +1202,47 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
     type=click.Path(),
     help="Directory containing JSONL execution logs (default: logs/)",
 )
+@click.option(
+    "--reports-dir",
+    default="reports",
+    type=click.Path(),
+    help="Output directory for HTML reports (default: reports/)",
+)
+@click.option(
+    "--open",
+    "open_browser",
+    is_flag=True,
+    default=False,
+    help="Open the HTML report in the default browser after generating",
+)
+@click.option(
+    "--trend",
+    is_flag=True,
+    default=False,
+    help="Generate a trend report across the last N runs",
+)
+@click.option(
+    "--last",
+    default=20,
+    type=int,
+    help="Number of runs to include in trend report (default: 20)",
+)
+@click.option(
+    "--env",
+    "environment",
+    default="",
+    help="Environment label shown in the report header (e.g. QA, staging, prod)",
+)
+@click.option(
+    "--project",
+    "project_name",
+    default="Phoenix Project",
+    help="Project name shown in the report header",
+)
 @click.pass_context
-def report(ctx, run_id, logs_dir):
-    """Show a formatted summary report for the latest (or specified) test run."""
+def report(ctx, run_id, logs_dir, reports_dir, open_browser, trend, last, environment, project_name):
+    """Generate an HTML report for the latest (or specified) test run."""
+    import webbrowser as _wb
     from phoenix.execution.logger import ExecutionLogger
     from rich.table import Table
     from rich import box as rich_box
@@ -1049,6 +1254,24 @@ def report(ctx, run_id, logs_dir):
         print_warning("No execution results found. Run 'phoenix run' first.")
         return
 
+    # ------------------------------------------------------------------ #
+    # Trend report mode
+    # ------------------------------------------------------------------ #
+    if trend:
+        try:
+            from phoenix.reporting.generator import ReportGenerator
+            gen = ReportGenerator(logs_dir=Path(logs_dir), reports_dir=Path(reports_dir))
+            html_path = gen.generate_trend_report(last_n_runs=last)
+            print_success(f"Trend report generated: {html_path}")
+            if open_browser:
+                _wb.open(html_path.resolve().as_uri())
+        except Exception as exc:
+            print_error(f"Failed to generate trend report: {exc}")
+        return
+
+    # ------------------------------------------------------------------ #
+    # Single-run mode
+    # ------------------------------------------------------------------ #
     # Pick the target run
     if run_id:
         run = next((r for r in runs if r.get("run_id") == run_id), None)
@@ -1090,7 +1313,7 @@ def report(ctx, run_id, logs_dir):
     )
     click.echo("")
 
-    # Per-test breakdown
+    # Per-test Rich table (existing terminal output preserved)
     attempts = exec_logger.get_attempts(rid)
     if attempts:
         # Keep only the final attempt per test
@@ -1112,6 +1335,30 @@ def report(ctx, run_id, logs_dir):
             table.add_row(icon, a.test_name, str(a.attempt), f"{a.duration_seconds:.1f}s", err)
 
         _con.print(table)
+
+    # ------------------------------------------------------------------ #
+    # HTML report — generate via ReportGenerator (additive to terminal)
+    # ------------------------------------------------------------------ #
+    try:
+        from phoenix.reporting.generator import ReportGenerator
+        gen = ReportGenerator(logs_dir=Path(logs_dir), reports_dir=Path(reports_dir))
+        html_path = gen.generate_run_report(
+            run_id=rid,
+            open_browser=open_browser,
+            project_name=project_name,
+            environment=environment,
+        )
+        print_info(f"HTML report: {html_path}")
+    except Exception as exc:
+        # Fall back to simple reporter if new system fails
+        try:
+            from phoenix.execution.reporter import generate_html_report
+            html_path = generate_html_report(rid, run, attempts or [], Path(reports_dir))
+            print_info(f"HTML report: {html_path}")
+            if open_browser:
+                _wb.open(html_path.resolve().as_uri())
+        except Exception:
+            print_warning(f"Could not generate HTML report: {exc}")
 
     click.echo("")
     if len(runs) > 1:

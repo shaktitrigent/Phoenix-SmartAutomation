@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from contextlib import suppress
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
@@ -12,8 +15,8 @@ from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 # Configuration
 # ---------------------------------------------------------------------------
 
-BASE_URL = "{{ base_url }}"
-DEFAULT_BROWSER = "{{ browser }}"
+BASE_URL = os.environ.get("APP_URL", "{{ base_url }}")
+DEFAULT_BROWSER = os.environ.get("PHOENIX_BROWSER", "{{ browser }}")
 ACTION_TIMEOUT_MS = 30_000
 NAVIGATION_TIMEOUT_MS = 60_000
 
@@ -24,7 +27,6 @@ def _parser_has_option(parser, option_name: str) -> bool:
     if anonymous is not None:
         option_groups.append(anonymous)
     option_groups.extend(getattr(parser, "_groups", []))
-
     for group in option_groups:
         for option in getattr(group, "options", []):
             if option_name in getattr(option, "_long_opts", []):
@@ -48,7 +50,7 @@ def pytest_addoption(parser):
         "--base-url",
         action="store",
         default=None,
-        help="Base URL for Phoenix-generated tests when pytest-playwright is not installed.",
+        help="Override APP_URL for this test run.",
     )
     _addoption_if_missing(
         parser,
@@ -72,8 +74,7 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def base_url(request) -> str:
-    configured_base_url = request.config.getoption("--base-url", default=None)
-    return configured_base_url or BASE_URL
+    return request.config.getoption("--base-url", default=None) or BASE_URL
 
 
 @pytest.fixture(scope="session")
@@ -125,6 +126,57 @@ def page(context) -> Page:
 
 
 # ---------------------------------------------------------------------------
+# Module-aware locator registry
+# ---------------------------------------------------------------------------
+
+def _module_from_path(path: Path) -> str:
+    """Derive module name from test file path.
+
+    tests/login/test_login.py  → "login"
+    tests/checkout/test_...py  → "checkout"
+    """
+    parts = path.parts
+    try:
+        tests_idx = parts.index("tests")
+        if tests_idx + 1 < len(parts):
+            return parts[tests_idx + 1]
+    except ValueError:
+        pass
+    return path.stem.replace("test_", "")
+
+
+@pytest.fixture(scope="module")
+def locator_registry(request):
+    """Module-scoped registry loaded from locators/<module>.json."""
+    module = _module_from_path(Path(request.fspath))
+    loc_path = Path("locators") / f"{module}.json"
+    try:
+        from phoenix.locators.registry import LocatorRegistry
+        if loc_path.exists():
+            return LocatorRegistry.load_page(loc_path)
+        return LocatorRegistry.load_all("locators/")
+    except ImportError:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Module-aware test data fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def test_data(request) -> dict:
+    """Module-scoped fixture that loads test_data/<module>.json."""
+    module = _module_from_path(Path(request.fspath))
+    data_path = Path("test_data") / f"{module}.json"
+    if data_path.exists():
+        try:
+            return json.loads(data_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"scenarios": [], "edge_cases": []}
+
+
+# ---------------------------------------------------------------------------
 # Authenticated page fixture — extend with your login logic
 # ---------------------------------------------------------------------------
 
@@ -132,31 +184,12 @@ def page(context) -> Page:
 def authenticated_page(page, base_url) -> Page:
     """Return a page that has been authenticated.
 
-    Override this fixture with your application's login steps:
+    Reads credentials from environment variables — never hardcode them here.
 
         page.goto(f"{base_url}/login")
-        page.get_by_label("Username").fill("admin")
-        page.get_by_label("Password").fill("admin123")
+        page.get_by_label("Username").fill(os.environ["TEST_USERNAME"])
+        page.get_by_label("Password").fill(os.environ["TEST_PASSWORD"])
         page.get_by_role("button", name="Login").click()
-        expect(page).to_have_url(re.compile(r".*/dashboard.*"))
     """
-    # TODO: implement login
+    # TODO: implement login using os.environ["TEST_USERNAME"] / ["TEST_PASSWORD"]
     return page
-
-
-# ---------------------------------------------------------------------------
-# Locator registry (multi-locator support)
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="session")
-def locator_registry(tmp_path_factory):
-    """Session-scoped registry that maps element names to LocatorBundles.
-
-    Populated from locators/*.json at runtime if phoenix-core is installed.
-    """
-    try:
-        from phoenix.locators.registry import LocatorRegistry
-        registry = LocatorRegistry.load_all("locators/")
-    except ImportError:
-        registry = {}
-    return registry

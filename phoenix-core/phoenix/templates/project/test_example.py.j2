@@ -1,17 +1,36 @@
-"""Example Playwright test for {{ project_name }} — delete or adapt as needed."""
+"""Starter login tests for {{ project_name }} — adapt or regenerate with phoenix generate."""
+
+import os
 
 import pytest
 from playwright.sync_api import Page, expect
 
 
-def test_homepage_loads(page: Page, base_url: str) -> None:
-    """Verify the application home page is reachable."""
-    page.goto(base_url)
+@pytest.mark.smoke
+@pytest.mark.login
+def test_login_page_loads(page: Page, base_url: str) -> None:
+    """Verify the login page is reachable and renders key elements."""
+    page.goto(f"{base_url}/login", timeout=60_000)
     expect(page).not_to_have_title("")
 
 
-def test_login_page_visible(page: Page, base_url: str) -> None:
-    """Verify the login page renders key elements."""
-    page.goto(base_url)
-    # Adjust selectors to match your application
-    expect(page.get_by_role("button", name="Login")).to_be_visible()
+@pytest.mark.regression
+@pytest.mark.login
+def test_login_with_valid_credentials(page: Page, base_url: str) -> None:
+    """Verify a user can log in with valid credentials from environment variables."""
+    page.goto(f"{base_url}/login", timeout=60_000)
+    page.get_by_label("Username").fill(os.environ["TEST_USERNAME"])
+    page.get_by_label("Password").fill(os.environ["TEST_PASSWORD"])
+    page.get_by_role("button", name="Login").click()
+    expect(page).not_to_have_url(f"{base_url}/login", timeout=30_000)
+
+
+@pytest.mark.regression
+@pytest.mark.login
+def test_login_with_empty_username(page: Page, base_url: str) -> None:
+    """Verify a validation error is shown when username is empty."""
+    page.goto(f"{base_url}/login", timeout=60_000)
+    page.get_by_label("Password").fill(os.environ.get("TEST_PASSWORD", "password123"))
+    page.get_by_role("button", name="Login").click()
+    # Adjust the expected error selector to match your application
+    expect(page.get_by_role("alert").first).to_be_visible()

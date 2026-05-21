@@ -1,0 +1,18 @@
+# Shared settings for {{ project_name }}
+# Environment-specific overrides live in config/environments/*.yaml
+
+project:
+  name: "{{ project_name }}"
+  default_browser: "{{ browser }}"
+
+timeouts:
+  action_ms: 30000
+  navigation_ms: 60000
+  expect_ms: 10000
+
+retries:
+  on_failure: 1
+
+screenshots:
+  on_failure: true
+  dir: "./reports/screenshots"

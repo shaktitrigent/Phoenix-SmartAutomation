@@ -57,13 +57,11 @@ class LocatorExpertAgent(BaseAgent):
         page_url: str,
         dom_snapshot: Optional[str],
     ) -> List[Dict[str, Any]]:
-        if self.llm_client:
-            try:
-                return self._discover_via_llm(element_name, page_url, dom_snapshot)
-            except Exception as exc:
-                logger.warning("LLM locator discovery failed, using fallback: %s", exc)
-
-        return self._heuristic_locators(element_name)
+        return self._llm_with_fallback(
+            llm_fn=lambda: self._discover_via_llm(element_name, page_url, dom_snapshot),
+            fallback_fn=lambda: self._heuristic_locators(element_name),
+            operation="LocatorExpertAgent",
+        )
 
     def _discover_via_llm(
         self,

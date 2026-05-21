@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 _prompt_loader = PromptLoader()
 
 
+def _load_quality_standards() -> str:
+    try:
+        return _prompt_loader.get("test_quality_standards")
+    except (FileNotFoundError, KeyError):
+        return ""
+
+
 class FailureAnalyzerAgent(BaseAgent):
     """Analyzes test failures and suggests targeted fixes.
 
@@ -28,15 +35,13 @@ class FailureAnalyzerAgent(BaseAgent):
         error_message = input_data.get("error_message", "")
         traceback = input_data.get("traceback", "")
 
-        if self.llm_client:
-            try:
-                result = self._analyze_via_llm(error_message, traceback)
-                result.setdefault("metadata", {})["test_case_id"] = test_case_id
-                return result
-            except Exception as exc:
-                logger.warning("LLM failure analysis failed, using fallback: %s", exc)
-
-        return self._analyze_heuristic(test_case_id, error_message, traceback)
+        result = self._llm_with_fallback(
+            llm_fn=lambda: self._analyze_via_llm(error_message, traceback),
+            fallback_fn=lambda: self._analyze_heuristic(test_case_id, error_message, traceback),
+            operation="FailureAnalyzerAgent",
+        )
+        result.setdefault("metadata", {})["test_case_id"] = test_case_id
+        return result
 
     # ------------------------------------------------------------------
 
@@ -53,6 +58,10 @@ class FailureAnalyzerAgent(BaseAgent):
             user_prompt += f"\n## Traceback\n{traceback}\n"
         if knowledge_context:
             user_prompt += f"\n## Relevant Knowledge\n{knowledge_context[:800]}"
+
+        quality_standards = _load_quality_standards()
+        if quality_standards:
+            user_prompt += f"\n\n## Quality Standards (the suggested fix must comply with these)\n{quality_standards}"
 
         logger.info("Analyzing failure via LLM: %s", error_message[:120])
         raw = self.llm_client.generate(system_prompt, user_prompt)
@@ -77,7 +86,7 @@ class FailureAnalyzerAgent(BaseAgent):
                     "metadata": {},
                 }
         except (json.JSONDecodeError, ValueError):
-            pass
+            logger.warning("Failed to parse structured LLM response; falling back to raw text")
         # If parsing fails, return the raw text as the suggested fix
         return {
             "root_cause": "Could not parse structured response from LLM",

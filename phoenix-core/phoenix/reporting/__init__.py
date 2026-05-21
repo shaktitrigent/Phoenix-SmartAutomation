@@ -1,5 +1,5 @@
-"""Reporting module"""
+"""Phoenix reporting module — HTML report generation."""
 
-from phoenix.reporting.html_reporter import HTMLReporter
+from phoenix.reporting.generator import ReportGenerator
 
-__all__ = ["HTMLReporter"]
+__all__ = ["ReportGenerator"]

@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 _prompt_loader = PromptLoader()
 
 
+def _load_quality_standards() -> str:
+    try:
+        return _prompt_loader.get("test_quality_standards")
+    except (FileNotFoundError, KeyError):
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Heuristic fix rules
 # ---------------------------------------------------------------------------
@@ -225,18 +232,28 @@ class ScriptFixerAgent(BaseAgent):
         if application_url:
             user_parts += [f"## Application URL\n{application_url}", ""]
 
-        user_parts += [
-            "## Original script (failing)",
-            "```python",
-            script_code,
-            "```",
-            "",
+        fix_instructions = [
             "## Instructions",
             "- Return ONLY the complete fixed Python script.",
             "- Fix the specific error above. Change as few lines as possible.",
             "- No markdown fences, no explanations, no TODOs.",
             "- Keep the test function name exactly as-is.",
         ]
+        quality_standards = _load_quality_standards()
+        if quality_standards:
+            fix_instructions += [
+                "",
+                "## Quality Standards (the fixed script must comply with these)",
+                quality_standards,
+            ]
+
+        user_parts += [
+            "## Original script (failing)",
+            "```python",
+            script_code,
+            "```",
+            "",
+        ] + fix_instructions
 
         user_prompt = "\n".join(user_parts)
         logger.info("Fixing script '%s' via LLM (error_type=%s)", test_name, error_type)

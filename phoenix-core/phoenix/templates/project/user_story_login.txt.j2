@@ -1,0 +1,19 @@
+User Story: Login
+Application URL: {{ base_url }}
+
+As a registered user
+I want to log in to {{ project_name }}
+So that I can access my account
+
+Acceptance Criteria:
+- Given I am on the login page
+- When I enter valid credentials and click Login
+- Then I should be redirected to the dashboard
+
+- Given I am on the login page
+- When I enter an invalid password
+- Then I should see an error message
+
+- Given I am on the login page
+- When I leave the username field empty and click Login
+- Then I should see a validation error for the username field

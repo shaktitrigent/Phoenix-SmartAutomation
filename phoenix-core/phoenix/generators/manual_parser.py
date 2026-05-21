@@ -177,6 +177,22 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
     }
 
 
+def load_manual_tests_from_file(manual_file: str | Path) -> List[Dict[str, Any]]:
+    """Load and parse a single manual test Markdown file.
+
+    Args:
+        manual_file: Path to a ``manual_test_*.md`` file.
+
+    Returns:
+        List of structured manual test dicts (empty list if parsing fails).
+    """
+    path = Path(manual_file)
+    if not path.exists():
+        return []
+    parsed = parse_manual_test_file(path)
+    return [parsed] if parsed else []
+
+
 def load_manual_tests_from_dir(manual_dir: str | Path) -> List[Dict[str, Any]]:
     """Load and parse all ``manual_test_*.md`` files from *manual_dir*.
 

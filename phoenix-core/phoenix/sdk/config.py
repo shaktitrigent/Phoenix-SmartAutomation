@@ -71,12 +71,27 @@ class ProjectConfig(BaseModel):
     """Project settings"""
 
     default_project: str = Field(default="default", description="Default project name")
+    # New schema fields (phoenix init ≥ v2)
+    name: Optional[str] = Field(default=None, description="Project name (new schema)")
+    base_url: Optional[str] = Field(default=None, description="Application base URL (new schema)")
+    default_browser: str = Field(default="chromium", description="Default browser")
+    # Legacy fields kept for backwards compatibility
     application_url: Optional[str] = Field(default=None, description="Default application URL")
     manual_output_dir: str = Field(
         default="./manual_tests", description="Manual test output directory"
     )
     test_output_dir: str = Field(default="./test_results", description="Test output directory")
+    tests_dir: str = Field(default="./tests", description="Module-organised tests directory")
+    test_data_dir: str = Field(default="./test_data", description="Generated test data directory")
     report_output_dir: str = Field(default="./reports", description="Report output directory")
+
+    @property
+    def resolved_name(self) -> str:
+        return self.name or self.default_project
+
+    @property
+    def resolved_base_url(self) -> Optional[str]:
+        return self.base_url or self.application_url
 
 
 class PhoenixConfig(BaseModel):
@@ -119,8 +134,11 @@ class PhoenixConfig(BaseModel):
             project=ProjectConfig(
                 default_project=os.environ.get("PHOENIX_DEFAULT_PROJECT", "default"),
                 application_url=os.environ.get("PHOENIX_APPLICATION_URL"),
+                base_url=os.environ.get("PHOENIX_BASE_URL"),
                 manual_output_dir=os.environ.get("PHOENIX_MANUAL_OUTPUT_DIR", "./manual_tests"),
                 test_output_dir=os.environ.get("PHOENIX_TEST_OUTPUT_DIR", "./test_results"),
+                tests_dir=os.environ.get("PHOENIX_TESTS_DIR", "./tests"),
+                test_data_dir=os.environ.get("PHOENIX_TEST_DATA_DIR", "./test_data"),
                 report_output_dir=os.environ.get("PHOENIX_REPORT_OUTPUT_DIR", "./reports"),
             ),
         )
@@ -164,7 +182,13 @@ class PhoenixConfig(BaseModel):
         # Resolve project output directories relative to the config file location.
         # This prevents generated files from being scattered when CLI is run from different CWDs.
         base_dir = Path(config_path).resolve().parent
-        for attr in ("manual_output_dir", "test_output_dir", "report_output_dir"):
+        for attr in (
+            "manual_output_dir",
+            "test_output_dir",
+            "tests_dir",
+            "test_data_dir",
+            "report_output_dir",
+        ):
             raw = getattr(config.project, attr, None)
             if raw and not Path(raw).is_absolute():
                 setattr(config.project, attr, str((base_dir / raw).resolve()))

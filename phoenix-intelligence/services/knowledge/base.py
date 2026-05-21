@@ -1,11 +1,14 @@
 """Knowledge base manager"""
 
+import logging
+import json
+import re
+import yaml
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-import json
-import yaml
-import re
-from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -97,7 +100,7 @@ class KnowledgeBase:
                         metadata = yaml.safe_load(frontmatter_match.group(1)) or {}
                         content = content[frontmatter_match.end() :]
                     except Exception:
-                        pass
+                        logger.warning("Failed to parse YAML frontmatter in %s", file_path, exc_info=True)
 
                 return KnowledgeEntry(
                     title=metadata.get("title", file_path.stem),
@@ -106,8 +109,8 @@ class KnowledgeBase:
                     tags=metadata.get("tags", []),
                     metadata=metadata,
                 )
-        except Exception as e:
-            print(f"Error loading knowledge file {file_path}: {e}")
+        except Exception:
+            logger.warning("Failed to load knowledge file %s", file_path, exc_info=True)
             return None
 
         return None

@@ -24,7 +24,7 @@ def _default_model(provider: str) -> str:
         return "gemini-1.5-pro"
     if provider == "ollama":
         return "llama3"
-    return "claude-sonnet-4-20250514"
+    return "claude-sonnet-4-6"
 
 
 @dataclass

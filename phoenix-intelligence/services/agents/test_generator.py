@@ -21,6 +21,58 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+def _parse_structured_v2_output(
+    raw: str,
+) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+    """Parse the v2.0 structured response into (script, locators, recommendations).
+
+    Expects three sections delimited by '### SCRIPT', '### LOCATORS',
+    '### RECOMMENDATIONS' (in that order).  Falls back gracefully when the
+    LLM omits a section or returns plain Python (v1.0-style response).
+    """
+    # Check whether the response uses the new structured format
+    if "### SCRIPT" not in raw and "### LOCATORS" not in raw:
+        # Plain script returned (v1.0-style fallback from the LLM)
+        return _strip_code_fences(raw), [], []
+
+    script = ""
+    locators: List[Dict[str, Any]] = []
+    recommendations: List[str] = []
+
+    # Split on section headers — result is ['prefix', 'SCRIPT', body, 'LOCATORS', body, ...]
+    parts = re.split(r"^###\s+(SCRIPT|LOCATORS|RECOMMENDATIONS)\s*$", raw, flags=re.MULTILINE)
+    section_map: Dict[str, str] = {}
+    it = iter(parts)
+    next(it, None)  # discard preamble before first header
+    for header in it:
+        body = next(it, "")
+        section_map[header.strip().upper()] = body.strip()
+
+    if "SCRIPT" in section_map:
+        script = _strip_code_fences(section_map["SCRIPT"])
+
+    if "LOCATORS" in section_map:
+        raw_json = _strip_code_fences(section_map["LOCATORS"])
+        if raw_json and raw_json != "[]":
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, list):
+                    locators = parsed
+            except (json.JSONDecodeError, ValueError):
+                logger.debug("Could not parse LOCATORS section as JSON: %s", raw_json[:200])
+
+    if "RECOMMENDATIONS" in section_map:
+        rec_text = section_map["RECOMMENDATIONS"].strip()
+        if rec_text and rec_text.lower() != "none.":
+            recommendations = [
+                line.lstrip("-•* ").strip()
+                for line in rec_text.splitlines()
+                if line.strip() and line.strip().lower() != "none."
+            ]
+
+    return script, locators, recommendations
+
+
 def _safe_py_str(value: str) -> str:
     """Escape a value so it is safe to embed inside a Python double-quoted string literal.
 
@@ -88,20 +140,6 @@ def _manual_review_warning_line(reason: str, criterion: Optional[str] = None) ->
 
 def _looks_like_placeholder_assertion(text: str) -> bool:
     return bool(_PLACEHOLDER_ASSERTION_RE.search(text))
-
-
-def _is_orangehrm_context(criterion: str, application_url: Optional[str] = None) -> bool:
-    lower = criterion.lower()
-    url_lower = (application_url or "").lower()
-    return (
-        "orangehrm" in lower
-        or "opensource-demo.orangehrmlive.com" in url_lower
-        or "leave module" in lower
-        or "apply leave" in lower
-        or "my leave" in lower
-        or "dashboard" in lower
-        or ("login" in lower and "admin" in lower)
-    )
 
 
 def _classify_control(criterion: str, application_url: Optional[str] = None) -> ControlType:
@@ -320,122 +358,23 @@ def _criterion_to_playwright_lines(
     control = _classify_control(criterion, application_url)
     lower = criterion.lower()
     lines: List[str] = [f"    # Step {step_num}: {criterion}"]
-    is_orangehrm = _is_orangehrm_context(criterion, application_url)
 
-    if (
-        is_orangehrm
-        and "username" in lower
-        and "password" in lower
-        and "visible" in lower
-    ):
-        lines += [
-            '    expect(page.locator("input[name=\'username\']")).to_be_visible()',
-            '    expect(page.locator("input[name=\'password\']")).to_be_visible()',
-        ]
-
-    elif (
-        is_orangehrm
-        and ("login using valid admin credentials" in lower or "log in using valid admin credentials" in lower)
-    ):
-        url = application_url or "https://opensource-demo.orangehrmlive.com/web/index.php/auth/login"
-        lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=60_000)',
-            '    page.locator("input[name=\'username\']").fill("Admin")',
-            '    page.locator("input[name=\'password\']").fill("admin123")',
-            '    page.get_by_role("button", name="Login").click()',
-            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"))',
-            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
-        ]
-
-    elif is_orangehrm and "dashboard" in lower and any(
-        k in lower for k in ["verify", "visible", "loads successfully", "load successfully"]
-    ):
-        lines += [
-            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"))',
-            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
-        ]
-
-    elif is_orangehrm and "navigate to the leave module" in lower:
-        lines += [
-            '    page.get_by_role("link", name="Leave").click()',
-            '    expect(page.get_by_role("link", name="Apply")).to_be_visible()',
-        ]
-
-    elif is_orangehrm and "click apply under leave section" in lower:
-        lines += [
-            '    page.get_by_role("link", name="Apply").click()',
-            '    expect(page).to_have_url(re.compile(r".*/leave/applyLeave.*"))',
-        ]
-
-    elif is_orangehrm and "apply leave page is visible" in lower:
-        lines += [
-            '    expect(page).to_have_url(re.compile(r".*/leave/applyLeave.*"))',
-            '    expect(page.locator(".orangehrm-card-container").first).to_be_visible()',
-        ]
-
-    elif is_orangehrm and "select leave type" in lower:
-        lines += [
-            '    click_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("Leave Type", exact=True)).locator(".oxd-select-text").first, "Leave Type dropdown")',
-            '    click_ready(page, page.get_by_role("option").first, "Leave Type option")',
-        ]
-
-    elif is_orangehrm and "from date" in lower and "future" in lower:
-        lines += [
-            '    fill_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("From Date", exact=True)).locator("input").first, "2099-12-01", "From Date input")',
-        ]
-
-    elif is_orangehrm and "to date" in lower and "future" in lower:
-        lines += [
-            '    fill_ready(page, page.locator("div.oxd-input-group").filter(has=page.get_by_text("To Date", exact=True)).locator("input").first, "2099-12-02", "To Date input")',
-        ]
-
-    elif is_orangehrm and "enter leave comment" in lower:
-        lines += [
-            '    page.locator("textarea").fill("Applying leave through Phoenix automation.")',
-        ]
-
-    elif is_orangehrm and "success message appears" in lower:
-        lines += [
-            '    expect(page.locator(".oxd-toast")).to_be_visible(timeout=10_000)',
-            '    expect(page.locator(".oxd-toast")).to_contain_text("Success")',
-        ]
-
-    elif is_orangehrm and "navigate to my leave" in lower:
-        lines += [
-            '    page.get_by_role("link", name="My Leave").click()',
-            '    expect(page).to_have_url(re.compile(r".*/leave/viewMyLeaveList.*"))',
-        ]
-
-    elif is_orangehrm and "submitted leave request appears in leave list" in lower:
-        lines += [
-            '    expect(page.locator(".oxd-table-filter, .orangehrm-paper-container").first).to_be_visible()',
-        ]
-
-    elif is_orangehrm and "submit leave without selecting leave type" in lower:
-        lines += [
-            '    page.get_by_role("button", name="Apply").click()',
-        ]
-
-    elif is_orangehrm and "validation error messages appear" in lower:
-        lines += [
-            '    expect(page.locator(".oxd-input-field-error-message").first).to_be_visible()',
-        ]
-
-    elif control == ControlType.LOGIN:
+    if control == ControlType.LOGIN:
         # Extract URL, username, password from step text
         url_match = _LOGIN_URL_RE.search(criterion)
         url = url_match.group(0).rstrip(".,)") if url_match else (application_url or "https://example.com")
         user_match = _LOGIN_USER_RE.search(criterion)
-        username = user_match.group(1).strip().strip("'\"") if user_match else "Admin"
+        username_val = user_match.group(1).strip().strip("'\"") if user_match else None
         pass_match = _LOGIN_PASS_RE.search(criterion)
-        password = pass_match.group(1).strip().strip("'\"") if pass_match else "admin123"
+        password_val = pass_match.group(1).strip().strip("'\"") if pass_match else None
+        username_expr = f'"{_safe_py_str(username_val)}"' if username_val else 'os.environ["TEST_USERNAME"]'
+        password_expr = f'"{_safe_py_str(password_val)}"' if password_val else 'os.environ["TEST_PASSWORD"]'
         lines += [
             f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
-            f'    fill_ready(page, page.locator("input[name=\'username\']"), "{_safe_py_str(username)}", "Username input")',
-            f'    fill_ready(page, page.locator("input[name=\'password\']"), "{_safe_py_str(password)}", "Password input")',
+            f'    fill_ready(page, page.locator("input[name=\'username\']"), {username_expr}, "Username input")',
+            f'    fill_ready(page, page.locator("input[name=\'password\']"), {password_expr}, "Password input")',
             '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
             '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
-            '    expect(page.locator(".oxd-topbar-header-breadcrumb-module")).to_contain_text("Dashboard")',
         ]
 
     elif control == ControlType.MENU_CLICK:
@@ -718,6 +657,16 @@ def _derive_overall_expected_result(criteria: List[str], user_story: str) -> str
 
 _prompt_loader = PromptLoader()
 
+
+def _load_quality_standards() -> str:
+    """Return the quality standards body, or empty string if the file is missing."""
+    try:
+        return _prompt_loader.get("test_quality_standards")
+    except (FileNotFoundError, KeyError):
+        logger.debug("test_quality_standards prompt not found — skipping injection")
+        return ""
+
+
 # Maximum manual tests generated per user story (enforced in code, not just in the prompt)
 _MAX_MANUAL_TESTS = 5
 
@@ -820,6 +769,9 @@ def _inject_runtime_helpers(script: str) -> str:
     """Add shared Playwright helper functions and stronger imports to generated scripts."""
     if "def configure_page(page: Page)" in script:
         return script
+
+    if "import os" not in script:
+        script = "import os\n" + script
 
     script = re.sub(
         r"from playwright\.sync_api import Page, expect",
@@ -1095,6 +1047,10 @@ class TestGeneratorAgent(BaseAgent):
         if knowledge_context:
             user_prompt += f"\n\n## Context\n{knowledge_context[:1000]}"
 
+        quality_standards = _load_quality_standards()
+        if quality_standards:
+            user_prompt += f"\n\n## Quality Standards (apply to all generated tests)\n{quality_standards}"
+
         logger.info("Generating manual tests via LLM for: %s", user_story[:80])
         raw = self.llm_client.generate(system_prompt, user_prompt)
         tests = self._parse_json_array(raw)
@@ -1222,12 +1178,13 @@ class TestGeneratorAgent(BaseAgent):
 
         results = []
         for manual_test in manual_tests:
-            script_code = self._generate_script_for_manual_test(
+            gen = self._generate_script_for_manual_test(
                 manual_test=manual_test,
                 application_url=application_url,
                 knowledge_context=knowledge_context,
                 page_snapshot=page_snapshot,
             )
+            script_code = gen["script_code"]
             test_name = self._derive_short_name(manual_test.get("name", user_story))
             results.append(
                 {
@@ -1239,7 +1196,8 @@ class TestGeneratorAgent(BaseAgent):
                     "test_steps": [
                         s.get("action", "") for s in manual_test.get("steps", [])
                     ],
-                    "locators": [],
+                    "locators": gen["locators"],
+                    "recommendations": gen["recommendations"],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", risk_level or "regression"),
                     "generation_mode": "fallback" if not self.llm_client else "llm",
@@ -1259,14 +1217,24 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str],
         knowledge_context: str,
         page_snapshot: str = "",
-    ) -> str:
-        """Translate a single manual test into a Playwright script via LLM or fallback."""
+    ) -> Dict[str, Any]:
+        """Translate a single manual test into a Playwright script via LLM or fallback.
+
+        Returns a dict with keys:
+            script_code      - normalised Python source string
+            locators         - list of locator entry dicts (from v2.0 structured output)
+            recommendations  - list of human-review notes (from v2.0 structured output)
+        """
         if not self.llm_client:
             script = self._build_fallback_script_from_manual_test(
                 manual_test=manual_test,
                 application_url=application_url,
             )
-            return _normalise_generated_script(script)
+            return {
+                "script_code": _normalise_generated_script(script),
+                "locators": [],
+                "recommendations": [],
+            }
 
         try:
             system_prompt_template = _prompt_loader.get("automation_from_manual")
@@ -1274,7 +1242,6 @@ class TestGeneratorAgent(BaseAgent):
                 knowledge_context=knowledge_context or "(no additional context)"
             )
 
-            # Format the manual test steps clearly for the LLM
             steps_text = self._format_manual_steps_for_prompt(manual_test)
 
             user_parts = [
@@ -1299,31 +1266,44 @@ class TestGeneratorAgent(BaseAgent):
             if page_snapshot:
                 user_parts += [
                     "",
-                    "## Live Page Snapshot (use these roles/names for accurate locators)",
+                    "## Live DOM Snapshot (ground every locator in this snapshot)",
                     page_snapshot[:3000],
                 ]
             else:
                 user_parts += [
                     "",
-                    "## Page Snapshot",
-                    "No live snapshot. Use the OrangeHRM locator table from the system prompt.",
+                    "## DOM Snapshot",
+                    "No live snapshot available. Use [name], [data-testid], or placeholder"
+                    " attributes where visible in the manual test context. Mark any element"
+                    " you cannot ground as UNGROUNDABLE in the RECOMMENDATIONS section.",
                 ]
 
             user_parts += [
                 "",
-                "## Output instructions",
-                "- Return ONLY Python source code. No markdown fences.",
-                "- One test function with a comment block for each manual step.",
-                "- Include a full login sequence as step 1 (credentials from the step text).",
+                "## Output format",
+                "Return exactly three sections: ### SCRIPT, ### LOCATORS, ### RECOMMENDATIONS",
+                "See the system prompt for the required structure of each section.",
             ]
+
+            quality_standards = _load_quality_standards()
+            if quality_standards:
+                user_parts += [
+                    "",
+                    "## Quality Standards (apply to the generated script)",
+                    quality_standards,
+                ]
 
             user_prompt = "\n".join(user_parts)
             logger.info(
                 "Generating automation via LLM for manual test: %s", manual_test.get("name", "")
             )
             raw = self.llm_client.generate(system_prompt, user_prompt)
-            script = _strip_code_fences(raw)
-            return _normalise_generated_script(script)
+            script, locators, recommendations = _parse_structured_v2_output(raw)
+            return {
+                "script_code": _normalise_generated_script(script),
+                "locators": locators,
+                "recommendations": recommendations,
+            }
 
         except Exception as exc:
             logger.warning(
@@ -1336,7 +1316,11 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
             )
-            return _normalise_generated_script(script)
+            return {
+                "script_code": _normalise_generated_script(script),
+                "locators": [],
+                "recommendations": [],
+            }
 
     def _build_fallback_script_from_manual_test(
         self,
@@ -1511,12 +1495,13 @@ class TestGeneratorAgent(BaseAgent):
 
         results = []
         for manual_test in manual_tests:
-            script_code = self._generate_script_for_manual_test(
+            gen = self._generate_script_for_manual_test(
                 manual_test=manual_test,
                 application_url=application_url,
                 knowledge_context=knowledge_context,
                 page_snapshot=page_snapshot,
             )
+            script_code = gen["script_code"]
             test_name = self._derive_short_name(manual_test.get("name", "test"))
             results.append(
                 {
@@ -1527,7 +1512,8 @@ class TestGeneratorAgent(BaseAgent):
                     "script_template": "playwright",
                     "script_code": script_code,
                     "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
-                    "locators": [],
+                    "locators": gen["locators"],
+                    "recommendations": gen["recommendations"],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", "regression"),
                     "generation_mode": "fallback" if not self.llm_client else "llm",

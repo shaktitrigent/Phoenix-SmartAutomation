@@ -45,13 +45,11 @@ class LocatorDiscovery:
         Returns:
             Validation result
         """
-        # TODO: Implement validation with MCP
-        # For now, return placeholder
-        return {
-            "is_valid": True,
-            "element_found": True,
-            "validation_timestamp": None,
-        }
+        raise NotImplementedError(
+            "validate_locator requires MCP page inspection. "
+            "Implement by calling self.agent_registry.mcp_client.inspect_page(page_url) "
+            "and checking whether the locator resolves."
+        )
 
     def get_recommended_locator(self, page_url: str, element_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -83,5 +81,8 @@ class LocatorDiscovery:
             locator: Locator dictionary
             page_url: Optional page URL
         """
-        # TODO: Store in database via storage layer
-        pass
+        raise NotImplementedError(
+            "cache_locator requires a persistent storage layer. "
+            "Implement by writing the locator dict to the locators/ JSON store "
+            "or a database via a storage service."
+        )

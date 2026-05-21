@@ -344,15 +344,31 @@ expect(page.get_by_role("row")).to_have_count(5)
 
 ## Rules for AI Code Generation
 
-When generating or modifying Playwright test code, follow these rules strictly:
+When generating Playwright test code, follow these rules strictly:
 
-1. **Always start with `get_by_role`.** Only fall to lower priorities if the role-based locator cannot work.
-2. **Never generate `page.query_selector`, `page.$`, or `page.wait_for_selector`.** Use `page.locator` / `get_by_*` with `expect()` assertions.
-3. **Never generate `time.sleep()` or hardcoded waits.** Rely on Playwright's auto-wait and `expect()`.
-4. **Never use visual/utility CSS classes** (`.btn-primary`, `.mt-4`, `.flex`) in locators.
-5. **Never generate long CSS chains** (`div > section > ul > li:nth-child(2) > a`). Use chaining and filtering.
-6. **Always use `exact=True`** when text could substring-match unintended elements.
-7. **When an element is not unique,** chain from a scoped parent or use `.filter()` — do not fall back to XPath or positional selectors.
-8. **If forced to use CSS or XPath,** add an inline comment explaining why and what would make it replaceable.
-9. **Prefer `get_by_label`** over `get_by_placeholder` for form fields when a label exists.
+1. **Follow the v2.0 locator priority — in this order:**
+   1. `[data-testid="..."]` — always preferred when present
+   2. `#stable-id` — only IDs without framework-generated digit patterns (`ember*`, `react-select-*`)
+   3. `[name="field"]` — reliable for form inputs
+   4. `get_by_placeholder()` — placeholder text from the DOM snapshot
+   5. `get_by_label()` — ONLY when the DOM snapshot shows a real `<label>` or `aria-labelledby`
+   6. `get_by_role()` — scoped to a container; last resort for interactive elements
+   7. `get_by_text()` — only for static read-only text: ≤ 6 words, no action verbs, verbatim in the DOM snapshot
+
+2. **Every locator must be traceable to the DOM snapshot.** If the element is absent from the snapshot, mark it `# UNGROUNDABLE` — never guess.
+
+3. **Never use criterion/step prose as a locator.** Text from the manual test step describes intent, not DOM state.
+
+4. **Never generate `page.query_selector`, `page.$`, or `page.wait_for_selector`.** Use `page.locator` / `get_by_*` with `expect()` assertions.
+
+5. **Never generate `time.sleep()`, `asyncio.sleep()`, or `wait_for_load_state("networkidle")`.**
+
+6. **Never use visual/utility CSS classes** (`.btn-primary`, `.mt-4`, `.flex`, `.oxd-*`, `.mat-*`).
+
+7. **Never use dynamic/framework-generated IDs** (`ember123`, `react-select-2`, `ng-model-1`).
+
+8. **Never use XPath.** If there is genuinely no other option, add an inline comment explaining why and what would replace it.
+
+9. **When an element is not unique,** chain from a scoped parent container or use `.filter()` — never suppress the strict mode error.
+
 10. **Use `expect()` for all assertions** — never use raw `assert` with locator state checks.

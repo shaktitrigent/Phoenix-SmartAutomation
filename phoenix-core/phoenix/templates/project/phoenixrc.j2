@@ -32,3 +32,18 @@ include_edge_cases = true
 [reporting]
 format     = "html"
 output_dir = "./reports"
+
+# ---------------------------------------------------------------------------
+# Jira integration (optional — remove the # to enable)
+# Secrets must be set as environment variables, never in this file:
+#   JIRA_URL=https://yourcompany.atlassian.net
+#   JIRA_EMAIL=your.email@company.com
+#   JIRA_API_TOKEN=your_api_token_here
+# ---------------------------------------------------------------------------
+# [jira]
+# url                       = "https://yourcompany.atlassian.net"
+# project_key               = "PROJ"
+# board_id                  = ""
+# acceptance_criteria_field = "description"
+# download_attachments      = true
+# max_attachment_size_kb    = 5120

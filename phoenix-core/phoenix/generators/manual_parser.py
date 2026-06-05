@@ -1,37 +1,35 @@
 """Manual test Markdown parser.
 
-Reads the ``manual_test_NNN_<slug>.md`` files written by
-:class:`~phoenix.generators.manual.ManualTestGenerator` and reconstructs
-structured test-case dicts that can be passed directly to the automation
-generation pipeline.
+Reads ``manual_test_NNN_<slug>.md`` files (Phoenix canonical format) and also
+accepts several alternative naming conventions used by other QA tools:
 
-Format expected
----------------
-Each file follows this layout (produced by _render_markdown):
+    manual_test_*.md   — Phoenix canonical
+    test_*.md          — common short form
+    *_manual.md        — suffix convention
+    TC-*.md            — Jira-style ID prefix
+    *_test.md          — snake-case suffix
+    *.md               — any Markdown file inside the manual_tests directory
 
-    # TC-001: Add New Employee - Happy Path
-
-    ## Overview
-    | Field | Value |
-    | Risk Level | SMOKE |
-    | Tags | `manual`, `smoke` |
-
-    ## Description
-    One-sentence summary…
-
-    ## Preconditions
-    …
+Format supported
+----------------
+*Primary* (Phoenix-generated pipe table):
 
     ## Test Steps
     | # | Action | Expected Result | Test Data |
     |---|--------|----------------|-----------|
     | 1 | Navigate to … | … | … |
 
-    ## Expected Result
-    …
+*Fallback* — numbered / bulleted plain list (e.g. from external tools):
 
-    ## Postconditions
-    …
+    ## Test Steps
+    1. Navigate to the login page
+    2. Enter credentials
+    3. Click Login
+
+    or
+
+    - Navigate to the login page
+    - Enter credentials
 
 The parser is lenient — missing sections are skipped gracefully.
 """
@@ -41,6 +39,19 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Supported filename patterns (tried in order; first match wins per file)
+# ---------------------------------------------------------------------------
+
+SUPPORTED_PATTERNS: List[str] = [
+    "manual_test_*.md",   # Phoenix canonical
+    "test_*.md",          # Common short form
+    "*_manual.md",        # Suffix convention
+    "TC-*.md",            # Jira-style ID prefix (TC-001-login.md)
+    "*_test.md",          # Snake-case suffix
+]
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +78,41 @@ def _parse_table_rows(block: str) -> List[List[str]]:
             continue
         rows.append(cells)
     return rows
+
+
+_LIST_ITEM_RE = re.compile(
+    r"^\s*(?:(?P<num>\d+)[.)]\s+|[-*]\s+)(?P<text>.+)$"
+)
+
+
+def _parse_list_steps(block: str) -> List[Dict[str, Any]]:
+    """Extract steps from a numbered or bulleted plain list.
+
+    Handles:
+        1. Navigate to the login page
+        2. Enter admin / admin123
+        - Click Login button
+    """
+    steps: List[Dict[str, Any]] = []
+    for line in block.splitlines():
+        m = _LIST_ITEM_RE.match(line)
+        if not m:
+            continue
+        text = m.group("text").strip()
+        if not text:
+            continue
+        num_str = m.group("num")
+        try:
+            step_num = int(num_str) if num_str else len(steps) + 1
+        except (TypeError, ValueError):
+            step_num = len(steps) + 1
+        steps.append({
+            "step_number": step_num,
+            "action": text,
+            "expected_result": "",
+            "test_data": "",
+        })
+    return steps
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +175,7 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
     # ---- Preconditions ----
     preconditions = sections.get("preconditions", "").strip()
 
-    # ---- Test Steps table ----
+    # ---- Test Steps: try pipe table first, fall back to plain list ----
     steps: List[Dict[str, Any]] = []
     steps_block = sections.get("test steps", "")
     rows = _parse_table_rows(steps_block)
@@ -154,6 +200,19 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
                 "test_data": test_data,
             }
         )
+
+    # Fallback: plain numbered/bulleted list when no pipe table was found
+    if not steps and steps_block:
+        steps = _parse_list_steps(steps_block)
+
+    # Last resort: try extracting steps from description or acceptance criteria blocks
+    if not steps:
+        for section_key in ("acceptance criteria", "criteria", "steps", "scenario"):
+            alt_block = sections.get(section_key, "")
+            if alt_block:
+                steps = _parse_list_steps(alt_block)
+                if steps:
+                    break
 
     # ---- Expected Result ----
     expected_result = sections.get("expected result", "").strip()
@@ -194,13 +253,22 @@ def load_manual_tests_from_file(manual_file: str | Path) -> List[Dict[str, Any]]
 
 
 def load_manual_tests_from_dir(manual_dir: str | Path) -> List[Dict[str, Any]]:
-    """Load and parse all ``manual_test_*.md`` files from *manual_dir*.
+    """Load and parse manual test Markdown files from *manual_dir*.
 
-    Files are returned in filename order so the ordering matches what was
-    generated.  Files that cannot be parsed are silently skipped.
+    Tries multiple naming patterns so that files written by Phoenix, Jira
+    exports, or other QA tools are all discovered automatically:
+
+        manual_test_*.md  — Phoenix canonical
+        test_*.md         — common short form
+        *_manual.md       — suffix convention
+        TC-*.md           — Jira-style ID prefix
+        *_test.md         — snake-case suffix
+
+    Files are returned in filename order.  Files that cannot be parsed are
+    silently skipped.
 
     Args:
-        manual_dir: Directory containing ``manual_test_NNN_<slug>.md`` files.
+        manual_dir: Directory containing manual test Markdown files.
 
     Returns:
         List of structured manual test dicts, ready for automation generation.
@@ -209,8 +277,17 @@ def load_manual_tests_from_dir(manual_dir: str | Path) -> List[Dict[str, Any]]:
     if not dir_path.exists():
         return []
 
+    # Collect unique paths across all supported patterns (preserve order)
+    seen: set = set()
+    candidates: List[Path] = []
+    for pattern in SUPPORTED_PATTERNS:
+        for md_file in sorted(dir_path.glob(pattern)):
+            if md_file not in seen:
+                seen.add(md_file)
+                candidates.append(md_file)
+
     results: List[Dict[str, Any]] = []
-    for md_file in sorted(dir_path.glob("manual_test_*.md")):
+    for md_file in sorted(candidates):
         parsed = parse_manual_test_file(md_file)
         if parsed:
             results.append(parsed)

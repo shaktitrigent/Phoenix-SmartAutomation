@@ -27,8 +27,9 @@ import re as re_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from phoenix.exceptions import QualityGateFailedError
 from phoenix.execution.reliability import apply_reliability_pipeline
-from phoenix.generators.clean_code import apply_clean_code_pipeline
+from phoenix.generators.clean_code import CleanCodeGate, apply_clean_code_pipeline
 from phoenix.storage.models import TestType
 
 # Title-case two-or-more word pattern used to detect person display names
@@ -71,7 +72,7 @@ class AutomationTestGenerator:
     """Receives complete ``script_code`` from phoenix-intelligence and writes
     it to the configured output directory after validation and normalisation."""
 
-    def __init__(self, output_dir: str = "./test_results") -> None:
+    def __init__(self, output_dir: str = "./tests") -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -129,6 +130,15 @@ class AutomationTestGenerator:
             )
 
         normalised = self._normalise(script_code)
+
+        # Fail fast: reject scripts with hard gate violations before writing to disk
+        gate = CleanCodeGate()
+        violations = gate.check(normalised)
+        hard_failures = [v for v in violations if v.rule not in gate.WARNING_RULES]
+        if hard_failures:
+            raise QualityGateFailedError(
+                [f"[{v.rule}] L{v.line_number}: {v.message}" for v in hard_failures]
+            )
 
         # Validate Python syntax before writing
         try:

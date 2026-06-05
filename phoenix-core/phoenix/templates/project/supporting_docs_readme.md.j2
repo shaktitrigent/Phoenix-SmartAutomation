@@ -1,0 +1,50 @@
+# Supporting Documents
+
+Place supporting artefacts for each user story in a folder named after the story file.
+
+## Convention
+
+```
+user_stories/
+  apply_leave.txt          ← user story file
+  apply_leave/             ← supporting docs for that story
+    wireframe.pdf
+    field_rules.xlsx
+    api_schema.json
+    acceptance_criteria.docx
+```
+
+When you run `phoenix generate --story-file user_stories/apply_leave.txt`, Phoenix
+automatically discovers the `apply_leave/` folder and passes all documents to the
+LLM so it can generate more accurate test cases and locators.
+
+You can also point to any folder or file explicitly:
+
+```bash
+phoenix generate --story-file user_stories/apply_leave.txt --docs path/to/docs/
+```
+
+## Supported formats
+
+| Format | Extension |
+|--------|-----------|
+| Text / Markdown | `.txt` `.md` |
+| PDF | `.pdf` — requires `pip install pypdf` |
+| Word | `.docx` — requires `pip install python-docx` |
+| Excel | `.xlsx` `.xls` — requires `pip install openpyxl` |
+| Data | `.csv` `.json` `.xml` `.yaml` |
+| Web | `.html` `.htm` |
+
+## What to put here
+
+- Wireframes or design screenshots (exported as PDF)
+- Acceptance criteria spreadsheets (CSV or XLSX)
+- API or data schemas (JSON or XML)
+- Business requirements documents (DOCX or PDF)
+- Field validation rules (any format)
+
+## What NOT to put here
+
+- Sensitive credentials or secrets (use environment variables)
+- Very large files — content is truncated at ~8 000 chars per document
+- Domain-wide business context (put that in `domain_knowledge/` instead)

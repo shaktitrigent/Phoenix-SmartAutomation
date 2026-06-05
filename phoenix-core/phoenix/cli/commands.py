@@ -108,10 +108,16 @@ def _write_module_artifacts(
         if verbose:
             print_info(f"  Module locators:{path}")
 
-    # Test data
+    # Test data — extract step text from manual tests so field names are derived
+    # from what the steps actually say, not from a hardcoded module-name map.
     try:
         engine = TestDataEngine(project_root=project_root)
-        data_path = engine.generate(module)
+        _steps = [
+            step if isinstance(step, str) else step.get("step", "")
+            for test in all_manual
+            for step in (test.get("steps") or [])
+        ]
+        data_path = engine.generate(module, steps=_steps or None)
         if verbose:
             print_info(f"  Test data:      {data_path}")
     except Exception as exc:
@@ -124,6 +130,28 @@ def _print_intelligence_metadata_warnings(metadata: dict | None) -> None:
         return
     for warning in metadata.get("warnings", []):
         print_warning(warning)
+
+
+def _load_domain_knowledge(project_root: Path) -> str:
+    """Read all .md files from domain_knowledge/ and concatenate them.
+
+    Returns an empty string if the directory doesn't exist or is empty.
+    Skips README.md (it's instructions, not knowledge).
+    """
+    knowledge_dir = project_root / "domain_knowledge"
+    if not knowledge_dir.is_dir():
+        return ""
+    parts: List[str] = []
+    for f in sorted(knowledge_dir.glob("*.md")):
+        if f.name.lower() == "readme.md":
+            continue
+        try:
+            text = f.read_text(encoding="utf-8").strip()
+            if text and "[Add your observations here]" not in text:
+                parts.append(f"## {f.stem}\n\n{text}")
+        except OSError:
+            pass
+    return "\n\n".join(parts)
 
 
 def _clean_project_directory(manual_dir: Path, test_dir: Path, verbose: bool = False) -> bool:
@@ -390,6 +418,10 @@ def migrate(ctx, target_dir, dry_run):
 @click.option(
     "--story-file", "-f", type=click.Path(exists=True), help="Path to user story text file"
 )
+@click.option(
+    "--jira", "-j", default=None, metavar="ISSUE_KEY",
+    help="Jira issue key (e.g. PROJ-123). Fetches story, criteria and attachments from Jira.",
+)
 @click.option("--url", "-u", help="Application URL to test (required for automation tests)")
 @click.option(
     "--criteria", "-c", multiple=True, help="Acceptance criteria (can be specified multiple times)"
@@ -409,12 +441,43 @@ def migrate(ctx, target_dir, dry_run):
     help="Risk level for tests",
 )
 @click.option(
+    "--docs",
+    "-d",
+    type=click.Path(),
+    default=None,
+    help=(
+        "Path to a file or folder of supporting documents (PDF, DOCX, XLSX, JSON, CSV…). "
+        "If omitted, auto-discovers a folder named after the story file "
+        "(e.g. user_stories/apply_leave/ for apply_leave.txt)."
+    ),
+)
+@click.option(
     "--clean",
     is_flag=True,
     help="Delete existing manual_tests/ files before generating",
 )
+@click.option(
+    "--no-gate",
+    "no_gate",
+    is_flag=True,
+    default=False,
+    help=(
+        "Disable the quality gate — save all generated tests even if they have "
+        "short descriptions or few steps. Useful when iterating on prompts."
+    ),
+)
+@click.option(
+    "--strict-gate",
+    "strict_gate",
+    is_flag=True,
+    default=False,
+    help=(
+        "Enable strict quality gate thresholds (≥ 2 steps, ≥ 10-char description). "
+        "Suitable for CI pipelines."
+    ),
+)
 @click.pass_context
-def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
+def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, docs, clean, no_gate, strict_gate):
     """Generate test cases from user story and application URL"""
     config_path = ctx.obj.get("config_path")
     verbose = ctx.obj.get("verbose", False)
@@ -428,13 +491,24 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
     if not url:
         url = client.config.project.application_url
 
+    # ---------------------------------------------------------------------------
+    # Jira source: fetch story + criteria + attachments from a Jira issue
+    # ---------------------------------------------------------------------------
+    _jira_docs: list = []
+    if jira:
+        story, criteria, _jira_docs = _fetch_from_jira(
+            issue_key=jira,
+            jira_config=client.config.jira,
+            verbose=verbose,
+        )
+
     # Validate URL for automation tests
     if type in ["automation", "both"] and not url:
         click.echo("[ERROR] --url is required for automation test generation", err=True)
         raise click.Abort()
 
-    if not story and not story_file:
-        click.echo("[ERROR] Provide --story or --story-file", err=True)
+    if not story and not story_file and not jira:
+        click.echo("[ERROR] Provide --story, --story-file, or --jira ISSUE_KEY", err=True)
         raise click.Abort()
 
     if clean:
@@ -445,9 +519,57 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
 
     print_header("Generating test cases...")
 
+    # Load project-specific domain knowledge
+    _gen_project_root = Path(config_path).parent if config_path else Path.cwd()
+    _domain_knowledge = _load_domain_knowledge(_gen_project_root)
+    if _domain_knowledge:
+        print_info("Domain knowledge loaded from domain_knowledge/")
+
+    # Load supporting documents (wireframes, specs, data schemas, etc.)
+    from phoenix.documents.loader import DocumentLoader
+    _doc_loader = DocumentLoader()
+    _supporting_docs = []
+    if docs:
+        _docs_path = Path(docs)
+        if _docs_path.is_dir():
+            _supporting_docs = _doc_loader.load_directory(_docs_path)
+        elif _docs_path.is_file():
+            _doc = _doc_loader.load_file(_docs_path)
+            if _doc:
+                _supporting_docs = [_doc]
+    elif story_file:
+        # Auto-discover: user_stories/apply_leave.txt → user_stories/apply_leave/
+        _auto_docs_dir = _doc_loader.supporting_docs_dir_for_story(Path(story_file))
+        if _auto_docs_dir.is_dir():
+            _supporting_docs = _doc_loader.load_directory(_auto_docs_dir)
+    # Merge Jira attachments with any explicitly loaded docs
+    _supporting_docs = _jira_docs + _supporting_docs
+    if _supporting_docs:
+        print_info(f"{len(_supporting_docs)} supporting document(s) loaded")
+
+    _gate_kwargs = dict(gate=not no_gate, strict_gate=strict_gate)
+    if no_gate:
+        print_warning("Quality gate disabled (--no-gate): all generated tests will be saved.")
+    elif strict_gate:
+        print_info("Strict quality gate enabled: tests must meet CI-grade thresholds.")
+
     try:
         results = []
-        if story_file:
+        if jira:
+            # Jira path: story and criteria are already resolved above
+            results.append(
+                client.generate_tests(
+                    user_story=story,
+                    application_url=url,
+                    acceptance_criteria=list(criteria) if criteria else [],
+                    test_type=type,
+                    risk_level=risk,
+                    domain_knowledge=_domain_knowledge,
+                    supporting_documents=_supporting_docs,
+                    **_gate_kwargs,
+                )
+            )
+        elif story_file:
             from phoenix.sdk.story_parser import parse_user_story_file
 
             with open(story_file, "r", encoding="utf-8") as f:
@@ -462,6 +584,9 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
                         acceptance_criteria=parsed.acceptance_criteria,
                         test_type=type,
                         risk_level=risk,
+                        domain_knowledge=_domain_knowledge,
+                        supporting_documents=_supporting_docs,
+                        **_gate_kwargs,
                     )
                 )
         else:
@@ -472,6 +597,9 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
                     acceptance_criteria=list(criteria) if criteria else [],
                     test_type=type,
                     risk_level=risk,
+                    domain_knowledge=_domain_knowledge,
+                    supporting_documents=_supporting_docs,
+                    **_gate_kwargs,
                 )
             )
 
@@ -535,7 +663,7 @@ def generate(ctx, story, story_file, url, criteria, project, type, risk, clean):
 @click.option(
     "--clean",
     is_flag=True,
-    help="Delete existing test_results/ scripts before generating",
+    help="Delete existing tests/ scripts before generating",
 )
 @click.pass_context
 def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
@@ -577,7 +705,8 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
 
     # Load from a single file or the whole directory
     if manual_file:
-        manual_tests = load_manual_tests_from_file(Path(manual_file))
+        manual_path = Path(manual_file)
+        manual_tests = load_manual_tests_from_file(manual_path)
         source_label = manual_file
     else:
         manual_path = Path(manual_dir)
@@ -606,7 +735,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         manual_tests = filtered
         print_info(f"Filtered to {len(manual_tests)} test case(s) matching '{test_case}'")
 
-    print_header(f"Automating {len(manual_tests)} manual test(s) from '{manual_path}'")
+    print_header(f"Automating {len(manual_tests)} manual test(s) from '{source_label}'")
     for t in manual_tests:
         src = Path(t.get("source_file", "")).name
         print_info(f"  {t['name']}  ({src})")
@@ -622,6 +751,12 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     # Use application URL from flag or config
     application_url = url or config.project.application_url
 
+    # Load project-specific domain knowledge
+    project_root = Path(config_path).parent if config_path else Path.cwd()
+    domain_knowledge = _load_domain_knowledge(project_root)
+    if domain_knowledge:
+        print_info("Domain knowledge loaded from domain_knowledge/")
+
     # Call intelligence server
     intel_client = IntelligenceClient(config)
     try:
@@ -630,6 +765,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         result = intel_client.automate_from_manual(
             manual_tests=manual_tests,
             application_url=application_url,
+            domain_knowledge=domain_knowledge,
         )
     except Exception as exc:
         print_error(f"Intelligence server error: {exc}")
@@ -645,13 +781,24 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             print_warning(f"{test.get('name', 'automation_test')}: {warning}")
 
     # Write scripts — individual files for legacy runner + consolidated via ModuleAwareWriter
+    from phoenix.exceptions import QualityGateFailedError
     auto_gen = AutomationTestGenerator(output_dir=config.project.test_output_dir)
-    written = auto_gen.generate(
-        automation_tests=automation_tests,
-        user_story="",
-        application_url=application_url,
-        acceptance_criteria=[],
-    )
+    try:
+        written = auto_gen.generate(
+            automation_tests=automation_tests,
+            user_story="",
+            application_url=application_url,
+            acceptance_criteria=[],
+        )
+    except QualityGateFailedError as exc:
+        print_error("Quality gate blocked script generation. Blocking issues:")
+        for err in exc.errors:
+            print_error(f"  • {err}")
+        print_info(
+            "Fix the manual test steps that trigger these issues, "
+            "then re-run 'phoenix automate'."
+        )
+        raise click.Abort() from exc
 
     # Extract and save locators
     locators_dir = Path(config.project.test_output_dir).parent / "locators"
@@ -860,8 +1007,21 @@ def execute(ctx, project, test_ids, browser):
     is_flag=True,
     help="Only re-run tests that failed in the previous run (requires --logs-dir)",
 )
+@click.option(
+    "--headed",
+    is_flag=True,
+    default=False,
+    help="Run tests in headed (visible) browser mode — useful for debugging",
+)
+@click.option(
+    "--slow-mo",
+    "slow_mo",
+    default=0,
+    type=int,
+    help="Slow down each Playwright action by N milliseconds (headed debug mode)",
+)
 @click.pass_context
-def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_dir, failed_only):
+def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_dir, failed_only, headed, slow_mo):
     """Run tests with self-healing retries and execution logging.
 
     Failures are classified by error type and healed automatically before
@@ -924,6 +1084,15 @@ def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_
         max_attempts=max_attempts if heal else 1,
         locator_registry=locator_registry,
     )
+
+    # Propagate headed/slow_mo to the subprocess environment
+    import os as _os
+    if headed:
+        _os.environ["PWHEADED"] = "1"
+        print_info("Running in headed mode (browser visible).")
+    if slow_mo:
+        _os.environ["PWSLOWMO"] = str(slow_mo)
+        print_info(f"Slow-mo: {slow_mo}ms per action.")
 
     print_header(
         f"Running {len(test_paths)} test(s) — "
@@ -1047,9 +1216,9 @@ def locators(ctx, locators_dir, page, output):
 @click.option(
     "--test-dir",
     "-t",
-    default="test_results",
+    default="tests",
     type=click.Path(),
-    help="Directory containing automation scripts (default: test_results/)",
+    help="Directory containing automation scripts (default: tests/)",
 )
 @click.option("--run-id", "-r", default=None, help="Fix failures from a specific run (default: most recent)")
 @click.option("--dry-run", is_flag=True, help="Show what would be fixed without writing files")
@@ -1363,3 +1532,277 @@ def report(ctx, run_id, logs_dir, reports_dir, open_browser, trend, last, enviro
     click.echo("")
     if len(runs) > 1:
         print_info(f"Showing run {rid}. Use --run-id to pick a different run.")
+
+
+# =============================================================================
+# Clean command
+# =============================================================================
+
+@click.command()
+@click.option("--dry-run", is_flag=True, help="Show what would be removed without deleting")
+@click.pass_context
+def clean(ctx, dry_run):
+    """Remove all generated artifacts from the current project directory.
+
+    Deletes generated test scripts, manual test cases, reports, locators,
+    and cache files produced by previous phoenix generate / automate runs.
+    """
+    import glob as _glob
+
+    prefix = "[dry-run] " if dry_run else ""
+
+    ARTIFACT_DIRS = [
+        "test_scripts",
+        "manual_test_cases",
+        "reports",
+        "locators",
+        ".phoenix_cache",
+        "generated",
+        "output",
+        "manual_tests",
+        "tests",
+        "test_data",
+        "logs",
+    ]
+
+    ARTIFACT_PATTERNS = [
+        "test_*.py",
+        "manual_test_*.md",
+        "*_locators.json",
+        "run_*.jsonl",
+        "_syntax_error_dump_*.py",
+    ]
+
+    removed_count = 0
+
+    for dir_name in ARTIFACT_DIRS:
+        dir_path = Path(dir_name)
+        if dir_path.exists() and dir_path.is_dir():
+            if dry_run:
+                print_info(f"{prefix}Would remove directory: {dir_path}")
+            else:
+                try:
+                    shutil.rmtree(dir_path)
+                    click.echo(f"Removed: {dir_path}/")
+                    removed_count += 1
+                except OSError as exc:
+                    print_warning(f"Could not remove {dir_path}: {exc}")
+
+    for pattern in ARTIFACT_PATTERNS:
+        for file in sorted(Path(".").glob(f"**/{pattern}")):
+            # Skip files inside venv / .git / __pycache__
+            parts = set(file.parts)
+            if parts & {".git", "venv", ".venv", "__pycache__", "node_modules"}:
+                continue
+            if dry_run:
+                print_info(f"{prefix}Would remove: {file}")
+            else:
+                try:
+                    file.unlink()
+                    click.echo(f"Removed: {file}")
+                    removed_count += 1
+                except OSError as exc:
+                    print_warning(f"Could not remove {file}: {exc}")
+
+    if dry_run:
+        print_info("[dry-run] No files were deleted.")
+    elif removed_count:
+        print_success(f"Clean complete — removed {removed_count} item(s).")
+    else:
+        print_info("Nothing to clean — project directory is already empty.")
+
+
+# =============================================================================
+# Jira integration helpers + command group
+# =============================================================================
+
+def _fetch_from_jira(
+    issue_key: str,
+    jira_config,
+    verbose: bool = False,
+) -> tuple:
+    """Fetch user story, acceptance criteria and attachment docs from a Jira issue.
+
+    Returns (story_text, acceptance_criteria_list, supporting_documents_list).
+    Raises SystemExit with a clear message if Jira is not configured or unreachable.
+    """
+    from phoenix.integrations.jira.client import JiraClient, JiraAuthError, JiraConnectionError, JiraNotFoundError
+
+    if not jira_config.is_configured:
+        missing = ", ".join(jira_config.missing_fields())
+        print_error(
+            f"Jira integration is not configured. Missing: {missing}\n"
+            "  1. Set JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN as environment variables.\n"
+            "  2. Uncomment and fill in the [jira] section in .phoenixrc.\n"
+            "  Run 'phoenix jira health' to verify the configuration."
+        )
+        sys.exit(1)
+
+    try:
+        jira_client = JiraClient(jira_config)
+        print_info(f"Fetching Jira issue: {issue_key}")
+        issue = jira_client.get_issue(issue_key)
+    except JiraAuthError as exc:
+        print_error(f"Jira authentication failed: {exc}")
+        sys.exit(1)
+    except JiraConnectionError as exc:
+        print_error(f"Cannot connect to Jira: {exc}")
+        sys.exit(1)
+    except JiraNotFoundError:
+        print_error(f"Jira issue '{issue_key}' not found. Check the key and your project permissions.")
+        sys.exit(1)
+
+    if verbose:
+        print_info(f"  Summary  : {issue.summary}")
+        print_info(f"  Type     : {issue.issue_type}  |  Priority: {issue.priority}")
+        print_info(f"  Status   : {issue.status}")
+        print_info(f"  Criteria : {len(issue.acceptance_criteria)} item(s)")
+        print_info(f"  Attachments: {len(issue.attachments)} file(s)")
+
+    story_text = issue.as_user_story()
+    acceptance_criteria = issue.acceptance_criteria
+
+    supporting_docs = []
+    if issue.attachments:
+        supporting_docs = issue.as_supporting_documents(jira_client)
+        if supporting_docs:
+            print_info(f"  {len(supporting_docs)} attachment(s) loaded as supporting documents")
+
+    return story_text, acceptance_criteria, supporting_docs
+
+
+# ---------------------------------------------------------------------------
+# phoenix jira <subcommand>
+# ---------------------------------------------------------------------------
+
+@click.group()
+def jira():
+    """Jira integration commands — check connectivity, preview issues."""
+
+
+@jira.command(name="health")
+@click.pass_context
+def jira_health(ctx):
+    """Check Jira connectivity and verify credentials.
+
+    Reads configuration from the [jira] section in .phoenixrc and the
+    JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN environment variables.
+    """
+    from phoenix.integrations.jira.client import JiraClient, JiraAuthError, JiraConnectionError
+
+    config_path = ctx.obj.get("config_path") if ctx.obj else None
+    phoenix_config = PhoenixConfig.load(config_path)
+    jira_config = phoenix_config.jira
+
+    print_header("Jira Integration Health Check")
+
+    # Show current config (mask token)
+    token = jira_config.api_token
+    token_display = f"{token[:6]}...{token[-4:]}" if token and len(token) > 10 else ("set" if token else "NOT SET")
+
+    click.echo(f"  URL        : {jira_config.resolved_url or 'NOT SET'}")
+    click.echo(f"  Email      : {jira_config.resolved_email or 'NOT SET'}")
+    click.echo(f"  API Token  : {token_display}")
+    click.echo(f"  Project Key: {jira_config.project_key or '(not set — any project key will work)'}")
+    click.echo(f"  Board ID   : {jira_config.board_id or '(not set)'}")
+    click.echo(f"  AC Field   : {jira_config.acceptance_criteria_field}")
+    click.echo(f"  Attachments: {'enabled' if jira_config.download_attachments else 'disabled'}")
+    click.echo("")
+
+    if not jira_config.is_configured:
+        missing = "\n    ".join(jira_config.missing_fields())
+        print_error(f"Configuration incomplete. Missing:\n    {missing}")
+        click.echo("")
+        click.echo("  How to fix:")
+        click.echo("    1. export JIRA_URL=https://yourcompany.atlassian.net")
+        click.echo("    2. export JIRA_EMAIL=your.email@company.com")
+        click.echo("    3. export JIRA_API_TOKEN=<token from id.atlassian.com>")
+        click.echo("    4. Uncomment [jira] url in .phoenixrc")
+        sys.exit(1)
+
+    try:
+        jira_client = JiraClient(jira_config)
+        info = jira_client.health_check()
+    except JiraAuthError as exc:
+        print_error(f"Authentication failed: {exc}")
+        sys.exit(1)
+    except JiraConnectionError as exc:
+        print_error(f"Connection failed: {exc}")
+        sys.exit(1)
+
+    print_success("Connected to Jira successfully")
+    click.echo(f"  Account    : {info['account']} ({info['email']})")
+    click.echo(f"  Server     : {info['server_title']}")
+    click.echo(f"  Version    : {info['version']}")
+    click.echo(f"  Deployment : {info['deployment_type']}")
+    click.echo(f"  API Version: v{info['api_version']}")
+    click.echo("")
+    click.echo("Usage:")
+    click.echo("  phoenix generate --jira PROJ-123 --url https://your-app.com")
+
+
+@jira.command(name="show")
+@click.argument("issue_key")
+@click.pass_context
+def jira_show(ctx, issue_key: str):
+    """Preview what Phoenix would extract from a Jira issue.
+
+    Shows summary, acceptance criteria and attachments without generating tests.
+    """
+    from phoenix.integrations.jira.client import JiraClient, JiraAuthError, JiraConnectionError, JiraNotFoundError
+
+    config_path = ctx.obj.get("config_path") if ctx.obj else None
+    phoenix_config = PhoenixConfig.load(config_path)
+    jira_config = phoenix_config.jira
+
+    if not jira_config.is_configured:
+        print_error("Jira not configured. Run 'phoenix jira health' for setup instructions.")
+        sys.exit(1)
+
+    try:
+        jira_client = JiraClient(jira_config)
+        issue = jira_client.get_issue(issue_key)
+    except JiraAuthError as exc:
+        print_error(f"Authentication failed: {exc}")
+        sys.exit(1)
+    except JiraConnectionError as exc:
+        print_error(f"Connection failed: {exc}")
+        sys.exit(1)
+    except JiraNotFoundError:
+        print_error(f"Issue '{issue_key}' not found.")
+        sys.exit(1)
+
+    print_header(f"Jira Issue: {issue.key}")
+    click.echo(f"  Summary  : {issue.summary}")
+    click.echo(f"  Type     : {issue.issue_type}")
+    click.echo(f"  Priority : {issue.priority}")
+    click.echo(f"  Status   : {issue.status}")
+    click.echo(f"  Labels   : {', '.join(issue.labels) or '(none)'}")
+    click.echo("")
+
+    if issue.description:
+        click.echo("Description:")
+        for line in issue.description.splitlines()[:15]:
+            click.echo(f"  {line}")
+        if len(issue.description.splitlines()) > 15:
+            click.echo(f"  ... ({len(issue.description.splitlines()) - 15} more lines)")
+        click.echo("")
+
+    if issue.acceptance_criteria:
+        click.echo("Acceptance Criteria (will become test criteria):")
+        for i, ac in enumerate(issue.acceptance_criteria, 1):
+            click.echo(f"  {i}. {ac}")
+        click.echo("")
+    else:
+        print_warning("No acceptance criteria found. Add an 'Acceptance Criteria' section to the description.")
+
+    if issue.attachments:
+        click.echo("Attachments:")
+        for att in issue.attachments:
+            size_kb = att.get("size", 0) // 1024
+            click.echo(f"  - {att['filename']}  ({size_kb} KB)")
+    else:
+        click.echo("No attachments.")
+
+    click.echo("")
+    click.echo(f"To generate tests: phoenix generate --jira {issue_key} --url https://your-app.com")

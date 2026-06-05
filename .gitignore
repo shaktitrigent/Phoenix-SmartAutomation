@@ -52,6 +52,9 @@ manual_tests/
 test_results/
 test_data/
 tests/
+# Re-include the framework's own unit test suite — these are source code, not generated output
+!phoenix-core/tests/
+!phoenix-core/tests/**
 reports/
 locators/
 user_stories/

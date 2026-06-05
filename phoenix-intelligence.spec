@@ -1,12 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'fastapi', 'pydantic', 'anthropic', 'yaml']
+hiddenimports = ['services', 'services.agents', 'services.agents.base', 'services.agents.failure_analyzer', 'services.agents.locator_expert', 'services.agents.registry', 'services.agents.script_fixer', 'services.agents.test_generator', 'services.cache', 'services.config', 'services.llm', 'services.llm.client', 'services.llm.prompt_loader', 'services.llm.router', 'services.logger', 'services.locator', 'services.mcp', 'services.mcp.client', 'services.mcp.handlers', 'services.mcp.server', 'services.knowledge', 'services.knowledge.base', 'phoenix.reporting', 'phoenix.reporting.aggregator', 'phoenix.reporting.data_loader', 'phoenix.reporting.generator', 'phoenix.reporting.html_reporter', 'phoenix.reporting.render', 'uvicorn.logging', 'uvicorn.loops', 'uvicorn.loops.auto', 'uvicorn.protocols', 'uvicorn.protocols.http', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.websockets', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan', 'uvicorn.lifespan.on', 'fastapi', 'pydantic', 'anthropic', 'yaml']
 hiddenimports += collect_submodules('api')
-hiddenimports += collect_submodules('services')
 hiddenimports += collect_submodules('phoenix_shared')
 hiddenimports += collect_submodules('phoenix')
-hiddenimports += collect_submodules('phoenix.reporting')
 
 
 a = Analysis(

@@ -1,20 +1,22 @@
 # Phoenix SmartAutomation
 
-AI-powered test automation. Write a user story → Phoenix generates manual test cases → you review them → Phoenix generates runnable Playwright scripts, executes them with self-healing retries, and auto-fixes failures.
+AI-powered test automation. Provide a user story (or a Jira ticket) with supporting documents → Phoenix generates manual test cases → you review them → Phoenix generates runnable Playwright scripts, executes them with self-healing retries, and auto-fixes failures.
 
 ---
 
 ## How it works
 
 ```
-user_stories/login.txt
+User story file  ──OR──  Jira ticket (PROJ-123)
+  + supporting docs          + attachments (PDF, DOCX, XLSX, …)
+  + domain_knowledge/
         │
         ▼  phoenix generate
-  phoenix-intelligence  ←── Claude LLM
+  phoenix-intelligence  ←── LLM
         │
         ▼
   manual_tests/login.md       ← review and edit this
-  test_data/login.json        ← generated realistic test data
+  test_data/login.json        ← realistic test data (fields extracted from steps)
         │
         ▼  phoenix automate
   tests/login/test_login.py   ← Playwright pytest scripts
@@ -22,6 +24,7 @@ user_stories/login.txt
         │
         ▼  phoenix run / make smoke
   reports/                    ← HTML report
+  reports/screenshots/        ← failure screenshots (auto-captured)
   logs/                       ← JSONL execution log
 ```
 
@@ -54,6 +57,12 @@ pip install -e phoenix-core/
 pip install -e phoenix-intelligence/
 
 playwright install chromium
+```
+
+Optional dependency for PDF / DOCX / XLSX supporting document extraction:
+
+```powershell
+pip install pypdf python-docx openpyxl
 ```
 
 ---
@@ -106,9 +115,15 @@ my-project/
 ├── .env                    ← env vars template (fill in and use .env.local)
 ├── pyproject.toml          ← pytest markers (smoke, regression, sanity)
 ├── Makefile                ← make smoke / make regression / make report
-├── conftest.py             ← Playwright fixtures + module-aware test data
+├── conftest.py             ← Playwright fixtures, screenshot-on-failure hook
 ├── user_stories/
-│   └── login.txt           ← starter user story (edit this)
+│   ├── login.txt           ← starter user story (edit this)
+│   └── SUPPORTING_DOCS.md  ← explains the supporting-docs convention
+├── domain_knowledge/       ← project-wide UI patterns, URLs, test credentials
+│   ├── README.md
+│   ├── navigation.md
+│   ├── ui_patterns.md
+│   └── data_rules.md
 ├── fixtures/
 │   ├── auth.py             ← login fixture using env vars
 │   └── browser.py          ← mobile context fixture
@@ -120,20 +135,39 @@ my-project/
 ├── locators/               ← stable locator bundles (JSON)
 ├── manual_tests/           ← human-readable test specs (Markdown)
 ├── reports/
+│   └── screenshots/        ← failure screenshots (auto-captured)
 └── logs/
 ```
 
 ### 5. Generate manual tests
 
+**From a user story file:**
+
 ```powershell
 phoenix generate --story-file user_stories/login.txt --url "https://your-app.com"
 ```
 
-Produces:
-- `manual_tests/login.md` — consolidated Markdown spec with all test cases for the module
-- `test_data/login.json` — realistic test data (3 scenarios + edge cases per field)
+**From a Jira ticket** (fetches story, criteria and attachments automatically):
 
-**Open `manual_tests/login.md` and review it.** Add missing steps, fix expected results, adjust test data. This is the only manual step.
+```powershell
+phoenix generate --jira PROJ-123 --url "https://your-app.com"
+```
+
+**With explicit supporting documents** (wireframe PDF, specs spreadsheet, etc.):
+
+```powershell
+phoenix generate --story-file user_stories/checkout.txt \
+                 --docs user_stories/checkout/ \
+                 --url "https://your-app.com"
+```
+
+Supporting docs are also **auto-discovered**: if `user_stories/checkout.txt` exists, Phoenix automatically reads `user_stories/checkout/` (same name, no extension) for any PDFs, DOCX, XLSX, CSV, JSON files.
+
+Produces:
+- `manual_tests/login.md` — consolidated Markdown spec with all test cases
+- `test_data/login.json` — realistic test data derived from the actual test steps
+
+**Open `manual_tests/login.md` and review it.** Add missing steps, fix expected results. This is the only manual step.
 
 ### 6. Generate automation scripts
 
@@ -194,7 +228,7 @@ phoenix logs --run-id <id>          # per-attempt detail
 phoenix locators                    # inspect locator bundles
 ```
 
-HTML reports are written to `reports/report_<run_id>.html` automatically after every `phoenix run`. Each report is self-contained — open directly in a browser, no server required.
+HTML reports are written to `reports/report_<run_id>.html` automatically after every `phoenix run`. Failure screenshots land in `reports/screenshots/`. Each report is self-contained — open directly in a browser, no server required.
 
 ---
 
@@ -205,13 +239,133 @@ HTML reports are written to `reports/report_<run_id>.html` automatically after e
 | `phoenix doctor` | Check API key, server, Playwright, plugins |
 | `phoenix init` | Scaffold a new project |
 | `phoenix migrate` | Add missing dirs/files to an existing project |
-| `phoenix generate` | Generate manual tests + test data from a user story |
+| `phoenix generate` | Generate manual tests + test data from a user story, Jira ticket, or supporting docs |
 | `phoenix automate` | Generate Playwright scripts from reviewed manual tests |
 | `phoenix run` | Run tests with self-healing retries |
 | `phoenix fix` | Auto-fix failing scripts using error output |
+| `phoenix clean` | Delete all generated artifacts (scripts, reports, locators, logs) |
 | `phoenix logs` | View execution log history |
 | `phoenix locators` | Inspect LocatorBundle JSON files |
-| `phoenix report` | Generate HTML report for the latest (or any) run; `--open` opens it in the browser |
+| `phoenix report` | Generate HTML report; `--open` opens it in the browser |
+| `phoenix jira health` | Check Jira connectivity and credentials |
+| `phoenix jira show PROJ-123` | Preview what Phoenix would extract from a Jira issue |
+
+### Key `generate` options
+
+```powershell
+phoenix generate --story-file <path>      # story from a file
+phoenix generate --story "As a user..."   # story inline
+phoenix generate --jira PROJ-123          # story + attachments from Jira
+phoenix generate --docs <path>            # explicit supporting docs file or folder
+phoenix generate --type both              # manual + automation in one step
+phoenix generate --url <url>              # application URL
+phoenix generate --no-gate                # save all tests regardless of quality (iterating)
+phoenix generate --strict-gate            # enforce CI-grade thresholds (≥ 2 steps, ≥ 10-char desc)
+```
+
+### Key `automate` options
+
+```powershell
+phoenix automate --url <url>              # application URL
+phoenix automate --file <path>            # automate a single manual test file
+phoenix automate --test-case "name"       # automate one test case by name substring
+phoenix automate --clean                  # delete existing scripts before generating
+```
+
+Accepted filename patterns in `manual_tests/`: `manual_test_*.md`, `test_*.md`, `*_manual.md`, `TC-*.md`, `*_test.md`.
+Steps can be a Phoenix pipe table **or** a plain numbered/bulleted list.
+
+### Key `run` options
+
+```powershell
+phoenix run --browser firefox             # chromium (default) | firefox | webkit
+phoenix run --failed-only                 # re-run only last failures
+phoenix run --headed                      # open a visible browser window (debug)
+phoenix run --headed --slow-mo 800        # slow down each action by 800ms
+phoenix run --max-attempts 5              # increase healing retries
+```
+
+### `phoenix clean`
+
+```powershell
+phoenix clean                             # delete all generated artifacts
+phoenix clean --dry-run                   # preview what would be deleted
+```
+
+---
+
+## Domain knowledge
+
+`domain_knowledge/` holds project-wide context about how the application works. It is injected into every test generation call so the LLM can make better locator and interaction decisions.
+
+| File | What to put here |
+|---|---|
+| `navigation.md` | Login URL, key page paths, auth flow |
+| `ui_patterns.md` | Custom dropdowns, date pickers, modals — non-standard interactions |
+| `data_rules.md` | Field formats, required/optional fields, test credentials |
+
+This is **different from supporting documents** — domain knowledge covers the whole project; supporting docs are specific to one user story.
+
+---
+
+## Supporting documents
+
+Attach wireframes, specifications, schemas, and requirement docs to a specific user story. Phoenix extracts text from them and includes it in the LLM prompt.
+
+**Auto-discovery convention:**
+
+```
+user_stories/
+  checkout.txt          ← the user story
+  checkout/             ← supporting docs for this story
+    wireframe.pdf
+    field_rules.xlsx
+    api_schema.json
+```
+
+**Supported formats:** `.txt` `.md` `.csv` `.json` `.xml` `.yaml` `.html` · `.pdf` (needs `pypdf`) · `.docx` (needs `python-docx`) · `.xlsx` `.xls` (needs `openpyxl`)
+
+---
+
+## Jira integration
+
+One-time setup — configure once, then use `--jira PROJ-123` in any `generate` command.
+
+### Setup
+
+```powershell
+# 1. Set secrets as environment variables (never in config files)
+$env:JIRA_URL        = "https://yourcompany.atlassian.net"
+$env:JIRA_EMAIL      = "you@company.com"
+$env:JIRA_API_TOKEN  = "your-api-token"    # from id.atlassian.com
+
+# 2. Uncomment [jira] section in .phoenixrc and set non-sensitive values
+```
+
+`.phoenixrc` Jira section:
+
+```toml
+[jira]
+url                       = "https://yourcompany.atlassian.net"
+project_key               = "PROJ"
+acceptance_criteria_field = "description"   # or "customfield_XXXXX"
+download_attachments      = true
+```
+
+### Verify
+
+```powershell
+phoenix jira health          # connectivity + credentials check
+phoenix jira show PROJ-123   # preview without generating
+```
+
+### Use
+
+```powershell
+phoenix generate --jira PROJ-123 --url "https://your-app.com"
+```
+
+Phoenix fetches the issue summary, description, acceptance criteria, and attachments. Attachments are passed through the same supporting-documents pipeline. The token is **never** stored in `.phoenixrc`.
 
 ---
 
@@ -230,6 +384,13 @@ retry_count = 3
 
 [logging]
 level = "INFO"                        # DEBUG | INFO | WARNING
+
+# Jira integration (optional — remove # to enable)
+# [jira]
+# url                       = "https://yourcompany.atlassian.net"
+# project_key               = "PROJ"
+# acceptance_criteria_field = "description"
+# download_attachments      = true
 ```
 
 ---
@@ -265,7 +426,7 @@ Interactive docs at `http://localhost:8001/docs`.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Server and LLM status |
-| `POST` | `/api/v1/tests/generate` | Generate manual test cases from a user story |
+| `POST` | `/api/v1/tests/generate` | Generate manual + automation tests from a user story (supports `supporting_documents`, `domain_knowledge`) |
 | `POST` | `/api/v1/tests/automate` | Generate Playwright scripts from manual tests |
 | `POST` | `/api/v1/tests/fix` | Fix a failing script using its error output |
 | `POST` | `/api/v1/locators/discover` | Discover stable locators for page elements |
@@ -280,24 +441,32 @@ Phoenix-SmartAutomation/
 ├── shared/                     # Pydantic models shared by both packages
 ├── phoenix-core/               # pip-installable CLI + SDK
 │   └── phoenix/
-│       ├── cli/                # All CLI commands
-│       ├── sdk/                # PhoenixClient, config
+│       ├── cli/                # All CLI commands (including `jira` group)
+│       ├── sdk/                # PhoenixClient, IntelligenceClient, PhoenixConfig
 │       ├── generators/
 │       │   ├── writer.py       # ModuleAwareWriter (one file per module)
-│       │   ├── automation.py   # Normalises generated scripts
-│       │   └── manual.py       # Manual test quality gate + writer
+│       │   ├── automation.py   # Normalises + validates generated scripts (CleanCodeGate)
+│       │   ├── clean_code.py   # Gate rules: WARNING, UNGROUNDABLE, business-text URL regex
+│       │   └── manual.py       # ManualTestQualityGate + writer
 │       ├── test_data/
-│       │   ├── engine.py       # TestDataEngine
+│       │   ├── engine.py       # TestDataEngine — step-based field extraction (generic)
 │       │   ├── field_detector.py
 │       │   └── generators.py   # stdlib-only data generators
-│       ├── execution/          # HealingEngine (self-healing retries + screenshot capture), runner, logger
+│       ├── documents/
+│       │   └── loader.py       # DocumentLoader — extracts text from PDF, DOCX, XLSX, CSV, JSON, …
+│       ├── integrations/
+│       │   └── jira/
+│       │       ├── config.py   # JiraConfig (non-sensitive in .phoenixrc, secrets via env)
+│       │       ├── client.py   # JiraClient — REST API, Cloud + Server/DC auto-detect
+│       │       └── adf.py      # Atlassian Document Format → plain text converter
+│       ├── execution/          # HealingEngine, TestRunner, ExecutionLogger
 │       ├── locators/           # LocatorRegistry
 │       ├── reporting/          # DataLoader, RunAggregator, TrendAggregator, render_run_report()
 │       ├── scaffold.py         # phoenix init scaffold logic
 │       └── templates/project/  # Jinja2 templates for new projects
 │
 └── phoenix-intelligence/       # AI server (FastAPI, port 8001)
-    ├── api/                    # REST endpoints
+    ├── api/                    # REST endpoints + Pydantic models (SupportingDocument added)
     ├── services/agents/        # TestGenerator, ScriptFixer, LocatorExpert, FailureAnalyzer
     ├── services/llm/           # LLM router (Anthropic / OpenAI / Gemini / Ollama)
     ├── services/knowledge/     # Playwright rules, patterns, domain knowledge
@@ -308,12 +477,11 @@ Phoenix-SmartAutomation/
 
 ## Build & Package
 
-> **When to use this:** Package `phoenix-intelligence` into a standalone executable when you want to distribute the intelligence server to end users **without sharing source code**. The resulting `.exe` bundles all three packages (`shared`, `phoenix-core`, `phoenix-intelligence`) and all dependencies — no Python installation required on the target machine.
+> **When to use this:** Package `phoenix-intelligence` into a standalone executable when you want to distribute the intelligence server to end users **without sharing source code**. The resulting `.exe` bundles all three packages and all dependencies — no Python installation required on the target machine.
 
 ### Prerequisites
 
 ```powershell
-# Python ≥ 3.11 and pip must be available
 python --version
 pip --version
 ```
@@ -335,40 +503,30 @@ Or use the build script shortcut:
 
 ### Step 2 — Build all three artifacts
 
-Install the build tool once:
-
 ```powershell
 pip install build
-```
-
-**Single command — clean + build all three artifacts into `dist\`:**
-
-```powershell
 .\build.ps1 dist
 ```
 
 This cleans old artifacts, builds both wheels and the exe, then prints a summary of everything in `dist\`.
 
-If you need to build individual artifacts:
-
 | Artifact | Clean | Build |
 |---|---|---|
 | All three | `.\build.ps1 clean` | `.\build.ps1 dist` |
 | `phoenix-intelligence.exe` only | `.\build.ps1 clean` | `.\build.ps1 package` |
-| Wheels only (`shared` + `phoenix-core`) | `.\build.ps1 clean` | `python -m build shared\ --outdir dist\` then `python -m build phoenix-core\ --outdir dist\` |
+| Wheels only | `.\build.ps1 clean` | `python -m build shared\ --outdir dist\` then `python -m build phoenix-core\ --outdir dist\` |
 
-### Output location
+### Output
 
 ```
-Phoenix-SmartAutomation\
-└── dist\
-    ├── phoenix_shared-0.1.0-py3-none-any.whl    ← distribute to end user (install first)
-    ├── phoenix_core-0.1.0-py3-none-any.whl      ← distribute to end user (install second)
-    └── phoenix-intelligence.exe                  ← distribute to end user (run the server)
+dist\
+├── phoenix_shared-0.1.1-py3-none-any.whl    ← install first
+├── phoenix_core-0.1.1-py3-none-any.whl      ← install second
+└── phoenix-intelligence.exe                  ← run the server
 ```
 
-> If you bump version numbers in `shared/pyproject.toml` or `phoenix-core/pyproject.toml`, the wheel filenames will reflect the new version. Update the install commands in `END_USER_GUIDE.md` to match.
+> If you bump version numbers in `pyproject.toml` files, update the install commands in `END_USER_GUIDE.md` to match.
 
 ### Step 3 — Distribute to end users
 
-Hand the three files in `dist\` to end users and point them to `docs/END_USER_GUIDE.md` for setup instructions.
+Hand the three files in `dist\` to end users and point them to `docs/END_USER_GUIDE.md`.

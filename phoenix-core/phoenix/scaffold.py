@@ -55,12 +55,14 @@ _PROJECT_DIRS = [
     "manual_tests",
     "test_data",
     "reports",
+    "reports/screenshots",
     "locators",
     "logs",
     "tests/login",
     "config/environments",
     "user_stories",
     "fixtures",
+    "domain_knowledge",
 ]
 
 
@@ -214,6 +216,11 @@ def scaffold_project(
         "config_env_staging.yaml.j2": target_dir / "config" / "environments" / "staging.yaml",
         "config_env_prod.yaml.j2": target_dir / "config" / "environments" / "prod.yaml",
         "user_story_login.txt.j2": target_dir / "user_stories" / "login.txt",
+        "supporting_docs_readme.md.j2": target_dir / "user_stories" / "SUPPORTING_DOCS.md",
+        "domain_knowledge_readme.md.j2": target_dir / "domain_knowledge" / "README.md",
+        "domain_knowledge_ui_patterns.md.j2": target_dir / "domain_knowledge" / "ui_patterns.md",
+        "domain_knowledge_navigation.md.j2": target_dir / "domain_knowledge" / "navigation.md",
+        "domain_knowledge_data_rules.md.j2": target_dir / "domain_knowledge" / "data_rules.md",
     }
 
     for template_name, dest in template_map.items():

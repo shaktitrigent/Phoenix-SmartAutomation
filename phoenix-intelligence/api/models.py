@@ -12,6 +12,14 @@ class TestGenerationOptions(BaseModel):
     output_style: Optional[str] = Field(default=None, description="markdown or gherkin")
 
 
+class SupportingDocument(BaseModel):
+    """A supporting document attached to a user story."""
+
+    filename: str = Field(description="Original file name (e.g. wireframe.pdf)")
+    format: str = Field(description="File extension without dot (e.g. pdf, docx, json)")
+    content: str = Field(description="Extracted text content, truncated to ~8 000 chars")
+
+
 class TestGenerationRequest(BaseModel):
     """Request payload for test generation."""
 
@@ -19,6 +27,14 @@ class TestGenerationRequest(BaseModel):
     application_url: Optional[str] = None
     acceptance_criteria: List[str] = []
     options: Optional[TestGenerationOptions] = None
+    domain_knowledge: Optional[str] = Field(
+        default=None,
+        description="Project-specific context from domain_knowledge/ directory",
+    )
+    supporting_documents: List[SupportingDocument] = Field(
+        default=[],
+        description="Supporting artefacts for the user story (wireframes, specs, schemas, etc.)",
+    )
 
 
 class ManualTestStep(BaseModel):
@@ -128,6 +144,10 @@ class AutomateRequest(BaseModel):
         description="Structured manual test dicts parsed from manual_tests/ directory"
     )
     application_url: Optional[str] = Field(default=None, description="Application URL under test")
+    domain_knowledge: Optional[str] = Field(
+        default=None,
+        description="Project-specific context from domain_knowledge/ directory",
+    )
 
 
 class AutomateResponse(BaseModel):

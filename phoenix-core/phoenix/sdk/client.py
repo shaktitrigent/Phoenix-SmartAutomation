@@ -68,6 +68,10 @@ class PhoenixClient:
         application_url: Optional[str] = None,
         acceptance_criteria: Optional[List[str]] = None,
         project: Optional[str] = None,
+        domain_knowledge: str = "",
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
+        gate: bool = True,
+        strict_gate: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -109,6 +113,8 @@ class PhoenixClient:
             acceptance_criteria=acceptance_criteria,
             test_type=test_type,
             risk_level=risk_level,
+            domain_knowledge=domain_knowledge,
+            supporting_documents=supporting_documents or [],
         )
 
         manual_tests_payload = intelligence_result.get("manual_tests", [])
@@ -118,28 +124,36 @@ class PhoenixClient:
         # Manual-First Pipeline: generate + validate manual tests first.
         # Automation is only attempted when manual tests pass the gate.
         # ------------------------------------------------------------------
+        # Use a per-call generator when gate settings differ from the default instance
+        manual_gen = (
+            self._manual_generator
+            if gate and not strict_gate
+            else ManualTestGenerator(
+                output_dir=self.config.project.manual_output_dir,
+                gate=gate,
+                strict=strict_gate,
+            )
+        )
+
         manual_tests = []
         gate_passed = True  # True when manual gate passes (or not applicable)
+        gate_warnings: List[str] = []
 
         if test_type in ["manual", "both"]:
-            # Validate before writing — surface failures to caller
-            passing, failures = self._manual_generator.validate(manual_tests_payload)
+            # Validate before writing — collect failures so they surface in the CLI
+            passing, failures = manual_gen.validate(manual_tests_payload)
             if failures:
                 import logging as _logging
-
                 _log = _logging.getLogger(__name__)
                 for name, violations in failures:
-                    _log.warning(
-                        "Manual test '%s' failed quality gate: %s",
-                        name,
-                        "; ".join(violations),
-                    )
-                # In "both" mode: proceed with passing tests only
-                # In "manual" mode: still proceed so caller sees partial results
+                    msg = f"Manual test '{name}' failed quality gate: {'; '.join(violations)}"
+                    _log.warning(msg)
+                    gate_warnings.append(msg)
+                # Proceed with passing tests only; gate_passed=False only when ALL failed
                 manual_tests_payload = passing
-                gate_passed = bool(passing)  # False only if *all* tests failed
+                gate_passed = bool(passing)
 
-            manual_test_data = self._manual_generator.generate(
+            manual_test_data = manual_gen.generate(
                 manual_tests=manual_tests_payload,
                 user_story=user_story,
                 application_url=application_url,
@@ -221,17 +235,28 @@ class PhoenixClient:
             if locators_saved:
                 registry.save_all(locators_dir)
 
+        # Merge quality-gate warnings with any warnings from the intelligence server
+        existing_meta = intelligence_result.get("metadata", {})
+        combined_warnings = list(existing_meta.get("warnings", [])) + gate_warnings
+
         return {
             "manual_tests": manual_tests,
             "automation_tests": automation_tests,
             "project": project_name,
             "metadata": {
-                **intelligence_result.get("metadata", {}),
+                **existing_meta,
                 "user_story": user_story,
                 "acceptance_criteria": acceptance_criteria,
                 "test_type": test_type,
                 "risk_level": risk_level,
                 "locators_saved": locators_saved,
+                "warnings": combined_warnings,
+                "gate_failures": [
+                    {"name": n, "violations": v} for n, v in (
+                        manual_gen._last_gate_failures
+                        if hasattr(manual_gen, "_last_gate_failures") else []
+                    )
+                ],
             },
         }
 

@@ -113,9 +113,12 @@ class ControlType(Enum):
     MULTI_TAB = "multi_tab"
     DYNAMIC_CONTENT = "dynamic_content"
     FORM_SUBMIT = "form_submit"
-    LOGIN = "login"        # navigate + fill credentials + click login button
+    LOGIN = "login"                 # navigate + fill credentials + click login button
+    LOGIN_CREDENTIALS = "login_credentials"  # "login using valid Admin credentials" (no URL)
     NAVIGATE = "navigate"
-    MENU_CLICK = "menu_click"  # click a top-level nav menu item
+    MENU_CLICK = "menu_click"       # click a top-level nav menu item
+    DATE_PICKER_FUTURE = "date_picker_future"  # "select a future date" / date picker
+    DATE_PICKER_PAST = "date_picker_past"      # "select a past date" / date picker
     ASSERTION = "assertion"
     WAIT = "wait"
     UNKNOWN = "unknown"
@@ -154,6 +157,32 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
         and any(k in lower for k in ["username", "password"])
     ):
         return ControlType.LOGIN
+
+    # LOGIN_CREDENTIALS: "Login using valid Admin credentials" — no URL or username/password literal
+    if re.search(
+        r"(log\s*in|login|sign\s*in)\s+using\s+(valid\s+)?\w+\s+(admin\s+|user\s+)?credentials",
+        lower,
+    ) or re.search(
+        r"(log\s*in|login|sign\s*in)\s+(as|with)\s+(admin|valid|user)",
+        lower,
+    ):
+        return ControlType.LOGIN_CREDENTIALS
+
+    # DATE_PICKER_FUTURE: "select a future From Date" / "choose a future date"
+    if re.search(r"(select|choose|pick)\s+(a\s+)?future\s+.*date", lower) or re.search(
+        r"(select|choose|pick)\s+.*date.*\s+(in\s+the\s+)?future", lower
+    ):
+        return ControlType.DATE_PICKER_FUTURE
+
+    # DATE_PICKER_PAST: "select past leave date" / "select a past date"
+    if re.search(r"(select|choose|pick)\s+(a\s+)?past\s+.*date", lower) or re.search(
+        r"(select|choose|pick)\s+.*past.*date", lower
+    ):
+        return ControlType.DATE_PICKER_PAST
+
+    # Generic date picker: "select from date" / "select to date" / "select leave date"
+    if re.search(r"(select|choose|pick)\s+(from|to|leave|start|end)\s+date", lower):
+        return ControlType.DATE_PICKER_FUTURE
 
     # URL-based hints
     if ("/checkboxes" in url_lower or "checkbox" in url_lower) and any(
@@ -534,6 +563,47 @@ def _criterion_to_playwright_lines(
                     f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=True), "{_safe_py_str(subject)} assertion target")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)'
                 )
 
+    elif control == ControlType.LOGIN_CREDENTIALS:
+        # "Login using valid Admin credentials" — use env vars; no URL extraction needed
+        lines += [
+            '    fill_ready(page, page.locator("input[name=\'username\']"), os.environ.get("TEST_USERNAME", "Admin"), "Username input")',
+            '    fill_ready(page, page.locator("input[name=\'password\']"), os.environ.get("TEST_PASSWORD", "admin123"), "Password input")',
+            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
+            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
+        ]
+
+    elif control == ControlType.DATE_PICKER_FUTURE:
+        # "Select a future From Date" / "Select From Date"
+        field_match = re.search(
+            r"(from|to|start|end|leave)\s+date",
+            lower,
+        )
+        field_label = field_match.group(0).title() if field_match else "Date"
+        lines += [
+            f'    # Date picker — select a future date for "{field_label}"',
+            f'    page.locator("input.oxd-date-input-field, input[placeholder*=\'Date\'], [class*=\'date\'] input").first.click()',
+            '    dismiss_known_overlays(page)',
+            '    # Click the next-month arrow until a future date is reachable, then click a date cell',
+            '    future_date_cell = page.locator("[class*=\'calender-cell\'], [class*=\'day\']:not([class*=\'disabled\']):not([class*=\'prev\']):not([class*=\'next\'])").nth(14)',
+            '    future_date_cell.click(timeout=ACTION_TIMEOUT_MS)',
+        ]
+
+    elif control == ControlType.DATE_PICKER_PAST:
+        # "Select past leave date" / "Select a past date"
+        field_match = re.search(
+            r"(from|to|start|end|leave|past)\s+.*date|date.*past",
+            lower,
+        )
+        field_label = field_match.group(0).title() if field_match else "Date"
+        lines += [
+            f'    # Date picker — select a past date for "{field_label}"',
+            f'    page.locator("input.oxd-date-input-field, input[placeholder*=\'Date\'], [class*=\'date\'] input").first.click()',
+            '    dismiss_known_overlays(page)',
+            '    # Click a past date cell (use a date 7 days ago)',
+            '    past_date_cell = page.locator("[class*=\'calender-cell\'], [class*=\'day\']:not([class*=\'disabled\']):not([class*=\'prev\']):not([class*=\'next\'])").nth(1)',
+            '    past_date_cell.click(timeout=ACTION_TIMEOUT_MS)',
+        ]
+
     elif control == ControlType.WAIT:
         lines += [
             '    dismiss_known_overlays(page)',
@@ -667,13 +737,31 @@ def _load_quality_standards() -> str:
         return ""
 
 
+def _format_supporting_documents(docs: List[Dict[str, Any]]) -> str:
+    """Format a list of supporting document dicts into a prompt section string.
+
+    Each document is labelled with its filename so the LLM knows which artefact
+    it is reading (wireframe vs schema vs requirements doc, etc.).
+    """
+    if not docs:
+        return ""
+    lines = ["## Supporting Documents (use these to inform test cases and locators)"]
+    for doc in docs:
+        filename = doc.get("filename", "document")
+        content = doc.get("content", "").strip()
+        if content:
+            lines += ["", f"### {filename}", content]
+    return "\n".join(lines)
+
+
 # Maximum manual tests generated per user story (enforced in code, not just in the prompt)
 _MAX_MANUAL_TESTS = 5
 
 # Placeholder / comment patterns that indicate unimplemented automation code
 _PLACEHOLDER_LINE_RE = re.compile(
     r"^\s*#\s*(WARNING|TODO|FIXME|NOTE|Criterion not mapped|add Playwright action here"
-    r"|placeholder|replace this|implement|step completes|needs manual review)",
+    r"|placeholder|replace this|implement|step completes|needs manual review"
+    r"|Manual locator review required|No stable|Assertion text is not DOM)",
     re.IGNORECASE,
 )
 
@@ -864,7 +952,7 @@ def _strip_automation_placeholders(code: str) -> str:
     """Remove placeholder / unimplemented comment lines from a Playwright script.
 
     Removes:
-      - # WARNING: ...
+      - # WARNING: ...  (generator warnings must never appear in committed code)
       - # TODO: ...
       - # FIXME: ...
       - # Criterion not mapped ...
@@ -877,6 +965,7 @@ def _strip_automation_placeholders(code: str) -> str:
       - Import statements
       - Step header comments that follow the pattern "# --- Step N: ..."
       - Inline expected-result notes that follow "# Expected: ..."
+      - # UNGROUNDABLE: markers (surfaced to RECOMMENDATIONS, not silently dropped)
     """
     lines = code.splitlines(keepends=True)
     result = []
@@ -889,10 +978,11 @@ def _strip_automation_placeholders(code: str) -> str:
         if re.match(r"#\s*---\s*Step\s+\d+", stripped) or re.match(r"#\s*Expected:", stripped):
             result.append(line)
             continue
-        if _MANUAL_REVIEW_WARNING.lower() in stripped.lower():
+        # Keep UNGROUNDABLE markers — they propagate to RECOMMENDATIONS for human review
+        if re.match(r"#\s*UNGROUNDABLE\b", stripped, re.IGNORECASE):
             result.append(line)
             continue
-        # Drop placeholder/warning comments
+        # Drop all WARNING, TODO, FIXME, and other placeholder comments
         if _PLACEHOLDER_LINE_RE.match(line):
             continue
         # Keep everything else (imports, module-level comments, etc.)
@@ -919,6 +1009,8 @@ class TestGeneratorAgent(BaseAgent):
         user_story = input_data.get("user_story", "")
         application_url = input_data.get("application_url")
         acceptance_criteria = input_data.get("acceptance_criteria", [])
+        domain_knowledge = input_data.get("domain_knowledge", "")
+        supporting_documents = input_data.get("supporting_documents", [])
         test_type = kwargs.get("test_type", "both")
         risk_level = kwargs.get("risk_level")
 
@@ -965,13 +1057,15 @@ class TestGeneratorAgent(BaseAgent):
         # ---------------------------------------------------------------
         if test_type in ("manual", "both"):
             result["manual_tests"] = self._generate_manual_tests(
-                user_story, application_url, acceptance_criteria, risk_level
+                user_story, application_url, acceptance_criteria, risk_level,
+                supporting_documents=supporting_documents,
             )
             manual_tests_for_automation = result["manual_tests"]
         elif test_type == "automation":
             # Generate manual internally as input to automation
             manual_tests_for_automation = self._generate_manual_tests(
-                user_story, application_url, acceptance_criteria, risk_level
+                user_story, application_url, acceptance_criteria, risk_level,
+                supporting_documents=supporting_documents,
             )
         else:
             manual_tests_for_automation = []
@@ -982,6 +1076,8 @@ class TestGeneratorAgent(BaseAgent):
                 application_url=application_url,
                 acceptance_criteria=acceptance_criteria,
                 knowledge_context=knowledge_context,
+                domain_knowledge=domain_knowledge,
+                supporting_documents=supporting_documents,
                 risk_level=risk_level,
                 manual_tests=manual_tests_for_automation,
             )
@@ -999,11 +1095,13 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str],
         acceptance_criteria: List[str],
         risk_level: Optional[str],
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         if self.llm_client:
             try:
                 return self._generate_manual_tests_via_llm(
-                    user_story, application_url, acceptance_criteria, risk_level
+                    user_story, application_url, acceptance_criteria, risk_level,
+                    supporting_documents=supporting_documents,
                 )
             except Exception as exc:
                 logger.warning("LLM manual test generation failed, using fallback: %s", exc)
@@ -1018,6 +1116,7 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str],
         acceptance_criteria: List[str],
         risk_level: Optional[str],
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Call the LLM using the versioned manual_test_generator prompt."""
         system_prompt = _prompt_loader.get("manual_test_generator")
@@ -1046,6 +1145,9 @@ class TestGeneratorAgent(BaseAgent):
         knowledge_context = self.get_knowledge_context(query=user_story)
         if knowledge_context:
             user_prompt += f"\n\n## Context\n{knowledge_context[:1000]}"
+
+        if supporting_documents:
+            user_prompt += _format_supporting_documents(supporting_documents)
 
         quality_standards = _load_quality_standards()
         if quality_standards:
@@ -1141,7 +1243,9 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str],
         acceptance_criteria: List[str],
         knowledge_context: str,
-        risk_level: Optional[str],
+        domain_knowledge: str = "",
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
+        risk_level: Optional[str] = None,
         manual_tests: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Generate one automation script for each manual test.
@@ -1165,16 +1269,14 @@ class TestGeneratorAgent(BaseAgent):
                 user_story, application_url, acceptance_criteria, risk_level
             )
 
-        # Fetch the page snapshot once for all tests
+        # Fetch the page snapshot once for all tests.
+        # InspectionFailedError is intentionally NOT caught here — a missing snapshot
+        # means we cannot ground locators, so generation must fail loudly.
         page_snapshot = ""
         if self.mcp_client and application_url:
-            try:
-                logger.info("Inspecting page via MCP: %s", application_url)
-                page_snapshot = self.mcp_client.inspect_page(application_url)
-                if page_snapshot:
-                    logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
-            except Exception as exc:
-                logger.warning("MCP page inspection failed: %s", exc)
+            logger.info("Inspecting page via MCP: %s", application_url)
+            page_snapshot = self.mcp_client.inspect_page(application_url)
+            logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
 
         results = []
         for manual_test in manual_tests:
@@ -1182,6 +1284,8 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
                 knowledge_context=knowledge_context,
+                domain_knowledge=domain_knowledge,
+                supporting_documents=supporting_documents,
                 page_snapshot=page_snapshot,
             )
             script_code = gen["script_code"]
@@ -1216,6 +1320,8 @@ class TestGeneratorAgent(BaseAgent):
         manual_test: Dict[str, Any],
         application_url: Optional[str],
         knowledge_context: str,
+        domain_knowledge: str = "",
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
         page_snapshot: str = "",
     ) -> Dict[str, Any]:
         """Translate a single manual test into a Playwright script via LLM or fallback.
@@ -1277,6 +1383,16 @@ class TestGeneratorAgent(BaseAgent):
                     " attributes where visible in the manual test context. Mark any element"
                     " you cannot ground as UNGROUNDABLE in the RECOMMENDATIONS section.",
                 ]
+
+            if domain_knowledge and domain_knowledge.strip():
+                user_parts += [
+                    "",
+                    "## Domain Knowledge (project-specific — use this to improve locator selection)",
+                    domain_knowledge[:2000],
+                ]
+
+            if supporting_documents:
+                user_parts += ["", _format_supporting_documents(supporting_documents)]
 
             user_parts += [
                 "",
@@ -1467,6 +1583,7 @@ class TestGeneratorAgent(BaseAgent):
         self,
         manual_tests: List[Dict[str, Any]],
         application_url: Optional[str] = None,
+        domain_knowledge: str = "",
     ) -> Dict[str, Any]:
         """Generate one automation script for each supplied manual test.
 
@@ -1486,12 +1603,10 @@ class TestGeneratorAgent(BaseAgent):
 
         knowledge_context = self.get_knowledge_context(query="playwright automation")
 
+        # InspectionFailedError propagates — no snapshot means no grounded locators.
         page_snapshot = ""
         if self.mcp_client and application_url:
-            try:
-                page_snapshot = self.mcp_client.inspect_page(application_url) or ""
-            except Exception as exc:
-                logger.warning("MCP page inspection failed: %s", exc)
+            page_snapshot = self.mcp_client.inspect_page(application_url) or ""
 
         results = []
         for manual_test in manual_tests:
@@ -1499,6 +1614,7 @@ class TestGeneratorAgent(BaseAgent):
                 manual_test=manual_test,
                 application_url=application_url,
                 knowledge_context=knowledge_context,
+                domain_knowledge=domain_knowledge,
                 page_snapshot=page_snapshot,
             )
             script_code = gen["script_code"]

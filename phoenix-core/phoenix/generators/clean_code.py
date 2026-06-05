@@ -52,6 +52,16 @@ _GATE_RULES: List[tuple] = [
         "Script contains TODO/FIXME comment — replace with real implementation",
     ),
     (
+        "WARNING_COMMENT",
+        re.compile(r"^\s*#\s*WARNING\b.*$", re.IGNORECASE),
+        "Script contains WARNING comment — generator emitted a warning instead of failing; fix the root cause",
+    ),
+    (
+        "UNGROUNDABLE_LOCATOR",
+        re.compile(r"^\s*#\s*UNGROUNDABLE\b.*$", re.IGNORECASE),
+        "Script contains UNGROUNDABLE locator — element was not found in DOM snapshot; generation should have failed",
+    ),
+    (
         "PLACEHOLDER_PASS",
         re.compile(r"^\s*pass\s*$"),
         "Bare 'pass' statement — function body is empty/unimplemented",
@@ -73,6 +83,14 @@ _GATE_RULES: List[tuple] = [
         "HARDCODED_SLEEP",
         re.compile(r"\btime\.sleep\s*\("),
         "time.sleep() is forbidden in Playwright tests — use expect() assertions",
+    ),
+    (
+        "BUSINESS_TEXT_URL_REGEX",
+        re.compile(
+            r'expect\s*\(\s*page\s*\)\s*\.\s*to_have_url\s*\(\s*re\.compile\s*\(\s*r["\']([^"\']+)["\']\s*\)',
+            re.IGNORECASE,
+        ),
+        "URL regex contains sentence-like text (business language, not a URL path)",
     ),
 ]
 
@@ -107,7 +125,7 @@ class CleanCodeGate:
             stripped = line.strip()
             # Skip comment lines for most rules (already flagged by TODO_BODY rule)
             for rule_id, pattern, message in _GATE_RULES:
-                if rule_id == "TODO_BODY":
+                if rule_id in ("TODO_BODY", "WARNING_COMMENT", "UNGROUNDABLE_LOCATOR"):
                     # Only match lines that are pure comments
                     if pattern.match(line):
                         violations.append(
@@ -129,6 +147,25 @@ class CleanCodeGate:
                                 message=message,
                             )
                         )
+                elif rule_id == "BUSINESS_TEXT_URL_REGEX":
+                    m = pattern.search(line)
+                    if m:
+                        url_pattern = m.group(1)
+                        # A real URL pattern has ≤3 words and typically contains / or *
+                        word_count = len(url_pattern.split())
+                        has_path_chars = "/" in url_pattern or "*" in url_pattern or "\\." in url_pattern
+                        if word_count > 3 or (not has_path_chars and word_count > 1):
+                            violations.append(
+                                CodeViolation(
+                                    rule=rule_id,
+                                    line_number=line_no,
+                                    excerpt=stripped[:80],
+                                    message=(
+                                        f"{message}: {url_pattern!r} looks like business text, "
+                                        "not a URL path (e.g. r'.*/leave/apply')"
+                                    ),
+                                )
+                            )
                 else:
                     if pattern.search(line) and not stripped.startswith("#"):
                         violations.append(

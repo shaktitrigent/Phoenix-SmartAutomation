@@ -80,7 +80,7 @@ class ProjectConfig(BaseModel):
     manual_output_dir: str = Field(
         default="./manual_tests", description="Manual test output directory"
     )
-    test_output_dir: str = Field(default="./test_results", description="Test output directory")
+    test_output_dir: str = Field(default="./tests", description="Test output directory")
     tests_dir: str = Field(default="./tests", description="Module-organised tests directory")
     test_data_dir: str = Field(default="./test_data", description="Generated test data directory")
     report_output_dir: str = Field(default="./reports", description="Report output directory")
@@ -94,6 +94,11 @@ class ProjectConfig(BaseModel):
         return self.base_url or self.application_url
 
 
+def _jira_config_default():
+    from phoenix.integrations.jira.config import JiraConfig
+    return JiraConfig()
+
+
 class PhoenixConfig(BaseModel):
     """Main Phoenix configuration"""
 
@@ -102,6 +107,7 @@ class PhoenixConfig(BaseModel):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     project: ProjectConfig = Field(default_factory=ProjectConfig)
+    jira: Any = Field(default_factory=_jira_config_default)
 
     @classmethod
     def from_env(cls) -> "PhoenixConfig":
@@ -136,7 +142,7 @@ class PhoenixConfig(BaseModel):
                 application_url=os.environ.get("PHOENIX_APPLICATION_URL"),
                 base_url=os.environ.get("PHOENIX_BASE_URL"),
                 manual_output_dir=os.environ.get("PHOENIX_MANUAL_OUTPUT_DIR", "./manual_tests"),
-                test_output_dir=os.environ.get("PHOENIX_TEST_OUTPUT_DIR", "./test_results"),
+                test_output_dir=os.environ.get("PHOENIX_TEST_OUTPUT_DIR", "./tests"),
                 tests_dir=os.environ.get("PHOENIX_TESTS_DIR", "./tests"),
                 test_data_dir=os.environ.get("PHOENIX_TEST_DATA_DIR", "./test_data"),
                 report_output_dir=os.environ.get("PHOENIX_REPORT_OUTPUT_DIR", "./reports"),

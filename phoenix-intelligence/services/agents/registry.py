@@ -74,6 +74,8 @@ class AgentRegistry:
         acceptance_criteria: Optional[List[str]] = None,
         test_type: str = "both",
         risk_level: Optional[str] = None,
+        domain_knowledge: str = "",
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         return self.invoke_agent(
             "test_generator",
@@ -81,6 +83,8 @@ class AgentRegistry:
                 "user_story": user_story,
                 "application_url": application_url,
                 "acceptance_criteria": acceptance_criteria or [],
+                "domain_knowledge": domain_knowledge,
+                "supporting_documents": supporting_documents or [],
             },
             test_type=test_type,
             risk_level=risk_level,
@@ -120,11 +124,13 @@ class AgentRegistry:
         self,
         manual_tests: List[Dict[str, Any]],
         application_url: Optional[str] = None,
+        domain_knowledge: str = "",
     ) -> Dict[str, Any]:
         agent = self._agents.get("test_generator")
         result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,
             application_url=application_url,
+            domain_knowledge=domain_knowledge,
         )
         return self._with_runtime_metadata(result, "test_generator")
 

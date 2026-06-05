@@ -20,12 +20,13 @@ env/
 htmlcov/
 
 # Runtime artifacts that belong in a consumer project, not here
+# NOTE: tests/ is intentionally NOT excluded here because phoenix-core/tests/ contains
+# the framework's own unit tests (source code). Consumer-project generated test scripts
+# live in the consumer's tests/ folder, which is excluded by the root .gitignore.
 locators/
 logs/
 manual_tests/
-test_results/
 test_data/
-tests/
 reports/
 user_stories/
 fixtures/

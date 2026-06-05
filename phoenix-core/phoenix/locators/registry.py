@@ -73,6 +73,10 @@ class LocatorRegistry:
                 raw = [raw]
             for item in raw:
                 try:
+                    # Normalise: LLM output uses "element_id", LocatorBundle expects "element_name"
+                    if "element_name" not in item and "element_id" in item:
+                        item = dict(item)
+                        item["element_name"] = item["element_id"]
                     bundle = LocatorBundle.from_dict(item)
                     self._bundles[bundle.element_name] = bundle
                 except Exception:
@@ -92,7 +96,11 @@ class LocatorRegistry:
         """Return the bundle for *element_name*, raising KeyError if absent."""
         bundle = self._bundles.get(element_name)
         if bundle is None:
-            raise KeyError(f"No LocatorBundle registered for '{element_name}'")
+            available = sorted(self._bundles.keys())
+            raise KeyError(
+                f"element_id={element_name!r} not found in locators registry. "
+                f"Available element_ids: {available}"
+            )
         return bundle
 
     def page_bundles(self, page: str) -> List[LocatorBundle]:

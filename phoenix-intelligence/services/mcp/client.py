@@ -10,6 +10,10 @@ from services.config import MCPSettings
 logger = logging.getLogger(__name__)
 
 
+class InspectionFailedError(RuntimeError):
+    """Raised when MCP page inspection fails and no DOM snapshot can be obtained."""
+
+
 class MCPClient:
     """Connects to ``@playwright/mcp`` via stdio to inspect live pages.
 
@@ -34,17 +38,35 @@ class MCPClient:
 
         Returns:
             The accessibility-tree text returned by the Playwright MCP
-            ``browser_snapshot`` tool, or an empty string on failure.
+            ``browser_snapshot`` tool.
+
+        Raises:
+            InspectionFailedError: When the MCP connection fails or returns an
+                empty snapshot. Callers must NOT silently swallow this — no DOM
+                snapshot means no grounded locators, so generation must stop.
         """
         if not self.settings.enabled:
             logger.info("MCP is disabled via configuration — skipping page inspection")
             return ""
 
         try:
-            return self._run_async(self._inspect_page_async(url))
-        except Exception:
-            logger.exception("MCP page inspection failed for %s", url)
-            return ""
+            result = self._run_async(self._inspect_page_async(url))
+        except Exception as exc:
+            raise InspectionFailedError(
+                f"MCP browser connection failed while inspecting {url!r}. "
+                "Cannot generate automation without a DOM snapshot. "
+                "Check that: (1) the page is accessible, (2) no authentication/CAPTCHA blocks "
+                "the initial load, (3) the @playwright/mcp server is running."
+            ) from exc
+
+        if not result or not result.strip():
+            raise InspectionFailedError(
+                f"MCP inspection of {url!r} returned an empty DOM snapshot. "
+                "The page may require authentication or JavaScript to render content. "
+                "Verify the URL is correct and the page loads without login."
+            )
+
+        return result
 
     async def _inspect_page_async(self, url: str) -> str:
         """Async implementation: connect, navigate, snapshot, disconnect."""

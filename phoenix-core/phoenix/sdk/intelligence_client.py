@@ -109,6 +109,8 @@ class IntelligenceClient:
         acceptance_criteria: List[str],
         test_type: str,
         risk_level: Optional[str],
+        domain_knowledge: str = "",
+        supporting_documents: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = {
             "user_story": user_story,
@@ -118,6 +120,8 @@ class IntelligenceClient:
                 "test_type": test_type,
                 "risk_level": risk_level,
             },
+            "domain_knowledge": domain_knowledge or None,
+            "supporting_documents": supporting_documents or [],
         }
         return self._post("/api/v1/tests/generate", payload)
 
@@ -149,10 +153,12 @@ class IntelligenceClient:
         self,
         manual_tests: List[Dict[str, Any]],
         application_url: Optional[str] = None,
+        domain_knowledge: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
             "application_url": application_url,
+            "domain_knowledge": domain_knowledge or None,
         }
         return self._post("/api/v1/tests/automate", payload)
 

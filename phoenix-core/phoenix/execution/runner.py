@@ -42,13 +42,17 @@ class TestRunner:
 
     def __init__(
         self,
-        test_output_dir: str = "./test_results",
+        test_output_dir: str = "./tests",
         reports_dir: str = "./reports",
+        headed: bool = False,
+        slow_mo: int = 0,
     ):
         self.test_output_dir = Path(test_output_dir)
         self.test_output_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
+        self.headed = headed
+        self.slow_mo = slow_mo
 
     def run_tests(
         self, test_paths: List[str], project_name: Optional[str] = None, **kwargs
@@ -96,8 +100,16 @@ class TestRunner:
         if kwargs.get("browser"):
             cmd += ["--browser", kwargs["browser"]]
 
+        import os as _os
+        env = _os.environ.copy()
+        if self.headed or kwargs.get("headed"):
+            env["PWHEADED"] = "1"
+        slow = self.slow_mo or kwargs.get("slow_mo", 0)
+        if slow:
+            env["PWSLOWMO"] = str(slow)
+
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd())
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=Path.cwd(), env=env)
         except Exception as exc:
             return {
                 "status": ExecutionStatus.ERROR.value,

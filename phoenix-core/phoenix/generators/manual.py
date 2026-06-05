@@ -30,15 +30,48 @@ class ManualTestQualityGate:
 
     Returns a list of (test_name, [violations]) tuples for failing tests.
     An empty violations list means all tests passed.
+
+    Threshold defaults are intentionally permissive so that valid short tests
+    (single-step scenarios, brief descriptions) are not silently dropped.
+    Pass ``strict=True`` for tighter CI-grade validation.
     """
 
     _PLACEHOLDER_RE = re.compile(
         r"\b(TODO|FIXME|TBD|placeholder|lorem ipsum|xxx)\b", re.IGNORECASE
     )
-    _MIN_NAME_LEN = 5
-    _MIN_DESC_LEN = 10
-    _MIN_STEP_TEXT = 5
-    _MIN_STEPS = 2
+    # Hard-block markers that indicate the test requires human review before automation
+    _REVIEW_MARKERS = [
+        "[NEEDS MANUAL REVIEW]",
+        "[TODO]",
+        "[TBD]",
+        "[FIXME]",
+        "[PLACEHOLDER]",
+    ]
+
+    # Default (permissive) thresholds
+    _MIN_NAME_LEN  = 3
+    _MIN_DESC_LEN  = 3
+    _MIN_STEP_TEXT = 3
+    _MIN_STEPS     = 1
+
+    # Strict-mode thresholds (opt-in via strict=True)
+    _STRICT_MIN_NAME_LEN  = 5
+    _STRICT_MIN_DESC_LEN  = 10
+    _STRICT_MIN_STEP_TEXT = 5
+    _STRICT_MIN_STEPS     = 2
+
+    def __init__(self, strict: bool = False) -> None:
+        self._strict = strict
+        if strict:
+            self._min_name  = self._STRICT_MIN_NAME_LEN
+            self._min_desc  = self._STRICT_MIN_DESC_LEN
+            self._min_step  = self._STRICT_MIN_STEP_TEXT
+            self._min_steps = self._STRICT_MIN_STEPS
+        else:
+            self._min_name  = self._MIN_NAME_LEN
+            self._min_desc  = self._MIN_DESC_LEN
+            self._min_step  = self._MIN_STEP_TEXT
+            self._min_steps = self._MIN_STEPS
 
     def validate_one(self, test: Dict[str, Any]) -> List[str]:
         """Return a list of violation messages for a single test dict."""
@@ -48,32 +81,43 @@ class ManualTestQualityGate:
         steps = test.get("steps", [])
         expected_result = test.get("expected_result", "")
 
-        if len(name) < self._MIN_NAME_LEN:
-            violations.append(f"name too short ({len(name)} chars, need ≥ {self._MIN_NAME_LEN})")
+        # Hard block: check the entire serialised test for unresolved review markers.
+        # JSON-encode to catch markers inside steps, expected_result, etc.
+        import json as _json
+        test_text = _json.dumps(test)
+        for marker in self._REVIEW_MARKERS:
+            if marker in test_text:
+                violations.append(
+                    f"test contains unresolved marker {marker!r} — "
+                    "resolve this before automation generation"
+                )
+
+        if len(name) < self._min_name:
+            violations.append(f"name too short ({len(name)} chars, need ≥ {self._min_name})")
         if self._PLACEHOLDER_RE.search(name):
             violations.append("name contains placeholder text")
 
-        if len(description) < self._MIN_DESC_LEN:
+        if len(description) < self._min_desc:
             violations.append(
-                f"description too short ({len(description)} chars, need ≥ {self._MIN_DESC_LEN})"
+                f"description too short ({len(description)} chars, need ≥ {self._min_desc})"
             )
 
-        if len(steps) < self._MIN_STEPS:
+        if len(steps) < self._min_steps:
             violations.append(
-                f"needs ≥ {self._MIN_STEPS} steps, got {len(steps)}"
+                f"needs ≥ {self._min_steps} steps, got {len(steps)}"
             )
 
         for i, step in enumerate(steps, 1):
             action = step.get("action", "") if isinstance(step, dict) else str(step)
             expected = step.get("expected_result", "") if isinstance(step, dict) else ""
-            if len(action) < self._MIN_STEP_TEXT:
+            if len(action) < self._min_step:
                 violations.append(f"step {i} action too short")
-            if len(expected) < self._MIN_STEP_TEXT:
+            if self._strict and len(expected) < self._min_step:
                 violations.append(f"step {i} expected_result too short")
             if self._PLACEHOLDER_RE.search(action):
                 violations.append(f"step {i} contains placeholder text")
 
-        if not expected_result:
+        if self._strict and not expected_result:
             violations.append("missing overall expected_result")
 
         return violations
@@ -112,10 +156,15 @@ class ManualTestGenerator:
       Set ``gate=False`` to write all tests regardless of quality.
     """
 
-    def __init__(self, output_dir: str = "./manual_tests", gate: bool = True) -> None:
+    def __init__(
+        self,
+        output_dir: str = "./manual_tests",
+        gate: bool = True,
+        strict: bool = False,
+    ) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self._gate = ManualTestQualityGate() if gate else None
+        self._gate = ManualTestQualityGate(strict=strict) if gate else None
 
     # ------------------------------------------------------------------
     # Public API
@@ -142,13 +191,14 @@ class ManualTestGenerator:
             Tests that fail the quality gate are excluded.
         """
         # Apply quality gate
+        self._last_gate_failures: List[Tuple[str, List[str]]] = []
         if self._gate is not None:
             passing, failures = self._gate.validate_all(manual_tests)
+            self._last_gate_failures = failures
             for name, violations in failures:
                 import logging
-
                 logging.getLogger(__name__).warning(
-                    "Manual test '%s' failed quality gate — skipped: %s",
+                    "Manual test %r failed quality gate — skipped: %s",
                     name,
                     "; ".join(violations),
                 )

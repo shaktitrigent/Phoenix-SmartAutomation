@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import suppress
 from pathlib import Path
 
@@ -89,16 +90,22 @@ def browser_type_name(request) -> str:
 
 
 @pytest.fixture(scope="session")
-def browser(playwright_instance, browser_type_name, request) -> Browser:
-    headless = request.config.getoption("--headless")
-    browser_type = getattr(playwright_instance, browser_type_name)
-    b = browser_type.launch(
-        headless=headless,
-        args=[
+def browser_type_launch_args():
+    """Launch args read from environment — set PWHEADED=1 for visible browser."""
+    return {
+        "headless": os.getenv("PWHEADED") != "1",
+        "slow_mo": int(os.getenv("PWSLOWMO", "0")),
+        "args": [
             "--disable-save-password-bubble",
             "--disable-features=PasswordManager",
         ],
-    )
+    }
+
+
+@pytest.fixture(scope="session")
+def browser(playwright_instance, browser_type_name, browser_type_launch_args) -> Browser:
+    browser_type = getattr(playwright_instance, browser_type_name)
+    b = browser_type.launch(**browser_type_launch_args)
     yield b
     with suppress(Exception):
         b.close()
@@ -174,6 +181,27 @@ def test_data(request) -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return {"scenarios": [], "edge_cases": []}
+
+
+# ---------------------------------------------------------------------------
+# Screenshot-on-failure hook
+# ---------------------------------------------------------------------------
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Capture a screenshot after any test failure and attach it to the report."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call" and report.failed:
+        page_fixture = item.funcargs.get("page")
+        if page_fixture is not None:
+            screenshots_dir = Path("reports") / "screenshots"
+            screenshots_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r"[^\w\-]", "_", item.nodeid)
+            screenshot_path = screenshots_dir / f"{safe_name}.png"
+            with suppress(Exception):
+                page_fixture.screenshot(path=str(screenshot_path))
+                report.screenshots = [str(screenshot_path)]
 
 
 # ---------------------------------------------------------------------------

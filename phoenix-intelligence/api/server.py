@@ -152,12 +152,17 @@ def generate_tests(payload: TestGenerationRequest):
     test_type = options.test_type if options else "both"
     risk_level = options.risk_level if options else None
 
+    supporting_documents = [
+        doc.model_dump() for doc in (payload.supporting_documents or [])
+    ]
     result = _agent_registry.generate_tests(
         user_story=payload.user_story,
         application_url=payload.application_url,
         acceptance_criteria=payload.acceptance_criteria,
         test_type=test_type,
         risk_level=risk_level,
+        domain_knowledge=payload.domain_knowledge or "",
+        supporting_documents=supporting_documents,
     )
 
     return _decorate_metadata(result)
@@ -199,6 +204,7 @@ def automate_from_manual(payload: AutomateRequest):
     result = _agent_registry.automate_from_manual(
         manual_tests=payload.manual_tests,
         application_url=payload.application_url,
+        domain_knowledge=payload.domain_knowledge or "",
     )
     return _decorate_metadata(result)
 

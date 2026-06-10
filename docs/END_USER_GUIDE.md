@@ -10,8 +10,8 @@
 | File | What it does |
 |---|---|
 | `phoenix-intelligence.exe` | The AI brain — runs locally, never shares your code externally |
-| `phoenix_shared-0.1.1-py3-none-any.whl` | Shared data models — install this **first** |
-| `phoenix_core-0.1.1-py3-none-any.whl` | The `phoenix` CLI — your day-to-day tool |
+| `phoenix_shared-0.1.3-py3-none-any.whl` | Shared data models — install this **first** |
+| `phoenix_core-0.1.3-py3-none-any.whl` | The `phoenix` CLI — your day-to-day tool |
 
 All three files must stay in the same folder. The `.whl` files are not on PyPI — install them from these files only.
 
@@ -123,8 +123,8 @@ You will see `(phoenix-venv)` at the start of your prompt. Every new terminal ne
 
 Run these from the folder containing the `.whl` files:
 ```powershell
-pip install phoenix_shared-0.1.1-py3-none-any.whl
-pip install phoenix_core-0.1.1-py3-none-any.whl
+pip install phoenix_shared-0.1.3-py3-none-any.whl
+pip install phoenix_core-0.1.3-py3-none-any.whl
 ```
 
 **Step 2.3 — Install the Playwright browser**
@@ -166,8 +166,8 @@ pip uninstall phoenix-shared -y
 ### Step 4 — Install the new packages
 
 ```powershell
-pip install phoenix_shared-0.1.1-py3-none-any.whl
-pip install phoenix_core-0.1.1-py3-none-any.whl
+pip install phoenix_shared-0.1.3-py3-none-any.whl
+pip install phoenix_core-0.1.3-py3-none-any.whl
 ```
 
 > If your new files have a different version number (e.g. `0.2.0`), use that filename instead.

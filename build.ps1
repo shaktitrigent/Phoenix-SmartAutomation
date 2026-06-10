@@ -62,9 +62,40 @@ if __name__ == "__main__":
         --paths "$Root\phoenix-intelligence" `
         --paths "$Root\shared" `
         --paths "$Root\phoenix-core" `
-        --collect-submodules api `
-        --collect-submodules phoenix_shared `
-        --collect-submodules phoenix `
+        --hidden-import api `
+        --hidden-import api.models `
+        --hidden-import api.server `
+        --hidden-import phoenix_shared `
+        --hidden-import phoenix_shared.contracts `
+        --hidden-import phoenix_shared.contracts.requests `
+        --hidden-import phoenix_shared.contracts.responses `
+        --hidden-import phoenix_shared.models `
+        --hidden-import phoenix_shared.models.automation_script `
+        --hidden-import phoenix_shared.models.locator `
+        --hidden-import phoenix_shared.models.test_case `
+        --hidden-import phoenix `
+        --hidden-import phoenix.cli `
+        --hidden-import phoenix.documents `
+        --hidden-import phoenix.exceptions `
+        --hidden-import phoenix.execution `
+        --hidden-import phoenix.generators `
+        --hidden-import phoenix.integrations `
+        --hidden-import phoenix.integrations.jira `
+        --hidden-import phoenix.locators `
+        --hidden-import phoenix.mappings `
+        --hidden-import phoenix.mappings.pages `
+        --hidden-import phoenix.models `
+        --hidden-import phoenix.parsers `
+        --hidden-import phoenix.reporting `
+        --hidden-import phoenix.reporting.aggregator `
+        --hidden-import phoenix.reporting.data_loader `
+        --hidden-import phoenix.reporting.generator `
+        --hidden-import phoenix.reporting.html_reporter `
+        --hidden-import phoenix.reporting.render `
+        --hidden-import phoenix.sdk `
+        --hidden-import phoenix.storage `
+        --hidden-import phoenix.test_data `
+        --hidden-import phoenix.validation `
         --hidden-import services `
         --hidden-import services.agents `
         --hidden-import services.agents.base `
@@ -87,12 +118,6 @@ if __name__ == "__main__":
         --hidden-import services.mcp.server `
         --hidden-import services.knowledge `
         --hidden-import services.knowledge.base `
-        --hidden-import phoenix.reporting `
-        --hidden-import phoenix.reporting.aggregator `
-        --hidden-import phoenix.reporting.data_loader `
-        --hidden-import phoenix.reporting.generator `
-        --hidden-import phoenix.reporting.html_reporter `
-        --hidden-import phoenix.reporting.render `
         --hidden-import uvicorn.logging `
         --hidden-import uvicorn.loops `
         --hidden-import uvicorn.loops.auto `
@@ -107,6 +132,17 @@ if __name__ == "__main__":
         --hidden-import pydantic `
         --hidden-import anthropic `
         --hidden-import yaml `
+        --hidden-import sqlalchemy `
+        --hidden-import sqlalchemy.dialects `
+        --hidden-import sqlalchemy.dialects.sqlite `
+        --hidden-import sqlalchemy.dialects.sqlite.pysqlite `
+        --hidden-import sqlalchemy.pool `
+        --hidden-import sqlalchemy.pool.impl `
+        --hidden-import sqlalchemy.engine `
+        --hidden-import sqlalchemy.engine.default `
+        --hidden-import sqlalchemy.orm `
+        --hidden-import sqlalchemy.orm.decl_api `
+        --hidden-import alembic `
         --add-data "$Root\phoenix-intelligence\prompts;prompts" `
         --add-data "$Root\phoenix-intelligence\services\knowledge;services\knowledge" `
         --distpath "$Root\dist" `

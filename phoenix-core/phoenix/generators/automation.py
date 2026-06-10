@@ -131,13 +131,18 @@ class AutomationTestGenerator:
 
         normalised = self._normalise(script_code)
 
-        # Fail fast: reject scripts with hard gate violations before writing to disk
+        # Fail fast only on violations that will ALWAYS fail at runtime regardless of
+        # manual fixes — specifically assertions built from business text instead of
+        # real URL paths. Everything else (pass statements, TODO comments, empty bodies,
+        # placeholder text) is advisory: the script is written with inline warning
+        # comments so the user can see and fix the specific lines.
+        _RUNTIME_BREAKING_RULES = {"BUSINESS_TEXT_URL_REGEX"}
         gate = CleanCodeGate()
         violations = gate.check(normalised)
-        hard_failures = [v for v in violations if v.rule not in gate.WARNING_RULES]
-        if hard_failures:
+        breaking = [v for v in violations if v.rule in _RUNTIME_BREAKING_RULES]
+        if breaking:
             raise QualityGateFailedError(
-                [f"[{v.rule}] L{v.line_number}: {v.message}" for v in hard_failures]
+                [f"[{v.rule}] L{v.line_number}: {v.message}" for v in breaking]
             )
 
         # Validate Python syntax before writing

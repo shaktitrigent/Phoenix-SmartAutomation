@@ -81,16 +81,28 @@ class ManualTestQualityGate:
         steps = test.get("steps", [])
         expected_result = test.get("expected_result", "")
 
-        # Hard block: check the entire serialised test for unresolved review markers.
-        # JSON-encode to catch markers inside steps, expected_result, etc.
+        # Review-marker check: always block [NEEDS MANUAL REVIEW] since it signals
+        # the LLM explicitly flagged the step as unautomatable.
+        # Other housekeeping markers ([TODO], [TBD], [FIXME], [PLACEHOLDER]) are
+        # only hard-blocked in strict mode — in permissive mode they become warnings
+        # so the test is still saved and the user can clean them up.
         import json as _json
         test_text = _json.dumps(test)
-        for marker in self._REVIEW_MARKERS:
+        hard_block_markers = ["[NEEDS MANUAL REVIEW]"]
+        soft_block_markers = ["[TODO]", "[TBD]", "[FIXME]", "[PLACEHOLDER]"]
+        for marker in hard_block_markers:
             if marker in test_text:
                 violations.append(
                     f"test contains unresolved marker {marker!r} — "
                     "resolve this before automation generation"
                 )
+        if self._strict:
+            for marker in soft_block_markers:
+                if marker in test_text:
+                    violations.append(
+                        f"test contains unresolved marker {marker!r} — "
+                        "resolve this before automation generation"
+                    )
 
         if len(name) < self._min_name:
             violations.append(f"name too short ({len(name)} chars, need ≥ {self._min_name})")
@@ -230,9 +242,12 @@ class ManualTestGenerator:
 
         Returns:
             (passing, failures) — same contract as ManualTestQualityGate.validate_all.
+            When gate is disabled (gate=False at construction), all tests pass.
         """
-        gate = self._gate or ManualTestQualityGate()
-        return gate.validate_all(manual_tests)
+        if self._gate is None:
+            # Gate was explicitly disabled — treat every test as passing.
+            return manual_tests, []
+        return self._gate.validate_all(manual_tests)
 
     # ------------------------------------------------------------------
     # Private helpers

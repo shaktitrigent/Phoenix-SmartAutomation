@@ -94,8 +94,19 @@ _GATE_RULES: List[tuple] = [
     ),
 ]
 
-# Rules that are warnings, not hard failures (gate still reports them)
-_WARNING_RULES = {"HARDCODED_SLEEP"}
+# Rules that produce advisory inline comments rather than blocking generation.
+# BUSINESS_TEXT_URL_REGEX is the only true hard failure — it produces assertions
+# that will always fail at runtime. Everything else is advisory: the script is
+# written with a visible warning block so the developer knows what to fix.
+_WARNING_RULES = {
+    "HARDCODED_SLEEP",
+    "PLACEHOLDER_PASS",
+    "ELLIPSIS_BODY",
+    "TODO_BODY",
+    "WARNING_COMMENT",
+    "UNGROUNDABLE_LOCATOR",
+    "PLACEHOLDER_TEXT",
+}
 
 
 class CleanCodeGate:

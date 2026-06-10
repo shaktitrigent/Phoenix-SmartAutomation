@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import yaml
 from pydantic import BaseModel, Field
+from phoenix.integrations.jira.config import JiraConfig
 
 
 def _load_toml(path: Path) -> Dict[str, Any]:
@@ -94,11 +95,6 @@ class ProjectConfig(BaseModel):
         return self.base_url or self.application_url
 
 
-def _jira_config_default():
-    from phoenix.integrations.jira.config import JiraConfig
-    return JiraConfig()
-
-
 class PhoenixConfig(BaseModel):
     """Main Phoenix configuration"""
 
@@ -107,7 +103,7 @@ class PhoenixConfig(BaseModel):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     project: ProjectConfig = Field(default_factory=ProjectConfig)
-    jira: Any = Field(default_factory=_jira_config_default)
+    jira: JiraConfig = Field(default_factory=JiraConfig)
 
     @classmethod
     def from_env(cls) -> "PhoenixConfig":

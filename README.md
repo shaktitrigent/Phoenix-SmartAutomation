@@ -520,8 +520,8 @@ This cleans old artifacts, builds both wheels and the exe, then prints a summary
 
 ```
 dist\
-├── phoenix_shared-0.1.1-py3-none-any.whl    ← install first
-├── phoenix_core-0.1.1-py3-none-any.whl      ← install second
+├── phoenix_shared-0.1.3-py3-none-any.whl    ← install first
+├── phoenix_core-0.1.3-py3-none-any.whl      ← install second
 └── phoenix-intelligence.exe                  ← run the server
 ```
 

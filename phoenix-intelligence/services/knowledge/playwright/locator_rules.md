@@ -8,14 +8,23 @@
 
 Attempt each tier in order. Move to the next ONLY when the current tier cannot uniquely identify the element.
 
-Phoenix generation priority (v2.0):
-1. `[data-testid="..."]` — most stable; always preferred when present
-2. `#stable-id` — only for IDs without framework-generated digit patterns (`ember*`, `react-select-*`, `ng-model-*`)
+Phoenix generation priority (v3.0 — ID promoted):
+1. `[data-testid="..."]` / `[data-test="..."]` / `[data-cy="..."]`  — purpose-built test hook; always first
+2. `#element-id` — **PROMOTED**: when a stable, unique, non-dynamic id exists, prefer it over role
 3. `[name="field"]` — reliable for form inputs
-4. `get_by_placeholder()` — placeholder text verbatim from the DOM snapshot
-5. `get_by_label()` — ONLY when the DOM snapshot shows a real `<label>` or `aria-labelledby`
-6. `get_by_role()` — scoped to a container; last resort for interactive elements
-7. `get_by_text()` — static read-only text only: ≤ 6 words, no action verbs, must appear verbatim in the DOM snapshot
+4. `get_by_role("...", name="...")` — scoped to container, exact=True preferred
+5. `get_by_placeholder()` / `get_by_label()` — verbatim from the DOM snapshot
+6. CSS selector (stable class, not framework-generated)
+7. `get_by_text()` — static read-only text only: ≤ 6 words, no action verbs
+8. XPath — last resort only; flag with a comment
+
+**Dynamic-ID heuristic — DEMOTE below role if the id:**
+- Contains framework prefixes: `:r3:`, `ember1234`, `react-aria-`, `mui-`, `ant-`
+- Ends with a changing counter: `-2`, `-123`, `_abc12ef`
+- Is purely numeric: `id="123"`
+- Matches a UUID pattern: `id="550e8400-e29b-..."`
+
+If a dynamic id is detected, skip tier 2 and continue to tier 3.
 
 Never convert manual-test narration such as `Dashboard loads successfully` or `fields are visible`
 into locator text. If no stable DOM-backed locator exists, emit `# UNGROUNDABLE: <reason>` instead of guessing.

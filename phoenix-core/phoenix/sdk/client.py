@@ -214,26 +214,12 @@ class PhoenixClient:
         # ------------------------------------------------------------------
         locators_saved = 0
         if automation_tests:
-            from phoenix.locators.extractor import extract_locators_from_script, page_name_from_script_path
-            from phoenix.locators.registry import LocatorRegistry
+            from phoenix.locators.persist import persist_locators
+            # Enrich with LLM locators[] from the raw intelligence payload
+            for w, t in zip(automation_tests, automation_tests_payload or []):
+                w.setdefault("locators", t.get("locators", []))
             locators_dir = Path(self.config.project.test_output_dir).parent / "locators"
-            locators_dir.mkdir(parents=True, exist_ok=True)
-            registry = LocatorRegistry()
-            for test in automation_tests:
-                script_path = test.get("script_path")
-                if not script_path or not Path(script_path).exists():
-                    continue
-                try:
-                    script_code = Path(script_path).read_text(encoding="utf-8")
-                    page = page_name_from_script_path(script_path)
-                    bundles = extract_locators_from_script(script_code, page_name=page)
-                    for bundle in bundles:
-                        registry.upsert(bundle)
-                    locators_saved += len(bundles)
-                except Exception:
-                    pass
-            if locators_saved:
-                registry.save_all(locators_dir)
+            locators_saved = persist_locators(automation_tests, locators_dir)
 
         # Merge quality-gate warnings with any warnings from the intelligence server
         existing_meta = intelligence_result.get("metadata", {})

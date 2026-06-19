@@ -34,7 +34,7 @@ switch ($provider.ToLower()) {
             Write-Host 'Set it with: $env:ANTHROPIC_API_KEY = "your-anthropic-api-key"' -ForegroundColor Yellow
             Write-Host ""
         }
-        if (-not $env:PHOENIX_LLM_MODEL) { $env:PHOENIX_LLM_MODEL = "claude-sonnet-4-20250514" }
+        if (-not $env:PHOENIX_LLM_MODEL) { $env:PHOENIX_LLM_MODEL = "claude-sonnet-4-6" }
     }
 }
 

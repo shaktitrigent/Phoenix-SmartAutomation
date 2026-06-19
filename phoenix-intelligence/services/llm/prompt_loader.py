@@ -134,10 +134,18 @@ class PromptLoader:
 
     @staticmethod
     def _latest_version(versions: Dict[str, str]) -> str:
-        """Return the semantically latest version key."""
+        """Return the semantically latest pure-semver version key.
 
-        def _key(v: str):
-            parts = re.split(r"[.\-]", v)
-            return tuple(int(p) if p.isdigit() else p for p in parts)
+        Non-semver variant keys (e.g. ``3.0_bdd``) are excluded so that
+        ``get(agent)`` without an explicit version always returns the latest
+        numbered version; variants are only returned when explicitly requested.
+        """
 
-        return max(versions.keys(), key=_key)
+        def _key(v: str) -> tuple:
+            return tuple(int(p) for p in v.split("."))
+
+        semver_keys = [k for k in versions if re.match(r"^\d+(\.\d+)*$", k)]
+        if semver_keys:
+            return max(semver_keys, key=_key)
+        # Fallback: no pure-semver found — sort all keys lexicographically
+        return max(versions.keys())

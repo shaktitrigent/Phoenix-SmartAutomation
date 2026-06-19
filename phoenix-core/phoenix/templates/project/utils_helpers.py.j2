@@ -1,0 +1,63 @@
+"""Common test helpers for {{ project_name }}."""
+
+from __future__ import annotations
+
+import time
+from typing import Callable, Optional, TypeVar
+
+from playwright.sync_api import Locator, Page, expect
+
+T = TypeVar("T")
+
+
+def retry(fn: Callable[[], T], attempts: int = 3, delay_ms: int = 500) -> T:
+    """Retry *fn* up to *attempts* times, sleeping *delay_ms* between each."""
+    last_exc: Exception = RuntimeError("no attempts made")
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if i < attempts - 1:
+                time.sleep(delay_ms / 1000)
+    raise last_exc
+
+
+def safe_click(locator: Locator, timeout_ms: int = 30_000) -> None:
+    """Wait for a locator to be visible + enabled then click it."""
+    expect(locator).to_be_visible(timeout=timeout_ms)
+    expect(locator).to_be_enabled(timeout=timeout_ms)
+    locator.click()
+
+
+def wait_for_condition(
+    condition: Callable[[], bool],
+    timeout_ms: int = 10_000,
+    poll_ms: int = 200,
+    message: str = "condition never became true",
+) -> None:
+    """Poll *condition* until it returns True or *timeout_ms* elapses."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(poll_ms / 1000)
+    raise TimeoutError(message)
+
+
+def dismiss_overlays(page: Page) -> None:
+    """Dismiss common overlays: cookie banners, tour modals, alerts."""
+    selectors = [
+        "[class*='cookie'] button",
+        "[id*='cookie'] button",
+        "[class*='modal'] button[class*='close']",
+        "[aria-label='Close']",
+        "[data-dismiss='modal']",
+    ]
+    for sel in selectors:
+        try:
+            locator = page.locator(sel).first
+            if locator.is_visible():
+                locator.click(timeout=2_000)
+        except Exception:
+            pass

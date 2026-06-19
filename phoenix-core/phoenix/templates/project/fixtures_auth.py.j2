@@ -1,20 +1,88 @@
-"""Authentication fixtures for {{ project_name }}."""
+"""Authentication fixtures for {{ project_name }}.
+
+Session-scoped strategy:
+  1. Log in once via LoginPage, persist storage state to .phoenix/storage_state.json
+  2. Every test that needs an authenticated session requests `authenticated_page`
+     — a Page pre-loaded with the saved storage state (no repeated logins)
+  3. Only test_login.py (the dedicated login test) uses a plain `page` fixture
+     and exercises the full login flow to prove the login UI works
+
+Never include login steps or credentials in any test that uses `authenticated_page`.
+"""
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
+
+
+_STORAGE_STATE_PATH = Path(".phoenix") / "storage_state.json"
+_BASE_URL = os.environ.get("APP_URL", "{{ base_url }}")
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped authenticated context
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def auth_storage_state(browser: Browser) -> dict:
+    """Log in once per test session and return the browser storage state.
+
+    The state is persisted to .phoenix/storage_state.json so it survives
+    between runs when credentials haven't changed.
+    """
+    # Re-use cached state if it exists and is non-empty
+    if _STORAGE_STATE_PATH.exists():
+        try:
+            cached = json.loads(_STORAGE_STATE_PATH.read_text(encoding="utf-8"))
+            if cached:
+                return cached
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # First run or cache invalid — perform a real login
+    ctx = browser.new_context()
+    page = ctx.new_page()
+    try:
+        from pages.login_page import LoginPage
+        lp = LoginPage(page)
+        lp.navigate()
+        lp.login(os.environ["TEST_USERNAME"])
+    except ImportError:
+        # Fallback when pages/ are not yet generated
+        page.goto(f"{_BASE_URL}/login", timeout=60_000)
+        page.get_by_label("Username").fill(os.environ["TEST_USERNAME"])
+        page.get_by_label("Password").fill(os.environ["TEST_PASSWORD"])
+        page.get_by_role("button", name="Login").click()
+
+    state = ctx.storage_state()
+    _STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _STORAGE_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    ctx.close()
+    return state
+
+
+@pytest.fixture(scope="session")
+def authenticated_context(browser: Browser, auth_storage_state: dict) -> BrowserContext:
+    """Browser context pre-loaded with the authenticated storage state."""
+    ctx = browser.new_context(storage_state=auth_storage_state)
+    ctx.set_default_timeout(30_000)
+    ctx.set_default_navigation_timeout(60_000)
+    yield ctx
+    ctx.close()
 
 
 @pytest.fixture
-def logged_in_page(page: Page, base_url: str) -> Page:
-    """Navigate to the app and log in using env-var credentials."""
-    page.goto(f"{base_url}/login", timeout=60_000)
-    page.get_by_label("Username").fill(os.environ["TEST_USERNAME"])
-    page.get_by_label("Password").fill(os.environ["TEST_PASSWORD"])
-    page.get_by_role("button", name="Login").click()
-    # Wait for a reliable post-login indicator before returning
-    expect(page).not_to_have_url(f"{base_url}/login", timeout=30_000)
-    return page
+def authenticated_page(authenticated_context: BrowserContext) -> Page:
+    """A logged-in Page ready for use in any test that requires authentication.
+
+    Tests that need authentication request this fixture instead of `page`.
+    DO NOT add login steps to those tests — the session is already active.
+    """
+    p = authenticated_context.new_page()
+    yield p
+    p.close()

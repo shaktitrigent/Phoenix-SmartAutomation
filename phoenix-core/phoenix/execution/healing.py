@@ -160,6 +160,7 @@ class LocatorHealingStrategy(HealingStrategy):
 
         code = script_path.read_text(encoding="utf-8")
         changed = False
+        pending_heals = context.get("_pending_heals")
 
         for bundle in registry:
             if len(bundle.alternates) == 0:
@@ -174,6 +175,18 @@ class LocatorHealingStrategy(HealingStrategy):
             best_alt = alternates[0]
             code = code.replace(primary_expr, best_alt.value, 1)
             changed = True
+            # Record the swap so HealingEngine can commit it if the retry passes
+            if pending_heals is not None:
+                pending_heals.append({
+                    "page": bundle.page,
+                    "element_name": bundle.element_name,
+                    "old_value": primary_expr,
+                    "old_strategy": bundle.primary.strategy.value,
+                    "new_value": best_alt.value,
+                    "new_strategy": best_alt.strategy.value,
+                    "confidence": best_alt.confidence,
+                    "script": str(script_path),
+                })
 
         if changed:
             script_path.write_text(code, encoding="utf-8")
@@ -334,11 +347,17 @@ class HealingEngine:
         logger: Optional[ExecutionLogger] = None,
         max_attempts: int = MAX_ATTEMPTS,
         locator_registry: Any = None,
+        auto_heal_threshold: float = 0.85,
+        ask_threshold: float = 0.55,
+        interactive: Optional[bool] = None,
     ) -> None:
         self._logger = logger
         self._max_attempts = max_attempts
         self._classifier = ErrorClassifier()
         self._locator_registry = locator_registry
+        self._auto_heal_threshold = auto_heal_threshold
+        self._ask_threshold = ask_threshold
+        self._interactive = interactive
 
     def run(
         self,
@@ -387,6 +406,12 @@ class HealingEngine:
                 self._logger.record_attempt(record)
 
             if status == "passed":
+                # If this is a healed pass, commit any pending locator swaps to disk
+                if attempt_num > 1 and len(attempt_records) >= 2:
+                    prev_record = attempt_records[-2]
+                    prev_pending = getattr(prev_record, "_pending_heals", [])
+                    if prev_pending:
+                        self._commit_locator_heals(prev_pending)
                 return HealingResult(
                     test_path=test_path,
                     test_name=name,
@@ -400,12 +425,21 @@ class HealingEngine:
 
             # Apply healing strategy before next retry
             if attempt_num < self._max_attempts:
+                # For locator failures, run plain-English confirmation first
+                if last_error_class == ErrorClass.LOCATOR_NOT_FOUND:
+                    self._maybe_confirm_locator(error_msg, screenshot_path)
+                pending_heals: list = []
                 strategy = _STRATEGIES.get(last_error_class, _STRATEGIES[ErrorClass.UNKNOWN])
                 strategy.apply(
                     script,
                     error_msg,
                     locator_registry=self._locator_registry,
+                    _pending_heals=pending_heals,
                 )
+                # Store pending heals keyed by attempt so we can commit on success
+                if pending_heals:
+                    # Attach to the attempt record so the post-pass commit can find them
+                    record._pending_heals = pending_heals  # type: ignore[attr-defined]
 
         return HealingResult(
             test_path=test_path,
@@ -420,19 +454,195 @@ class HealingEngine:
 
     # ------------------------------------------------------------------
 
+    def _commit_locator_heals(self, pending_heals: list) -> None:
+        """Persist healed locators to the registry JSON and audit log.
+
+        Called when a test passes after a locator swap so the winning alternate
+        is promoted to primary — surviving the next ``phoenix automate``.
+
+        Only commits swaps whose new_confidence is at or above
+        ``self._auto_heal_threshold``; lower-confidence swaps are routed
+        through the interactive confirmation path instead.
+        """
+        if not pending_heals or self._locator_registry is None:
+            return
+
+        from phoenix.healing.audit import append_heal_record
+        from phoenix.locators.registry import LocatorRegistry
+
+        logs_dir = Path.cwd() / "logs"
+
+        for heal in pending_heals:
+            try:
+                page = heal.get("page", "global")
+                element_name = heal["element_name"]
+                new_value = heal["new_value"]
+                new_strategy = heal["new_strategy"]
+                confidence = float(heal.get("confidence", 0.0))
+                script = heal.get("script", "")
+
+                if confidence < self._auto_heal_threshold:
+                    # Low-confidence — mark for review, do not auto-commit
+                    append_heal_record(
+                        logs_dir=logs_dir,
+                        page=page,
+                        element_name=element_name,
+                        old_value=heal.get("old_value", ""),
+                        new_value=new_value,
+                        new_strategy=new_strategy,
+                        confidence=confidence,
+                        outcome="needs_review",
+                        script=script,
+                    )
+                    continue
+
+                # Promote new→primary, demote old→alternate
+                bundle = self._locator_registry.get(element_name)
+                if bundle is None:
+                    continue
+
+                from phoenix_shared.models.locator import Locator, LocatorStrategy
+                try:
+                    strategy_enum = LocatorStrategy(new_strategy)
+                except ValueError:
+                    from phoenix_shared.models.locator import LocatorStrategy as LS
+                    strategy_enum = LS.CSS
+
+                new_primary = Locator(
+                    element_name=element_name,
+                    strategy=strategy_enum,
+                    value=new_value,
+                    confidence=confidence,
+                    fallback=False,
+                )
+                old_as_alternate = bundle.primary.model_copy(update={"fallback": True})
+                new_alternates = [old_as_alternate] + [
+                    a for a in bundle.alternates if a.value != new_value
+                ]
+                from phoenix_shared.models.locator import LocatorBundle
+                healed_bundle = LocatorBundle(
+                    element_name=element_name,
+                    page=page,
+                    primary=new_primary,
+                    alternates=new_alternates,
+                    notes=bundle.notes,
+                )
+                self._locator_registry.upsert(healed_bundle)
+
+                # Save the single page file
+                locators_dir = Path.cwd() / "locators"
+                locators_dir.mkdir(parents=True, exist_ok=True)
+                page_path = locators_dir / f"{page}.json"
+                self._locator_registry.save(page_path, page=page)
+
+                append_heal_record(
+                    logs_dir=logs_dir,
+                    page=page,
+                    element_name=element_name,
+                    old_value=heal.get("old_value", ""),
+                    new_value=new_value,
+                    new_strategy=new_strategy,
+                    confidence=confidence,
+                    outcome="committed",
+                    script=script,
+                )
+            except Exception as exc:
+                import logging as _log
+                _log.getLogger(__name__).debug("Heal commit failed for %r: %s", heal, exc)
+
+    # ------------------------------------------------------------------
+
+    def _maybe_confirm_locator(
+        self, error_msg: str, screenshot_path: Optional[str]
+    ) -> None:
+        """Run plain-English heal confirmation when confidence is below auto_heal_threshold."""
+        if self._locator_registry is None:
+            return
+        try:
+            from phoenix.healing.confirm import maybe_confirm
+            import re as _re
+
+            # Try to extract element_id from the error message
+            m = _re.search(r"element[_\s]+id[:\s=]+['\"]?(\w+)['\"]?", error_msg, _re.IGNORECASE)
+            element_id = m.group(1) if m else None
+            if not element_id:
+                return
+
+            bundle = self._locator_registry.get(element_id)
+            if bundle is None:
+                return
+
+            # Build candidates from alternates
+            candidates = [
+                {
+                    "selector": loc.value,
+                    "strategy": loc.strategy.value,
+                    "label": loc.description or element_id,
+                    "confidence": loc.confidence,
+                }
+                for loc in bundle.ordered()
+                if loc.fallback
+            ]
+
+            if not candidates:
+                return
+
+            # Find locators file
+            locators_file: Optional[Path] = None
+            loc_dir = Path("locators")
+            if loc_dir.exists():
+                for f in loc_dir.glob("*.json"):
+                    try:
+                        import json as _json
+                        data = _json.loads(f.read_text(encoding="utf-8"))
+                        bundles = data if isinstance(data, list) else [data]
+                        if any(
+                            b.get("element_id", b.get("element_name")) == element_id
+                            for b in bundles
+                            if isinstance(b, dict)
+                        ):
+                            locators_file = f
+                            break
+                    except Exception:
+                        pass
+
+            maybe_confirm(
+                element_id=element_id,
+                candidates=candidates,
+                locators_file=locators_file,
+                screenshot=screenshot_path,
+                auto_heal_threshold=self._auto_heal_threshold,
+                ask_threshold=self._ask_threshold,
+                interactive=self._interactive,
+            )
+        except Exception:
+            pass  # confirmation is best-effort — never block the run
+
+    # Browsers that need --browser-channel instead of --browser
+    _CHANNEL_MAP = {
+        "chrome": ("chromium", "chrome"),
+        "msedge": ("chromium", "msedge"),
+        "edge":   ("chromium", "msedge"),
+    }
+
     def _run_pytest(
         self, test_path: str, browser: str = "chromium"
     ) -> Tuple[str, str, int, Optional[str]]:
+        _browser_lower = browser.lower()
+        _pw_browser, _channel = self._CHANNEL_MAP.get(_browser_lower, (_browser_lower, None))
+
         cmd = [
             "pytest",
             test_path,
             "-v",
             "--tb=short",
             "--no-header",
-            f"--browser={browser}",
+            f"--browser={_pw_browser}",
             "--screenshot=only-on-failure",
             "--output=test-results",
         ]
+        if _channel:
+            cmd.append(f"--browser-channel={_channel}")
         t_before = time.time()
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

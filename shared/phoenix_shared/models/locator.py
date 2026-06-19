@@ -19,6 +19,11 @@ class LocatorStrategy(str, Enum):
     TITLE = "title"
 
 
+import re as _re
+
+_ROLE_WITH_NAME_RE = _re.compile(r'^(\w[\w-]*)(?:\[name=(.+)\])?$')
+
+
 class Locator(BaseModel):
     """A single locator expression for a UI element."""
 
@@ -28,6 +33,11 @@ class Locator(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     fallback: bool = False
     description: Optional[str] = None
+    # Present when the locator was validated against a live DOM snapshot.
+    # True  → element was found exactly once in the snapshot.
+    # False → best-guess locator; may need healing on first run.
+    # None  → not checked (legacy entries or MCP not available).
+    verified_in_snapshot: Optional[bool] = None
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -35,15 +45,33 @@ class Locator(BaseModel):
         return max(0.0, min(1.0, float(v)))
 
     def to_playwright(self) -> str:
-        """Render this locator as a Playwright Python expression."""
+        """Render this locator as a Playwright Python expression.
+
+        Fixes vs. the original implementation:
+        • ROLE values may encode the accessible name as ``role[name=label]``
+          (the format emitted by the extractor).  We split these correctly:
+          ``button[name=Login]`` → ``page.get_by_role("button", name="Login")``.
+        • XPATH uses ``page.locator("xpath=...")`` instead of the CSS path
+          so Playwright routes it through its XPath engine, not the CSS engine.
+        """
+        if self.strategy == LocatorStrategy.ROLE:
+            m = _ROLE_WITH_NAME_RE.match(self.value)
+            if m and m.group(2):
+                role, name = m.group(1), m.group(2).strip('"\'')
+                return f'page.get_by_role("{role}", name="{name}")'
+            return f'page.get_by_role("{self.value}")'
+
+        if self.strategy == LocatorStrategy.XPATH:
+            # Ensure the xpath= prefix is present so Playwright uses XPath mode
+            value = self.value if self.value.startswith("xpath=") else f"xpath={self.value}"
+            return f'page.locator("{value}")'
+
         strategy_map = {
-            LocatorStrategy.ROLE: lambda: f'page.get_by_role("{self.value}")',
             LocatorStrategy.LABEL: lambda: f'page.get_by_label("{self.value}")',
             LocatorStrategy.PLACEHOLDER: lambda: f'page.get_by_placeholder("{self.value}")',
             LocatorStrategy.TEST_ID: lambda: f'page.get_by_test_id("{self.value}")',
             LocatorStrategy.TEXT: lambda: f'page.get_by_text("{self.value}")',
             LocatorStrategy.CSS: lambda: f'page.locator("{self.value}")',
-            LocatorStrategy.XPATH: lambda: f'page.locator("{self.value}")',
             LocatorStrategy.ALT_TEXT: lambda: f'page.get_by_alt_text("{self.value}")',
             LocatorStrategy.TITLE: lambda: f'page.get_by_title("{self.value}")',
         }

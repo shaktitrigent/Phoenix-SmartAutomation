@@ -69,11 +69,19 @@ class LocatorExpertAgent(BaseAgent):
         page_url: str,
         dom_snapshot: Optional[str],
     ) -> List[Dict[str, Any]]:
-        # Get live page snapshot via MCP if we don't already have one
+        # Get live page snapshot via MCP if we don't already have one.
+        # Phase D: best-effort — a failing MCP call must not abort locator discovery.
         snapshot = dom_snapshot or ""
         if not snapshot and self.mcp_client and page_url:
             logger.info("Fetching page snapshot via MCP: %s", page_url)
-            snapshot = self.mcp_client.inspect_page(page_url)
+            try:
+                snapshot = self.mcp_client.inspect_page(page_url) or ""
+            except Exception as _mcp_exc:
+                logger.warning(
+                    "MCP inspect_page failed for %s — continuing without snapshot: %s",
+                    page_url, _mcp_exc,
+                )
+                snapshot = ""
 
         system_prompt = _prompt_loader.get("locator_expert")
 

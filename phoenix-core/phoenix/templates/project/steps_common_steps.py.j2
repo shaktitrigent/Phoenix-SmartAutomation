@@ -1,0 +1,69 @@
+"""Shared Given / Then step definitions used across all features.
+
+RULES (enforced by code review):
+  - Step functions are THIN GLUE: one call to a page method, nothing else.
+  - No Playwright calls, no locators, no assertions live here.
+  - All logic belongs in the page class (pages/).
+"""
+
+from __future__ import annotations
+
+import os
+
+import pytest
+from playwright.sync_api import Page
+from pytest_bdd import given, then, when, parsers
+
+
+# ---------------------------------------------------------------------------
+# Background / navigation steps
+# ---------------------------------------------------------------------------
+
+@given("I am on the login page", target_fixture="login_page")
+def step_navigate_to_login(page: Page):
+    from pages.login_page import LoginPage
+    lp = LoginPage(page)
+    lp.navigate()
+    return lp
+
+
+@given("I am logged in", target_fixture="dashboard_page")
+def step_logged_in(page: Page):
+    from pages.login_page import LoginPage
+    from pages.dashboard_page import DashboardPage
+    lp = LoginPage(page)
+    lp.navigate()
+    lp.login(os.environ["TEST_USERNAME"], os.environ["TEST_PASSWORD"])
+    return DashboardPage(page)
+
+
+# ---------------------------------------------------------------------------
+# Common assertion steps
+# ---------------------------------------------------------------------------
+
+@then(parsers.parse("I should see the text {text!r}"))
+def step_see_text(page: Page, text: str):
+    from pages.base_page import BasePage
+    BasePage(page).assert_text(page.get_by_text(text), text)
+
+
+@then(parsers.parse("I should be on the {page_name} page"))
+def step_on_page(page: Page, page_name: str):
+    from pages.base_page import BasePage
+    BasePage(page).assert_url_contains(page_name.lower().replace(" ", "-"))
+
+
+@then("I should see a success message")
+def step_see_success(page: Page):
+    from pages.base_page import BasePage
+    BasePage(page).assert_visible(
+        page.locator(".success, .alert-success, [class*='success']")
+    )
+
+
+@then("I should see an error message")
+def step_see_error(page: Page):
+    from pages.base_page import BasePage
+    BasePage(page).assert_visible(
+        page.locator(".error, .alert-danger, [class*='error']")
+    )

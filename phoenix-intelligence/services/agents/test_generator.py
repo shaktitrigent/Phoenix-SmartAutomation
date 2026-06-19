@@ -1,16 +1,30 @@
 """Test generation agent - uses LLM + Knowledge Base + MCP for real code generation."""
 
+import ast
 import json
 import logging
 import re
 import textwrap
 from enum import Enum
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from services.agents.base import BaseAgent
 from services.llm.prompt_loader import PromptLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_substitute(template: str, **kwargs: str) -> str:
+    """Replace only the explicitly named ``{key}`` placeholders in *template*.
+
+    Unlike ``str.format()``, this never raises ``KeyError`` or ``ValueError``
+    for unknown placeholders — JSON literals, f-string examples, and other
+    ``{...}`` patterns in prompt markdown are left unchanged.
+    """
+    for key, value in kwargs.items():
+        template = template.replace("{" + key + "}", value)
+    return template
 
 
 def _strip_code_fences(text: str) -> str:
@@ -77,7 +91,7 @@ def _safe_py_str(value: str) -> str:
     """Escape a value so it is safe to embed inside a Python double-quoted string literal.
 
     Handles:
-    - Unicode smart/curly quotes (“ ” ‘ ’) → replaced with ASCII equivalents
+    - Unicode smart/curly quotes (" " ' ') → replaced with ASCII equivalents
     - Backslashes → escaped
     - ASCII double quotes → escaped
     """
@@ -222,7 +236,8 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
     if any(k in lower for k in ["navigate", "go to", "open", "visit"]):
         return ControlType.NAVIGATE
     if any(
-        k in lower for k in ["verify", "assert", "check that", "should", "confirm that", "ensure"]
+        k in lower
+        for k in ["verify", "assert", "check that", "should", "confirm that", "ensure"]
     ):
         return ControlType.ASSERTION
     if any(k in lower for k in ["wait for", "loading", "wait until"]):
@@ -990,6 +1005,250 @@ def _strip_automation_placeholders(code: str) -> str:
     return "".join(result)
 
 
+# ---------------------------------------------------------------------------
+# Phase C helpers — BDD bundle parsing + POM synthesis
+# ---------------------------------------------------------------------------
+
+def _parse_attr(attrs_str: str, attr_name: str, default: str = "") -> str:
+    """Extract a single XML attribute value from an attribute string."""
+    m = re.search(rf'{re.escape(attr_name)}=["\']([^"\']*)["\']', attrs_str)
+    return m.group(1) if m else default
+
+
+def _parse_bdd_bundle_output(raw: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
+    """Parse an ``<automation_bundle>`` XML response (from ``3.0_bdd.md`` prompt).
+
+    Returns ``(bdd_bundle, locators_raw, recommendations)``.
+
+    The ``bdd_bundle`` shape matches what ``commands.py`` consumes at the BDD
+    apply path (``commands.py:962-1035``):
+
+    .. code-block:: python
+
+        {
+            "features":     [{"action": ..., "file": ..., "content": ...}],
+            "steps":        [{"action": ..., "file": ..., "code": ...}],
+            "page_objects": [{"action": ..., "file": ..., "code": ..., "class_name": ...}],
+            "locators":     [{"action": ..., "file": ..., "entries": [...]}],
+            "keywords":     [{...}],
+            "test_data":    [],
+        }
+    """
+    bundle: Dict[str, Any] = {
+        "features": [],
+        "steps": [],
+        "page_objects": [],
+        "locators": [],
+        "keywords": [],
+        "test_data": [],
+    }
+    locators_raw: List[Dict[str, Any]] = []
+    recommendations: List[str] = []
+
+    # Extract the content of <automation_bundle>…</automation_bundle>
+    m = re.search(r"<automation_bundle>(.*?)</automation_bundle>", raw, re.DOTALL)
+    if not m:
+        # LLM sometimes truncates the closing tag
+        m = re.search(r"<automation_bundle>(.*)", raw, re.DOTALL)
+    if not m:
+        logger.warning("No <automation_bundle> block found in BDD LLM response")
+        return bundle, locators_raw, recommendations
+
+    content = m.group(1)
+
+    def _cdata(tag_body: str) -> str:
+        """Return CDATA content or stripped raw text."""
+        c = re.search(r"<!\[CDATA\[(.*?)\]\]>", tag_body, re.DOTALL)
+        return c.group(1).strip() if c else tag_body.strip()
+
+    # <feature action=... file=...>CDATA</feature>
+    for fm in re.finditer(r"<feature\s+([^>]*)>(.*?)</feature>", content, re.DOTALL):
+        attrs, body = fm.group(1), fm.group(2)
+        file_ = _parse_attr(attrs, "file")
+        if file_:
+            bundle["features"].append({
+                "action": _parse_attr(attrs, "action", "create"),
+                "file": file_,
+                "content": _cdata(body),
+            })
+
+    # <steps action=... file=...>CDATA</steps>
+    for sm in re.finditer(r"<steps\s+([^>]*)>(.*?)</steps>", content, re.DOTALL):
+        attrs, body = sm.group(1), sm.group(2)
+        file_ = _parse_attr(attrs, "file")
+        if file_:
+            bundle["steps"].append({
+                "action": _parse_attr(attrs, "action", "create"),
+                "file": file_,
+                "code": _cdata(body),
+            })
+
+    # <page_object action=... file=... class=...>CDATA</page_object>
+    for pm in re.finditer(r"<page_object\s+([^>]*)>(.*?)</page_object>", content, re.DOTALL):
+        attrs, body = pm.group(1), pm.group(2)
+        file_ = _parse_attr(attrs, "file")
+        if file_:
+            bundle["page_objects"].append({
+                "action": _parse_attr(attrs, "action", "create"),
+                "file": file_,
+                "code": _cdata(body),
+                "class_name": _parse_attr(attrs, "class"),
+            })
+
+    # <locators action=... file=...>CDATA-JSON</locators>
+    for lm in re.finditer(r"<locators\s+([^>]*)>(.*?)</locators>", content, re.DOTALL):
+        attrs, body = lm.group(1), lm.group(2)
+        file_ = _parse_attr(attrs, "file")
+        entries: List[Dict] = []
+        raw_json = _cdata(body)
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, list):
+                    entries = parsed
+                    locators_raw.extend(parsed)
+            except json.JSONDecodeError:
+                logger.debug("Could not parse <locators> JSON in BDD bundle")
+        if file_:
+            bundle["locators"].append({
+                "action": _parse_attr(attrs, "action", "create"),
+                "file": file_,
+                "entries": entries,
+            })
+
+    # <keywords action="register">CDATA-JSON</keywords>
+    for km in re.finditer(r"<keywords\s+[^>]*>(.*?)</keywords>", content, re.DOTALL):
+        raw_json = _cdata(km.group(1))
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+                if isinstance(parsed, list):
+                    bundle["keywords"].extend(parsed)
+            except json.JSONDecodeError:
+                logger.debug("Could not parse <keywords> JSON in BDD bundle")
+
+    return bundle, locators_raw, recommendations
+
+
+def _extract_test_body_lines(script_code: str) -> List[str]:
+    """Extract the body lines of the first ``test_*`` function in *script_code*.
+
+    Returns lines indented at 8 spaces (suitable for a class method body).
+    Skips the leading docstring of the function.
+    """
+    try:
+        tree = ast.parse(script_code)
+    except SyntaxError:
+        return []
+
+    source_lines = script_code.splitlines(keepends=True)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+            continue
+        body_nodes = node.body
+        # Skip leading docstring
+        if (
+            body_nodes
+            and isinstance(body_nodes[0], ast.Expr)
+            and isinstance(body_nodes[0].value, ast.Constant)
+            and isinstance(body_nodes[0].value.value, str)
+        ):
+            body_nodes = body_nodes[1:]
+        if not body_nodes:
+            return []
+
+        start = body_nodes[0].lineno - 1
+        end = node.end_lineno  # type: ignore[attr-defined]
+        raw_lines = source_lines[start:end]
+
+        # Re-indent from 4-space (test fn body) to 8-space (class method body)
+        result = []
+        for ln in raw_lines:
+            stripped_ln = ln.rstrip("\n").rstrip("\r")
+            if stripped_ln.startswith("    "):
+                result.append("        " + stripped_ln[4:])
+            else:
+                result.append(stripped_ln)
+        return result
+
+    return []
+
+
+def _synthesize_pom_bundle(script_code: str, module_name: str, test_name: str) -> Dict[str, Any]:
+    """Build a minimal ``pom_bundle`` from a flat Playwright script.
+
+    The entire flat-script body is wrapped in a single page-object method; a
+    thin test file navigates and calls that method.  This avoids any LLM call
+    and is robust even when the flat script is imperfect — the
+    validate→repair loop in ``AutomationTestGenerator`` still runs on the
+    synthesized test file.
+    """
+    # Derive class name: "login_checkout" → "LoginCheckoutPage"
+    page_class = "".join(w.capitalize() for w in re.split(r"[_\-]+", module_name)) + "Page"
+    page_file = f"pages/{module_name}_page.py"
+    test_file = f"tests/{module_name}/test_{test_name}.py"
+
+    # Extract and adapt the test body
+    body_lines = _extract_test_body_lines(script_code)
+    # Remove page.goto(...) lines — BasePage.navigate() handles navigation
+    body_lines = [ln for ln in body_lines if not re.match(r"\s*(?:self\._)?page\.goto\(", ln)]
+    # Replace `page.` → `self._page.` and standalone `page` args; skip comment lines
+    # so prose like "the login page. The user remains" is not mangled.
+    body_lines = [
+        ln if ln.lstrip().startswith("#") else re.sub(r"\bpage\b", "self._page",
+            re.sub(r"(?<!\.)page\.", "self._page.", ln))
+        for ln in body_lines
+    ]
+
+    if not body_lines:
+        body_lines = ["        pass  # no actions extracted from flat script"]
+
+    method_body = "\n".join(body_lines)
+
+    # ── Page object ────────────────────────────────────────────────────────
+    page_code = (
+        f'"""{"".join(w.capitalize() for w in re.split(r"[_-]+", module_name))}Page'
+        f" — synthesized by phoenix automate (pom mode).\"\"\"\n"
+        f"from __future__ import annotations\n\n"
+        f"import os\n"
+        f"import re\n"
+        f"from playwright.sync_api import expect\n"
+        f"from pages.base_page import BasePage\n\n\n"
+        f"class {page_class}(BasePage):\n"
+        f'    """Page object for {module_name} tests."""\n\n'
+        f'    URL_PATH = "/"\n\n'
+        f"    def {test_name}(self) -> None:\n"
+        f'        """{test_name.replace("_", " ")}."""\n'
+        f"{method_body}\n"
+    )
+
+    # ── Test file ──────────────────────────────────────────────────────────
+    test_code = (
+        f'"""Test: {test_name.replace("_", " ")}'
+        f" — generated by phoenix automate (pom mode).\"\"\"\n"
+        f"from __future__ import annotations\n\n"
+        f"import pytest\n"
+        f"from playwright.sync_api import Page\n"
+        f"from pages.{module_name}_page import {page_class}\n\n\n"
+        f"def test_{test_name}(page: Page) -> None:\n"
+        f'    """{test_name.replace("_", " ")}."""\n'
+        f"    _po = {page_class}(page)\n"
+        f"    _po.navigate()\n"
+        f"    _po.{test_name}()\n"
+    )
+
+    return {
+        "page_objects": [
+            {"action": "extend", "file": page_file, "code": page_code, "class_name": page_class}
+        ],
+        "locators": [],  # handled by persist_locators shared helper
+        "tests": [
+            {"action": "extend", "file": test_file, "code": test_code}
+        ],
+        "test_data": [],
+    }
+
+
 class TestGeneratorAgent(BaseAgent):
     """Agent specialised in generating test cases from user stories.
 
@@ -1248,14 +1507,7 @@ class TestGeneratorAgent(BaseAgent):
         risk_level: Optional[str] = None,
         manual_tests: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
-        """Generate one automation script for each manual test.
-
-        Each script is a direct translation of the manual test's numbered steps
-        into Playwright code.  This guarantees:
-          - Login is always step 1 (it's in the manual test)
-          - Steps are in the correct order
-          - 1 manual test → 1 automation script
-        """
+        """Generate one automation script for each manual test."""
         if not manual_tests:
             if not self.llm_client:
                 raise RuntimeError(
@@ -1270,13 +1522,19 @@ class TestGeneratorAgent(BaseAgent):
             )
 
         # Fetch the page snapshot once for all tests.
-        # InspectionFailedError is intentionally NOT caught here — a missing snapshot
-        # means we cannot ground locators, so generation must fail loudly.
+        # Phase D: best-effort grounding — never block generation on MCP failure.
         page_snapshot = ""
         if self.mcp_client and application_url:
             logger.info("Inspecting page via MCP: %s", application_url)
-            page_snapshot = self.mcp_client.inspect_page(application_url)
-            logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+            try:
+                page_snapshot = self.mcp_client.inspect_page(application_url) or ""
+                logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+            except Exception as _mcp_exc:
+                logger.warning(
+                    "MCP inspect_page failed for %s — continuing without snapshot: %s",
+                    application_url, _mcp_exc,
+                )
+                page_snapshot = ""
 
         results = []
         for manual_test in manual_tests:
@@ -1323,14 +1581,9 @@ class TestGeneratorAgent(BaseAgent):
         domain_knowledge: str = "",
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
         page_snapshot: str = "",
+        manifest: str = "",
     ) -> Dict[str, Any]:
-        """Translate a single manual test into a Playwright script via LLM or fallback.
-
-        Returns a dict with keys:
-            script_code      - normalised Python source string
-            locators         - list of locator entry dicts (from v2.0 structured output)
-            recommendations  - list of human-review notes (from v2.0 structured output)
-        """
+        """Translate a single manual test into a Playwright script via LLM or fallback."""
         if not self.llm_client:
             script = self._build_fallback_script_from_manual_test(
                 manual_test=manual_test,
@@ -1344,8 +1597,11 @@ class TestGeneratorAgent(BaseAgent):
 
         try:
             system_prompt_template = _prompt_loader.get("automation_from_manual")
-            system_prompt = system_prompt_template.format(
-                knowledge_context=knowledge_context or "(no additional context)"
+            system_prompt = _safe_substitute(
+                system_prompt_template,
+                knowledge_context=knowledge_context or "(no additional context)",
+                manifest=manifest or "(no manifest available)",
+                dom_snapshot=page_snapshot or "(no snapshot available)",
             )
 
             steps_text = self._format_manual_steps_for_prompt(manual_test)
@@ -1443,13 +1699,9 @@ class TestGeneratorAgent(BaseAgent):
         manual_test: Dict[str, Any],
         application_url: Optional[str],
     ) -> str:
-        """Build a Playwright script by translating manual steps heuristically.
-
-        Each step's action text is classified and mapped to Playwright code,
-        preserving the manual test's order (including login as step 1).
-        """
+        """Build a Playwright script by translating manual steps heuristically."""
         logger.warning(
-            "⚠  Using heuristic fallback for manual test '%s'. "
+            "Using heuristic fallback for manual test '%s'. "
             "Set ANTHROPIC_API_KEY for LLM-powered generation.",
             manual_test.get("name", ""),
         )
@@ -1458,22 +1710,18 @@ class TestGeneratorAgent(BaseAgent):
 
         body_lines: List[str] = []
 
-        # If steps exist, translate them in order
         if steps:
             for step in steps:
                 action = step.get("action", "")
                 step_num = step.get("step_number", 1)
                 expected = step.get("expected_result", "")
                 body_lines.append(f"    # --- Step {step_num}: {action} ---")
-                # Translate this step
                 playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
-                # Remove the header comment (already added above)
                 playwright_lines = [ln for ln in playwright_lines if not ln.startswith(f"    # Step {step_num}:")]
                 body_lines.extend(playwright_lines)
                 if expected:
                     body_lines.append(f"    # Expected: {expected}")
         else:
-            # No steps at all — bare navigate
             body_lines += [
                 "    # No manual steps provided — navigate to URL only",
                 f'    page.goto("{url}", timeout=60_000)',
@@ -1584,6 +1832,10 @@ class TestGeneratorAgent(BaseAgent):
         manual_tests: List[Dict[str, Any]],
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
+        manifest: str = "",
+        use_pom: bool = False,
+        use_bdd: bool = False,
+        keywords: str = "",
     ) -> Dict[str, Any]:
         """Generate one automation script for each supplied manual test.
 
@@ -1591,55 +1843,246 @@ class TestGeneratorAgent(BaseAgent):
         reviewed / edited the manual tests on disk and now wants scripts derived
         directly from those tests, with no LLM re-generation of the spec.
 
-        Args:
-            manual_tests:    Parsed manual test dicts (from manual_parser).
-            application_url: Optional URL for context in the automation prompt.
+        Branching (Phase C):
+        - ``use_bdd=True``: uses the ``3.0_bdd.md`` prompt and returns a
+          ``bdd_bundle`` that the CLI applies via ``OutputManager``.
+        - ``use_pom=True``: generates a flat script then synthesises a
+          ``pom_bundle`` (page object + thin test file) deterministically.
+        - Neither: flat script as before.
 
-        Returns:
-            dict with key ``automation_tests`` (list of automation test dicts).
+        MCP grounding is best-effort (Phase D): a failing MCP call logs a
+        warning and continues with an empty snapshot rather than aborting.
         """
         if not manual_tests:
             return {"automation_tests": []}
 
         knowledge_context = self.get_knowledge_context(query="playwright automation")
 
-        # InspectionFailedError propagates — no snapshot means no grounded locators.
+        # Phase D — best-effort grounding: never block on MCP failure
         page_snapshot = ""
         if self.mcp_client and application_url:
-            page_snapshot = self.mcp_client.inspect_page(application_url) or ""
+            try:
+                page_snapshot = self.mcp_client.inspect_page(application_url) or ""
+            except Exception as _mcp_exc:
+                logger.warning(
+                    "MCP inspect_page failed for %s — continuing without snapshot: %s",
+                    application_url, _mcp_exc,
+                )
+                page_snapshot = ""
 
         results = []
         for manual_test in manual_tests:
-            gen = self._generate_script_for_manual_test(
-                manual_test=manual_test,
-                application_url=application_url,
-                knowledge_context=knowledge_context,
-                domain_knowledge=domain_knowledge,
-                page_snapshot=page_snapshot,
-            )
-            script_code = gen["script_code"]
             test_name = self._derive_short_name(manual_test.get("name", "test"))
-            results.append(
-                {
-                    "name": test_name,
-                    "description": manual_test.get("description", ""),
-                    "manual_test_name": manual_test.get("name", ""),
-                    "source_file": manual_test.get("source_file", ""),
-                    "script_template": "playwright",
-                    "script_code": script_code,
-                    "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
-                    "locators": gen["locators"],
-                    "recommendations": gen["recommendations"],
-                    "application_url": application_url,
-                    "risk_level": manual_test.get("risk_level", "regression"),
-                    "generation_mode": "fallback" if not self.llm_client else "llm",
-                    "warnings": self._collect_script_warnings(script_code),
-                    "tags": ["automation", "generated", "manual-derived"],
-                }
-            )
-            logger.info("Automated manual test: %s", manual_test.get("name", ""))
+            source_file = manual_test.get("source_file", "")
+            # Derive a clean module name from source file:
+            # 1. Take the file stem and slugify it
+            # 2. Strip leading "manual_test_NNN_", "tc_NNN_" prefixes (file-naming artefacts)
+            # 3. Truncate to 30 chars on a word boundary so class/file names stay readable
+            if source_file:
+                _stem = re.sub(r"[^\w]", "_", Path(source_file).stem).strip("_").lower()
+                _stem = re.sub(r"^(?:manual_test_\d+_|tc_\d+_|test_\d+_)+", "", _stem).strip("_")
+                if len(_stem) > 30:
+                    _trunc = _stem[:30]
+                    _last_us = _trunc.rfind("_")
+                    _stem = (_trunc[:_last_us].strip("_") if _last_us > 5 else _trunc).strip("_")
+                module_name = _stem or test_name
+            else:
+                module_name = test_name
+
+            if use_bdd:
+                # ── Phase C: BDD bundle via 3.0_bdd.md prompt ────────────
+                gen = self._generate_bdd_bundle_for_manual_test(
+                    manual_test=manual_test,
+                    application_url=application_url,
+                    knowledge_context=knowledge_context,
+                    domain_knowledge=domain_knowledge,
+                    page_snapshot=page_snapshot,
+                    manifest=manifest,
+                    keywords=keywords,
+                )
+                results.append(
+                    {
+                        "name": test_name,
+                        "description": manual_test.get("description", ""),
+                        "manual_test_name": manual_test.get("name", ""),
+                        "source_file": source_file,
+                        "script_template": "bdd",
+                        "script_code": "",  # BDD produces a bundle, not a flat file
+                        "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
+                        "locators": gen.get("locators_raw", []),
+                        "recommendations": gen.get("recommendations", []),
+                        "application_url": application_url,
+                        "risk_level": manual_test.get("risk_level", "regression"),
+                        "generation_mode": "fallback" if not self.llm_client else "llm",
+                        "warnings": [],
+                        "tags": ["automation", "generated", "manual-derived", "bdd"],
+                        "bdd_bundle": gen.get("bdd_bundle", {}),
+                    }
+                )
+                logger.info("Generated BDD bundle for manual test: %s", manual_test.get("name", ""))
+
+            elif use_pom:
+                # ── Phase C: POM bundle (flat script + synthesized page object) ──
+                gen = self._generate_script_for_manual_test(
+                    manual_test=manual_test,
+                    application_url=application_url,
+                    knowledge_context=knowledge_context,
+                    domain_knowledge=domain_knowledge,
+                    page_snapshot=page_snapshot,
+                    manifest=manifest,
+                )
+                script_code = gen["script_code"]
+                pom_bundle = _synthesize_pom_bundle(script_code, module_name, test_name)
+                results.append(
+                    {
+                        "name": test_name,
+                        "description": manual_test.get("description", ""),
+                        "manual_test_name": manual_test.get("name", ""),
+                        "source_file": source_file,
+                        "script_template": "pom",
+                        "script_code": script_code,
+                        "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
+                        "locators": gen["locators"],
+                        "recommendations": gen["recommendations"],
+                        "application_url": application_url,
+                        "risk_level": manual_test.get("risk_level", "regression"),
+                        "generation_mode": "fallback" if not self.llm_client else "llm",
+                        "warnings": self._collect_script_warnings(script_code),
+                        "tags": ["automation", "generated", "manual-derived", "pom"],
+                        "pom_bundle": pom_bundle,
+                    }
+                )
+                logger.info("Generated POM bundle for manual test: %s", manual_test.get("name", ""))
+
+            else:
+                # ── Flat mode (unchanged) ─────────────────────────────────
+                gen = self._generate_script_for_manual_test(
+                    manual_test=manual_test,
+                    application_url=application_url,
+                    knowledge_context=knowledge_context,
+                    domain_knowledge=domain_knowledge,
+                    page_snapshot=page_snapshot,
+                    manifest=manifest,
+                )
+                script_code = gen["script_code"]
+                results.append(
+                    {
+                        "name": test_name,
+                        "description": manual_test.get("description", ""),
+                        "manual_test_name": manual_test.get("name", ""),
+                        "source_file": source_file,
+                        "script_template": "playwright",
+                        "script_code": script_code,
+                        "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
+                        "locators": gen["locators"],
+                        "recommendations": gen["recommendations"],
+                        "application_url": application_url,
+                        "risk_level": manual_test.get("risk_level", "regression"),
+                        "generation_mode": "fallback" if not self.llm_client else "llm",
+                        "warnings": self._collect_script_warnings(script_code),
+                        "tags": ["automation", "generated", "manual-derived"],
+                    }
+                )
+                logger.info("Automated manual test: %s", manual_test.get("name", ""))
 
         return {"automation_tests": results}
+
+    # ------------------------------------------------------------------
+    # Phase C — BDD generation
+    # ------------------------------------------------------------------
+
+    def _generate_bdd_bundle_for_manual_test(
+        self,
+        manual_test: Dict[str, Any],
+        application_url: Optional[str],
+        knowledge_context: str,
+        domain_knowledge: str = "",
+        page_snapshot: str = "",
+        manifest: str = "",
+        keywords: str = "",
+    ) -> Dict[str, Any]:
+        """Generate a BDD bundle for a single manual test using the ``3.0_bdd.md`` prompt.
+
+        Returns ``{"bdd_bundle": {...}, "locators_raw": [...], "recommendations": [...]}``.
+        On LLM failure returns an empty bundle so the CLI falls through to flat mode.
+        """
+        if not self.llm_client:
+            logger.warning(
+                "BDD generation skipped for '%s': no LLM client configured",
+                manual_test.get("name", ""),
+            )
+            return {"bdd_bundle": {}, "locators_raw": [], "recommendations": []}
+
+        try:
+            system_prompt_template = _prompt_loader.get("automation_from_manual", "3.0_bdd")
+            system_prompt = _safe_substitute(
+                system_prompt_template,
+                knowledge_context=knowledge_context or "(no additional context)",
+                manifest=manifest or "(no manifest available)",
+                keywords=keywords or "(no existing keywords)",
+                dom_snapshot=page_snapshot or "(no live snapshot available)",
+            )
+
+            steps_text = self._format_manual_steps_for_prompt(manual_test)
+
+            user_parts = [
+                "Translate the following manual test case into a BDD automation bundle.",
+                "Follow EVERY step in order. Emit <automation_bundle>…</automation_bundle>.",
+                "",
+                f"## Manual Test: {manual_test.get('name', 'Test Case')}",
+                "",
+                f"**Description:** {manual_test.get('description', '')}",
+                f"**Risk Level:** {manual_test.get('risk_level', 'regression')}",
+                f"**Preconditions:** {manual_test.get('preconditions', '')}",
+                "",
+                "## Steps (translate each one into Gherkin + page methods)",
+                "",
+                steps_text,
+                "",
+                f"**Overall Expected Result:** {manual_test.get('expected_result', '')}",
+                "",
+                f"## Application URL\n{application_url or 'N/A'}",
+            ]
+
+            if page_snapshot:
+                user_parts += [
+                    "",
+                    "## Live DOM Snapshot (ground every locator in this snapshot)",
+                    page_snapshot[:3000],
+                ]
+            else:
+                user_parts += [
+                    "",
+                    "## DOM Snapshot",
+                    "No live snapshot available. Use [name], [data-testid], or placeholder"
+                    " attributes. Set verified_in_snapshot=false for all locators.",
+                ]
+
+            if domain_knowledge and domain_knowledge.strip():
+                user_parts += [
+                    "",
+                    "## Domain Knowledge",
+                    domain_knowledge[:2000],
+                ]
+
+            user_prompt = "\n".join(user_parts)
+            logger.info("Generating BDD bundle via LLM for: %s", manual_test.get("name", ""))
+            raw = self.llm_client.generate(system_prompt, user_prompt)
+            bdd_bundle, locators_raw, recommendations = _parse_bdd_bundle_output(raw)
+            return {
+                "bdd_bundle": bdd_bundle,
+                "locators_raw": locators_raw,
+                "recommendations": recommendations,
+            }
+
+        except Exception as exc:
+            logger.warning(
+                "BDD bundle generation failed for '%s': %s — returning empty bundle",
+                manual_test.get("name", ""),
+                exc,
+                exc_info=True,
+            )
+            return {"bdd_bundle": {}, "locators_raw": [], "recommendations": []}
 
     # ------------------------------------------------------------------
     # Helpers

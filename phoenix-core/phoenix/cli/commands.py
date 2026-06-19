@@ -125,6 +125,57 @@ def _write_module_artifacts(
         _logging.getLogger(__name__).warning("TestDataEngine failed: %s", exc)
 
 
+def _write_bdd_feature(
+    story_file: Path,
+    manual_tests: list,
+    project_root: Path,
+    verbose: bool = False,
+) -> None:
+    """Write a plain-English Gherkin feature file from generated manual tests."""
+    features_dir = project_root / "features"
+    features_dir.mkdir(parents=True, exist_ok=True)
+
+    module = _module_from_file(story_file)
+    feature_path = features_dir / f"{module}.feature"
+
+    # Build Gherkin from manual test names and steps
+    lines = [f"Feature: {module.replace('_', ' ').title()}", ""]
+    for test in manual_tests:
+        name = test.get("name", "Test case")
+        lines += [f"  Scenario: {name}", ""]
+        steps = test.get("steps", [])
+        for i, step in enumerate(steps):
+            action = step.get("action", "") if isinstance(step, dict) else str(step)
+            if not action:
+                continue
+            keyword = "Given" if i == 0 else ("Then" if i == len(steps) - 1 else "When")
+            lines.append(f"    {keyword} {action}")
+        lines.append("")
+
+    content = "\n".join(lines)
+    if feature_path.exists():
+        # Append new scenarios only
+        existing = feature_path.read_text(encoding="utf-8")
+        for test in manual_tests:
+            scenario_title = f"Scenario: {test.get('name', '')}"
+            if scenario_title not in existing:
+                # Append just this scenario
+                extra_lines = ["", f"  {scenario_title}", ""]
+                for i, step in enumerate(test.get("steps", [])):
+                    action = step.get("action", "") if isinstance(step, dict) else str(step)
+                    if action:
+                        kw = "Given" if i == 0 else ("Then" if i == len(test.get("steps", [])) - 1 else "When")
+                        extra_lines.append(f"    {kw} {action}")
+                extra_lines.append("")
+                existing += "\n".join(extra_lines)
+        feature_path.write_text(existing, encoding="utf-8")
+    else:
+        feature_path.write_text(content, encoding="utf-8")
+
+    if verbose:
+        print_info(f"  Feature file: {feature_path.relative_to(project_root)}")
+
+
 def _print_intelligence_metadata_warnings(metadata: dict | None) -> None:
     if not metadata:
         return
@@ -199,12 +250,58 @@ def _clean_project_directory(manual_dir: Path, test_dir: Path, verbose: bool = F
     return True
 
 
+def _doctor_fix_filenames(ctx) -> None:
+    """Rename generated files to the canonical convention with whole-word slugs."""
+    from phoenix.utils.slugify import slugify as _slug
+    import re as _re
+
+    cwd = Path.cwd()
+    renamed = 0
+
+    # test_NNN_*.py and manual_test_NNN_*.md patterns
+    patterns = [
+        ("tests", _re.compile(r"^test_(\d{3})_(.+)\.py$"), "test", ".py"),
+        ("manual_tests", _re.compile(r"^manual_test_(\d{3})_(.+)\.md$"), "manual_test", ".md"),
+    ]
+
+    for dir_name, pat, prefix, ext in patterns:
+        d = cwd / dir_name
+        if not d.exists():
+            continue
+        for f in sorted(d.rglob(f"*{ext}")):
+            m = pat.match(f.name)
+            if not m:
+                continue
+            idx, old_slug = m.group(1), m.group(2)
+            # Reconstruct title from existing slug (underscores → spaces)
+            title = old_slug.replace("_", " ")
+            canonical_slug = _slug(title, max_len=80)
+            canonical_name = f"{prefix}_{idx}_{canonical_slug}{ext}"
+            if canonical_name != f.name:
+                new_path = f.parent / canonical_name
+                if not new_path.exists():
+                    f.rename(new_path)
+                    print_info(f"  Renamed: {f.name}  →  {canonical_name}")
+                    renamed += 1
+                else:
+                    print_warning(f"  Skipped (target exists): {canonical_name}")
+
+    if renamed:
+        print_success(f"Fixed {renamed} filename(s).")
+    else:
+        print_info("No filename fixes needed — all names already follow the convention.")
+
+
 @click.command()
+@click.option("--fix", is_flag=True, default=False, help="Repair truncated/inconsistent generated filenames")
 @click.pass_context
-def doctor(ctx):
+def doctor(ctx, fix):
     """Check Phoenix configuration and connectivity (API keys, intelligence server, DB)."""
+    if fix:
+        _doctor_fix_filenames(ctx)
+        return
     config_path = ctx.obj.get("config_path")
-    config = PhoenixConfig.load(config_path) if config_path else PhoenixConfig.from_env()
+    config = PhoenixConfig.load(config_path)
 
     all_ok = True
 
@@ -281,6 +378,30 @@ def doctor(ctx):
     else:
         print_success("pytest plugins: pytest-json-report, pytest-html — installed")
 
+    # 5. Browser installation check
+    _BROWSERS = {
+        "chromium": None,
+        "firefox":  None,
+        "webkit":   None,
+        "chrome":   "chrome",
+        "msedge":   "msedge",
+    }
+    import subprocess as _sp
+    for _bname, _channel in _BROWSERS.items():
+        try:
+            _args = ["playwright", "install", "--dry-run"]
+            _args += (["--channel", _channel] if _channel else [])
+            _args.append(_bname if not _channel else "chromium")
+            _r = _sp.run(_args, capture_output=True, text=True, timeout=10)
+            # Playwright prints "browser is already installed" or an error
+            if "already" in _r.stdout.lower() or _r.returncode == 0:
+                print_success(f"Browser {_bname}: installed")
+            else:
+                _install_cmd = f"playwright install {_channel or _bname}"
+                print_warning(f"Browser {_bname}: not found → run: {_install_cmd}")
+        except Exception:
+            pass  # playwright CLI not available — skip
+
     click.echo("")
     if all_ok:
         print_success("Phoenix doctor: all checks passed.")
@@ -314,20 +435,27 @@ def doctor(ctx):
     type=click.Path(),
     help="Target directory (default: current directory)",
 )
+@click.option(
+    "--bdd",
+    "use_bdd",
+    is_flag=True,
+    default=False,
+    help="Scaffold a keyword-driven BDD layer (features/ + steps/ + keyword catalog)",
+)
 @click.pass_context
-def init(ctx, name, project_name, base_url, browser, force, dry_run, non_interactive, target_dir):
+def init(ctx, name, project_name, base_url, browser, force, dry_run, non_interactive, target_dir, use_bdd):
     """Initialise a new Phoenix project with canonical layout.
 
     NAME  Optional project name. Falls back to --project-name or directory name.
     """
     config_path = ctx.obj.get("config_path")
-    config = PhoenixConfig.load(config_path) if config_path else PhoenixConfig.from_env()
+    config = PhoenixConfig.load(config_path)
 
     # Resolve project name
     resolved_name = name or project_name or Path(target_dir).resolve().name or "default"
 
     # Resolve base_url
-    resolved_url = base_url or config.project.application_url or ""
+    resolved_url = base_url or config.project.resolved_base_url or ""
 
     # Interactive prompts (unless --non-interactive)
     if not non_interactive and not dry_run:
@@ -350,7 +478,10 @@ def init(ctx, name, project_name, base_url, browser, force, dry_run, non_interac
         browser=browser,
         force=force,
         dry_run=dry_run,
+        bdd=use_bdd,
     )
+    if use_bdd:
+        print_info("BDD layer enabled — features/ and steps/ scaffolded.")
 
     if not result.ok:
         for err in result.errors:
@@ -489,7 +620,7 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
 
     # Use default application URL from config if not provided
     if not url:
-        url = client.config.project.application_url
+        url = client.config.project.resolved_base_url
 
     # ---------------------------------------------------------------------------
     # Jira source: fetch story + criteria + attachments from a Jira issue
@@ -609,6 +740,19 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
         for result in results:
             _print_intelligence_metadata_warnings(result.get("metadata"))
         print_generate_results(all_manual, all_automation, verbose=verbose)
+
+        # BDD mode: also write a feature file from the manual tests
+        _gen_project_root_local = Path(config_path).parent if config_path else Path.cwd()
+        if getattr(client.config.project, "bdd", False) and all_manual and story_file:
+            try:
+                _write_bdd_feature(
+                    story_file=Path(story_file),
+                    manual_tests=all_manual,
+                    project_root=_gen_project_root_local,
+                    verbose=verbose,
+                )
+            except Exception as _exc:
+                print_warning(f"Feature file generation skipped: {_exc}")
         if total_locators:
             locators_dir = Path(client.config.project.test_output_dir).parent / "locators"
             print_info(
@@ -701,7 +845,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
 
     config_path = ctx.obj.get("config_path")
     verbose = ctx.obj.get("verbose", False)
-    config = PhoenixConfig.load(config_path) if config_path else PhoenixConfig.from_env()
+    config = PhoenixConfig.load(config_path)
 
     # Load from a single file or the whole directory
     if manual_file:
@@ -749,7 +893,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         print_success("Clean completed.")
 
     # Use application URL from flag or config
-    application_url = url or config.project.application_url
+    application_url = url or config.project.resolved_base_url
 
     # Load project-specific domain knowledge
     project_root = Path(config_path).parent if config_path else Path.cwd()
@@ -757,15 +901,49 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     if domain_knowledge:
         print_info("Domain knowledge loaded from domain_knowledge/")
 
+    # Detect layout and mode
+    _use_pom = getattr(config.project, "layout", "flat") == "pom-v1"
+    _use_bdd = _use_pom and getattr(config.project, "bdd", False)
+    _manifest_context = ""
+    _keywords_context = ""
+
+    if _use_pom:
+        try:
+            from phoenix.intelligence.manifest import ProjectIndexer
+            indexer = ProjectIndexer(project_root)
+            manifest_obj = indexer.build()
+            manifest_path = indexer.save(manifest_obj)
+            _manifest_context = manifest_obj.to_prompt_context()
+            print_info(f"Manifest built → {manifest_path.relative_to(project_root)}")
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Manifest build failed (non-fatal): %s", _exc)
+
+    if _use_bdd:
+        try:
+            from phoenix.intelligence.keyword_catalog import KeywordCatalog
+            _catalog_path = project_root / ".phoenix" / "keywords.json"
+            _catalog = KeywordCatalog(_catalog_path)
+            _keywords_context = _catalog.to_prompt_summary()
+            print_info(f"Keyword catalog loaded — {len(_catalog)} keyword(s) available")
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Keyword catalog load failed (non-fatal): %s", _exc)
+
     # Call intelligence server
     intel_client = IntelligenceClient(config)
     try:
         click.echo("")
-        print_info("Calling intelligence server to generate automation scripts…")
+        _mode_label = "BDD" if _use_bdd else ("POM" if _use_pom else "flat")
+        print_info(f"Calling intelligence server to generate automation scripts [{_mode_label} mode]…")
         result = intel_client.automate_from_manual(
             manual_tests=manual_tests,
             application_url=application_url,
             domain_knowledge=domain_knowledge,
+            manifest=_manifest_context,
+            use_pom=_use_pom,
+            use_bdd=_use_bdd,
+            keywords=_keywords_context,
         )
     except Exception as exc:
         print_error(f"Intelligence server error: {exc}")
@@ -780,9 +958,140 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         for warning in test.get("warnings", []):
             print_warning(f"{test.get('name', 'automation_test')}: {warning}")
 
-    # Write scripts — individual files for legacy runner + consolidated via ModuleAwareWriter
+    # BDD mode: apply BDD delta bundles and register keywords
+    if _use_bdd:
+        try:
+            from phoenix.output.coordinator import OutputManager
+            from phoenix.intelligence.keyword_catalog import KeywordCatalog, Keyword
+            manager = OutputManager(project_root)
+            bdd_written: List[str] = []
+            keywords_reused = 0
+            keywords_added = 0
+            _catalog_path = project_root / ".phoenix" / "keywords.json"
+            _catalog = KeywordCatalog(_catalog_path)
+
+            for test in automation_tests:
+                bundle = test.get("bdd_bundle")
+                if not bundle:
+                    continue
+                # Apply file delta (features, steps, page objects, locators)
+                bdd_bundle_for_output = {
+                    "page_objects": bundle.get("page_objects", []),
+                    "locators": bundle.get("locators", []),
+                    "tests": [
+                        {"action": s["action"], "file": s["file"], "code": s["code"]}
+                        for s in bundle.get("steps", [])
+                    ],
+                    "test_data": bundle.get("test_data", []),
+                }
+                # Write feature files
+                for feat in bundle.get("features", []):
+                    feat_path = project_root / feat["file"]
+                    feat_path.parent.mkdir(parents=True, exist_ok=True)
+                    if feat["action"] == "create" or not feat_path.exists():
+                        feat_path.write_text(feat["content"], encoding="utf-8")
+                        bdd_written.append(str(feat_path))
+                    elif feat["action"] == "extend" and feat_path.exists():
+                        existing = feat_path.read_text(encoding="utf-8")
+                        for line in feat["content"].splitlines():
+                            if line.strip().startswith("Scenario:") and line not in existing:
+                                existing += f"\n{line}\n"
+                        feat_path.write_text(existing, encoding="utf-8")
+                        bdd_written.append(str(feat_path))
+
+                files = manager.apply(bdd_bundle_for_output)
+                bdd_written.extend(files)
+
+                # Register new keywords; count reused
+                for kw_data in bundle.get("keywords", []):
+                    kw_id = kw_data.get("id", "")
+                    if not kw_id:
+                        continue
+                    match = _catalog.find_match(kw_data.get("canonical", ""))
+                    if match:
+                        keywords_reused += 1
+                        if kw_data.get("canonical", "") not in [match.canonical] + match.aliases:
+                            _catalog.add_alias(match.id, kw_data["canonical"])
+                    else:
+                        try:
+                            _catalog.add(Keyword.from_dict(kw_data))
+                            keywords_added += 1
+                        except Exception:
+                            pass
+
+            if bdd_written:
+                click.echo("")
+                print_success(
+                    f"BDD delta applied — {len(set(bdd_written))} file(s) written/updated. "
+                    f"Reused {keywords_reused} keywords, added {keywords_added} new."
+                )
+                for f in sorted(set(bdd_written)):
+                    try:
+                        rel = Path(f).relative_to(project_root)
+                    except ValueError:
+                        rel = Path(f)
+                    print_info(f"  {rel}")
+                print_info("Next: phoenix run")
+                return
+        except Exception as _exc:
+            print_warning(f"BDD delta apply failed, falling back to flat output: {_exc}")
+
+    # POM mode: apply delta bundles via OutputManager (pom-v1 projects)
+    if _use_pom:
+        try:
+            from phoenix.output.coordinator import OutputManager
+            manager = OutputManager(project_root)
+            pom_written: List[str] = []
+            for test in automation_tests:
+                bundle = test.get("pom_bundle")
+                if bundle:
+                    files = manager.apply(bundle)
+                    pom_written.extend(files)
+            if pom_written:
+                click.echo("")
+                print_success(f"POM delta applied — {len(pom_written)} file(s) written/updated:")
+                for f in pom_written:
+                    try:
+                        rel = Path(f).relative_to(project_root)
+                    except ValueError:
+                        rel = Path(f)
+                    print_info(f"  {rel}")
+
+                # Persist locators from PAGE OBJECT files (test files are thin wrappers —
+                # all real Playwright locator calls are in the page object class body)
+                locators_dir = Path(config.project.test_output_dir).parent / "locators"
+                from phoenix.locators.persist import persist_locators
+                pom_scripts = []
+                for test in automation_tests:
+                    bundle = test.get("pom_bundle") or {}
+                    for node in bundle.get("page_objects", []):
+                        fp = str(project_root / node["file"])
+                        # Page name: pages/login_page.py → login
+                        page_name = Path(node["file"]).stem.removesuffix("_page") or "global"
+                        pom_scripts.append({
+                            "script_path": fp,
+                            "page": page_name,
+                            "locators": test.get("locators", []),
+                        })
+                total_locators = persist_locators(pom_scripts, locators_dir)
+                if total_locators:
+                    print_info(
+                        f"Locators: {total_locators} bundle(s) saved to {locators_dir}/ "
+                        "— run 'phoenix locators' to inspect."
+                    )
+                print_info("Next: phoenix run")
+                return
+        except Exception as _exc:
+            print_warning(f"POM delta apply failed, falling back to flat output: {_exc}")
+
+    # Flat mode: write scripts via AutomationTestGenerator
     from phoenix.exceptions import QualityGateFailedError
-    auto_gen = AutomationTestGenerator(output_dir=config.project.test_output_dir)
+    auto_gen = AutomationTestGenerator(
+        output_dir=config.project.test_output_dir,
+        intel_client=intel_client,
+        repair_attempts=config.intelligence.repair_attempts,
+        collect_only_gate=config.intelligence.collect_only_gate,
+    )
     try:
         written = auto_gen.generate(
             automation_tests=automation_tests,
@@ -800,26 +1109,17 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         )
         raise click.Abort() from exc
 
-    # Extract and save locators
+    # Extract and save locators (shared helper: LLM + regex, ranked, page-wise)
     locators_dir = Path(config.project.test_output_dir).parent / "locators"
-    locators_dir.mkdir(parents=True, exist_ok=True)
-    registry = LocatorRegistry()
-    total_locators = 0
-    for test in written:
-        script_path = test.get("script_path")
-        if not script_path or not Path(script_path).exists():
-            continue
-        try:
-            code = Path(script_path).read_text(encoding="utf-8")
-            page = page_name_from_script_path(script_path)
-            bundles = extract_locators_from_script(code, page_name=page)
-            for b in bundles:
-                registry.upsert(b)
-            total_locators += len(bundles)
-        except Exception:
-            pass
-    if total_locators:
-        registry.save_all(locators_dir)
+    from phoenix.locators.persist import persist_locators
+    # Enrich the written list: carry LLM locators[] and use the module-derived
+    # page name (e.g. "login") so files are saved as locators/login.json rather
+    # than locators/001_login_valid_credentials.json  (B6).
+    module_page = _module_from_file(manual_path)
+    for w, t in zip(written, automation_tests):
+        w.setdefault("locators", t.get("locators", []))
+        w.setdefault("page", module_page)
+    total_locators = persist_locators(written, locators_dir)
 
     # Module-aware consolidated output (groups by module derived from manual file path)
     project_root = Path(config_path).parent if config_path else Path.cwd()
@@ -964,6 +1264,7 @@ def execute(ctx, project, test_ids, browser):
 
 
 @click.command()
+@click.argument("test_path", default="", required=False, metavar="[TEST_PATH]")
 @click.option("--project", "-p", help="Project name (uses default if not specified)")
 @click.option(
     "--test-ids",
@@ -972,11 +1273,50 @@ def execute(ctx, project, test_ids, browser):
     help="Specific test IDs to execute (can be specified multiple times)",
 )
 @click.option(
+    "--file", "-f", "run_file",
+    default=None,
+    type=click.Path(),
+    help="Run only this test file (e.g. tests/login/test_login.py)",
+)
+@click.option(
+    "--test",
+    "run_test",
+    default=None,
+    help="Run tests whose name contains this substring (maps to pytest -k)",
+)
+@click.option(
+    "-k",
+    "run_keyword",
+    default=None,
+    help="pytest -k expression (substring match across collected test IDs)",
+)
+@click.option(
+    "-m",
+    "run_marker",
+    default=None,
+    help="Run only tests with this pytest marker (e.g. smoke, regression)",
+)
+@click.option(
+    "--scenario",
+    "run_scenario",
+    default=None,
+    help="(BDD) Run the scenario whose title contains this text",
+)
+@click.option(
+    "--feature",
+    "run_feature",
+    default=None,
+    type=click.Path(),
+    help="(BDD) Run all scenarios in this .feature file",
+)
+@click.option(
     "--browser",
     "-b",
-    type=click.Choice(["chromium", "firefox", "webkit"], case_sensitive=False),
     default="chromium",
-    help="Browser to use for UI tests",
+    help=(
+        "Browser: chromium (default), firefox, webkit, chrome, msedge. "
+        "Use 'all' to run sequentially on chromium + firefox + webkit."
+    ),
 )
 @click.option(
     "--heal",
@@ -1020,9 +1360,31 @@ def execute(ctx, project, test_ids, browser):
     type=int,
     help="Slow down each Playwright action by N milliseconds (headed debug mode)",
 )
+@click.option(
+    "--viewport",
+    "viewport",
+    default=None,
+    help="Override viewport size for this run — format: WIDTHxHEIGHT (e.g. 1366x768)",
+)
 @click.pass_context
-def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_dir, failed_only, headed, slow_mo):
+def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_marker,
+        run_scenario, run_feature, browser, heal, max_attempts, logs_dir, locators_dir,
+        failed_only, headed, slow_mo, viewport):
     """Run tests with self-healing retries and execution logging.
+
+    Examples:
+
+    \b
+      phoenix run                                   # whole suite
+      phoenix run tests/login/test_login.py         # single file (positional)
+      phoenix run --file tests/login/test_login.py  # same, explicit flag
+      phoenix run -k "duplicate_group"              # -k substring
+      phoenix run --test test_007_duplicate          # test name substring
+      phoenix run -m smoke                          # marker
+      phoenix run --scenario "Successful login"     # BDD scenario title
+      phoenix run --feature features/login.feature  # BDD feature file
+      phoenix run --browser chrome                  # real Chrome
+      phoenix run --browser all                     # chromium + firefox + webkit
 
     Failures are classified by error type and healed automatically before
     each retry.  Every attempt is logged to logs/<run_id>.jsonl for
@@ -1038,11 +1400,52 @@ def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_
     if project:
         client.set_project(project)
 
+    # Build extra pytest args from targeting flags
+    extra_pytest_args: List[str] = []
+
+    # --file / positional path
+    _resolved_file = run_file or (test_path if test_path else None)
+    if _resolved_file:
+        fp = Path(_resolved_file)
+        if not fp.exists():
+            test_dir = Path(client.config.project.test_output_dir)
+            available = sorted(test_dir.rglob("test_*.py"))
+            print_error(f"File not found: {_resolved_file}")
+            if available:
+                print_info("Available test files:")
+                for f in available:
+                    print_info(f"  {f}")
+            raise click.Abort()
+
+    # --feature (BDD): run a .feature file
+    if run_feature:
+        fp2 = Path(run_feature)
+        if not fp2.exists():
+            print_error(f"Feature file not found: {run_feature}")
+            raise click.Abort()
+        _resolved_file = str(fp2)
+
+    # -k / --test / --scenario → pytest -k expression
+    _k_parts = []
+    if run_keyword:
+        _k_parts.append(run_keyword)
+    if run_test:
+        _k_parts.append(run_test)
+    if run_scenario:
+        _k_parts.append(run_scenario)
+    if _k_parts:
+        extra_pytest_args += ["-k", " and ".join(_k_parts)]
+
+    # -m marker
+    if run_marker:
+        extra_pytest_args += ["-m", run_marker]
+
     # Resolve test paths
     test_paths: List[str] = []
-    if test_ids:
+    if _resolved_file:
+        test_paths = [str(_resolved_file)]
+    elif test_ids:
         from phoenix.storage.models import TestCase as _TC, TestType as _TT
-
         with client._database.get_session() as session:
             tcs = session.query(_TC).filter(
                 _TC.id.in_([int(tid) for tid in test_ids]),
@@ -1094,37 +1497,62 @@ def run(ctx, project, test_ids, browser, heal, max_attempts, logs_dir, locators_
         _os.environ["PWSLOWMO"] = str(slow_mo)
         print_info(f"Slow-mo: {slow_mo}ms per action.")
 
+    # Validate and propagate viewport
+    if viewport:
+        import re as _re
+        if not _re.match(r"^\d+x\d+$", viewport):
+            print_error(f"Invalid viewport format '{viewport}' — use WIDTHxHEIGHT e.g. 1920x1080")
+            raise click.Abort()
+        w, h = viewport.split("x")
+        _os.environ["PW_VIEWPORT_W"] = w
+        _os.environ["PW_VIEWPORT_H"] = h
+    _vp_w = _os.environ.get("PW_VIEWPORT_W", "1920")
+    _vp_h = _os.environ.get("PW_VIEWPORT_H", "1080")
+    print_info(f"Viewport: {_vp_w}x{_vp_h}")
+
+    # Resolve browsers for --browser all
+    _browser_lower = browser.lower()
+    if _browser_lower == "all":
+        _browsers_to_run = ["chromium", "firefox", "webkit"]
+    else:
+        _browsers_to_run = [_browser_lower]
+
     print_header(
         f"Running {len(test_paths)} test(s) — "
         f"healing={'on' if heal else 'off'}, max_attempts={max_attempts}"
+        + (f", browsers={','.join(_browsers_to_run)}" if len(_browsers_to_run) > 1 else f", browser={_browsers_to_run[0]}")
+        + (f", k={extra_pytest_args[extra_pytest_args.index('-k')+1]}" if "-k" in extra_pytest_args else "")
+        + (f", m={extra_pytest_args[extra_pytest_args.index('-m')+1]}" if "-m" in extra_pytest_args else "")
     )
 
     import time as _time
 
-    total = len(test_paths)
+    total = len(test_paths) * len(_browsers_to_run)
     passed = failed = healed = 0
     start_all = _time.monotonic()
 
-    for test_path in test_paths:
-        result = engine.run(
-            test_path=test_path,
-            run_id=run_id,
-            browser=browser,
-        )
-        if result.final_status == "passed":
-            passed += 1
-            sym = "✓"
-        else:
-            failed += 1
-            sym = "✗"
-        if result.healed:
-            healed += 1
-
-        msg = f"  {sym} {Path(test_path).name}  ({result.attempts} attempt(s)"
-        if result.healed:
-            msg += f", healed via {result.error_class}"
-        msg += f")  {result.duration_seconds:.1f}s"
-        click.echo(msg)
+    for _cur_browser in _browsers_to_run:
+        if len(_browsers_to_run) > 1:
+            click.echo(f"\n  === {_cur_browser.upper()} ===")
+        for _tp in test_paths:
+            result = engine.run(
+                test_path=_tp,
+                run_id=run_id,
+                browser=_cur_browser,
+            )
+            if result.final_status == "passed":
+                passed += 1
+                sym = "✓"
+            else:
+                failed += 1
+                sym = "✗"
+            if result.healed:
+                healed += 1
+            msg = f"  {sym} {Path(_tp).name}  ({result.attempts} attempt(s)"
+            if result.healed:
+                msg += f", healed via {result.error_class}"
+            msg += f")  {result.duration_seconds:.1f}s"
+            click.echo(msg)
 
     duration = _time.monotonic() - start_all
     run_record = exec_logger.finish_run(
@@ -1220,11 +1648,17 @@ def locators(ctx, locators_dir, page, output):
     type=click.Path(),
     help="Directory containing automation scripts (default: tests/)",
 )
+@click.option(
+    "--locators-dir",
+    default="locators",
+    type=click.Path(),
+    help="Directory containing locator JSON files (default: locators/)",
+)
 @click.option("--run-id", "-r", default=None, help="Fix failures from a specific run (default: most recent)")
 @click.option("--dry-run", is_flag=True, help="Show what would be fixed without writing files")
 @click.option("--url", "-u", default=None, help="Application URL (for context in fix prompt)")
 @click.pass_context
-def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
+def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
     """Fix failing automation scripts using the error output from the last run.
 
     Reads failure logs, sends each broken script + its exact error to the
@@ -1238,7 +1672,7 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
 
     config_path = ctx.obj.get("config_path")
     verbose = ctx.obj.get("verbose", False)
-    config = PhoenixConfig.load(config_path) if config_path else PhoenixConfig.from_env()
+    config = PhoenixConfig.load(config_path)
     intel_base = config.intelligence.base_url.rstrip("/")
     if intel_base.endswith("/api/v1"):
         intel_base = intel_base[: -len("/api/v1")]
@@ -1310,7 +1744,61 @@ def fix(ctx, logs_dir, test_dir, run_id, dry_run, url):
             click.echo(f"    Error: {error_message[:120]}")
 
         if dry_run:
+            # For dry-run: report whether a registry fix is available
+            if error_type in ("locator_not_found", "unknown"):
+                _loc_dir = Path(locators_dir)
+                if _loc_dir.exists():
+                    try:
+                        from phoenix.locators.registry import LocatorRegistry
+                        from phoenix.execution.healing import LocatorHealingStrategy
+                        _reg = LocatorRegistry.load_all(_loc_dir)
+                        if len(_reg) > 0:
+                            click.echo("    [dry-run] Registry alternate available — would skip LLM call")
+                    except Exception:
+                        pass
             fixed += 1
+            continue
+
+        # ── Try registry-first locator swap before calling the LLM ───────────
+        registry_fixed = False
+        if error_type in ("locator_not_found", "unknown"):
+            _loc_dir = Path(locators_dir)
+            if _loc_dir.exists():
+                try:
+                    from phoenix.locators.registry import LocatorRegistry
+                    from phoenix.execution.healing import LocatorHealingStrategy
+                    from phoenix.healing.audit import append_heal_record
+                    _reg = LocatorRegistry.load_all(_loc_dir)
+                    if len(_reg) > 0:
+                        _pending: list = []
+                        _healer = LocatorHealingStrategy()
+                        _swapped = _healer.apply(
+                            script_path,
+                            error_message,
+                            locator_registry=_reg,
+                            _pending_heals=_pending,
+                        )
+                        if _swapped and _pending:
+                            click.echo(f"    Fixed via registry alternate (no LLM call)")
+                            for h in _pending:
+                                append_heal_record(
+                                    logs_dir=Path(logs_dir),
+                                    page=h.get("page", "global"),
+                                    element_name=h["element_name"],
+                                    old_value=h.get("old_value", ""),
+                                    new_value=h["new_value"],
+                                    new_strategy=h["new_strategy"],
+                                    confidence=h.get("confidence", 0.0),
+                                    outcome="registry_fix",
+                                    script=str(script_path),
+                                )
+                            registry_fixed = True
+                            fixed += 1
+                except Exception as _reg_exc:
+                    if verbose:
+                        click.echo(f"    Registry fix attempt failed: {_reg_exc}")
+
+        if registry_fixed:
             continue
 
         # Call intelligence server
@@ -1549,6 +2037,9 @@ def clean(ctx, dry_run):
     """
     import glob as _glob
 
+    config_path = ctx.obj.get("config_path") if ctx.obj else None
+    project_root = Path(config_path).parent if config_path else Path.cwd()
+
     prefix = "[dry-run] " if dry_run else ""
 
     ARTIFACT_DIRS = [
@@ -1576,7 +2067,7 @@ def clean(ctx, dry_run):
     removed_count = 0
 
     for dir_name in ARTIFACT_DIRS:
-        dir_path = Path(dir_name)
+        dir_path = project_root / dir_name
         if dir_path.exists() and dir_path.is_dir():
             if dry_run:
                 print_info(f"{prefix}Would remove directory: {dir_path}")
@@ -1589,7 +2080,7 @@ def clean(ctx, dry_run):
                     print_warning(f"Could not remove {dir_path}: {exc}")
 
     for pattern in ARTIFACT_PATTERNS:
-        for file in sorted(Path(".").glob(f"**/{pattern}")):
+        for file in sorted(project_root.glob(f"**/{pattern}")):
             # Skip files inside venv / .git / __pycache__
             parts = set(file.parts)
             if parts & {".git", "venv", ".venv", "__pycache__", "node_modules"}:
@@ -1677,7 +2168,7 @@ def _fetch_from_jira(
 
 @click.group()
 def jira():
-    """Jira integration commands — check connectivity, preview issues."""
+    """Jira integration commands - check connectivity, preview issues."""
 
 
 @jira.command(name="health")

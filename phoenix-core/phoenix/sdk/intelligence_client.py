@@ -154,11 +154,19 @@ class IntelligenceClient:
         manual_tests: List[Dict[str, Any]],
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
+        manifest: str = "",
+        use_pom: bool = False,
+        use_bdd: bool = False,
+        keywords: str = "",
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
             "application_url": application_url,
             "domain_knowledge": domain_knowledge or None,
+            "manifest": manifest or None,
+            "use_pom": use_pom,
+            "use_bdd": use_bdd,
+            "keywords": keywords or None,
         }
         return self._post("/api/v1/tests/automate", payload)
 

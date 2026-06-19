@@ -1,0 +1,16 @@
+Feature: Login to {{ project_name }}
+
+  Background:
+    Given I am on the login page
+
+  Scenario: Successful login with valid credentials
+    When I log in as a registered user
+    Then I should see the dashboard
+
+  Scenario: Login fails with wrong password
+    When I enter an invalid password
+    Then I should see a login error message
+
+  Scenario: Login fails with empty username
+    When I submit the login form without a username
+    Then I should see a validation error for the username field

@@ -65,6 +65,20 @@ _PROJECT_DIRS = [
     "domain_knowledge",
 ]
 
+# Additional directories created when layout = "pom-v1"
+_POM_DIRS = [
+    "pages",
+    "utils",
+    ".phoenix",
+]
+
+# Additional directories created when bdd = True (requires pom-v1)
+_BDD_DIRS = [
+    "features",
+    "steps",
+    "reports/failures",
+]
+
 
 # ---------------------------------------------------------------------------
 # Global registry
@@ -166,6 +180,8 @@ def scaffold_project(
     browser: str = "chromium",
     force: bool = False,
     dry_run: bool = False,
+    layout: str = "pom-v1",
+    bdd: bool = False,
 ) -> ScaffoldResult:
     """Create the canonical project layout under *target_dir*.
 
@@ -181,17 +197,31 @@ def scaffold_project(
         ScaffoldResult with lists of created/skipped files and any errors.
     """
     result = ScaffoldResult()
-    context = {"project_name": name, "base_url": base_url, "browser": browser}
+    use_pom = layout == "pom-v1"
+    context = {
+        "project_name": name,
+        "base_url": base_url,
+        "browser": browser,
+        "layout": layout,
+        "use_pom": use_pom,
+        "bdd": bdd,
+    }
 
-    # Create subdirectories
-    for subdir in _PROJECT_DIRS:
+    # Create base subdirectories
+    all_dirs = list(_PROJECT_DIRS)
+    if use_pom:
+        all_dirs.extend(_POM_DIRS)
+    if bdd:
+        all_dirs.extend(_BDD_DIRS)
+
+    for subdir in all_dirs:
         dir_path = target_dir / subdir
         if not dry_run:
             dir_path.mkdir(parents=True, exist_ok=True)
         result.created_dirs.append(str(dir_path))
 
     # Place a .gitkeep in each empty directory so git tracks them
-    for subdir in _PROJECT_DIRS:
+    for subdir in all_dirs:
         keep_file = target_dir / subdir / ".gitkeep"
         if dry_run:
             result.created_files.append(str(keep_file))
@@ -200,7 +230,7 @@ def scaffold_project(
             keep_file.write_text("", encoding="utf-8")
             result.created_files.append(str(keep_file))
 
-    # Render and write template files
+    # Base template map (all layouts)
     template_map = {
         "phoenixrc.j2": target_dir / ".phoenixrc",
         "gitignore.j2": target_dir / ".gitignore",
@@ -209,7 +239,8 @@ def scaffold_project(
         "Makefile.j2": target_dir / "Makefile",
         "env.j2": target_dir / ".env",
         "test_example.py.j2": target_dir / "tests" / "login" / "test_login.py",
-        "fixtures_auth.py.j2": target_dir / "fixtures" / "auth.py",
+        "fixtures_init.py.j2":    target_dir / "fixtures" / "__init__.py",
+        "fixtures_auth.py.j2":    target_dir / "fixtures" / "auth.py",
         "fixtures_browser.py.j2": target_dir / "fixtures" / "browser.py",
         "config_settings.yaml.j2": target_dir / "config" / "settings.yaml",
         "config_env_qa.yaml.j2": target_dir / "config" / "environments" / "qa.yaml",
@@ -222,6 +253,33 @@ def scaffold_project(
         "domain_knowledge_navigation.md.j2": target_dir / "domain_knowledge" / "navigation.md",
         "domain_knowledge_data_rules.md.j2": target_dir / "domain_knowledge" / "data_rules.md",
     }
+
+    # POM-only templates
+    if use_pom:
+        template_map.update({
+            "pages_init.py.j2":      target_dir / "pages" / "__init__.py",
+            "pages_base_page.py.j2": target_dir / "pages" / "base_page.py",
+            "locators_init.py.j2":   target_dir / "locators" / "__init__.py",
+            "utils_init.py.j2":      target_dir / "utils" / "__init__.py",
+            "utils_helpers.py.j2":   target_dir / "utils" / "helpers.py",
+            "utils_constants.py.j2": target_dir / "utils" / "constants.py",
+        })
+
+    # BDD-only templates
+    if bdd:
+        template_map.update({
+            "features_login.feature.j2":  target_dir / "features" / "login.feature",
+            "steps_init.py.j2":           target_dir / "steps" / "__init__.py",
+            "steps_common_steps.py.j2":   target_dir / "steps" / "common_steps.py",
+        })
+        # Seed empty keyword catalog
+        catalog_path = target_dir / ".phoenix" / "keywords.json"
+        if not catalog_path.exists() and not dry_run:
+            catalog_path.parent.mkdir(parents=True, exist_ok=True)
+            catalog_path.write_text(
+                '{"version": "1.0", "keywords": []}', encoding="utf-8"
+            )
+            result.created_files.append(str(catalog_path))
 
     for template_name, dest in template_map.items():
         if dest.exists() and not force:
@@ -245,44 +303,62 @@ def scaffold_project(
 
 
 def migrate_project(source_dir: Path, dry_run: bool = False) -> ScaffoldResult:
-    """Migrate an existing Phoenix project to the canonical layout.
+    """Migrate an existing Phoenix project to the canonical pom-v1 layout.
 
-    Adds any missing subdirectories and template files without touching
-    files that already exist (equivalent to scaffold with force=False).
+    Adds missing subdirectories and template files without touching files
+    that already exist, then writes layout = "pom-v1" into .phoenixrc.
+    Never touches user_stories/, existing pages/, or existing tests/.
     """
-    # Try to read project name from .phoenixrc
     rc_path = source_dir / ".phoenixrc"
-    name = source_dir.name  # fallback
+    name = source_dir.name
     base_url = ""
     browser = "chromium"
+    current_layout = "flat"
+    current_bdd = False
 
     if rc_path.exists():
         try:
             import sys
-
             if sys.version_info >= (3, 11):
                 import tomllib
-
                 with open(rc_path, "rb") as fh:
                     data = tomllib.load(fh)
             else:
                 import tomli  # type: ignore[import]
-
                 with open(rc_path, "rb") as fh:
                     data = tomli.load(fh)
             proj = data.get("project", {})
-            # Support both old (default_project/application_url) and new (name/base_url) schema
             name = proj.get("name", proj.get("default_project", name))
             base_url = proj.get("base_url", proj.get("application_url", ""))
             browser = proj.get("default_browser", data.get("execution", {}).get("default_browser", "chromium"))
+            current_layout = proj.get("layout", "flat")
+            current_bdd = proj.get("bdd", False)
         except Exception:
             pass
 
-    return scaffold_project(
+    result = scaffold_project(
         name=name,
         target_dir=source_dir,
         base_url=base_url,
         browser=browser,
         force=False,
         dry_run=dry_run,
+        layout="pom-v1",
+        bdd=current_bdd,
     )
+
+    # Stamp layout = "pom-v1" in .phoenixrc when upgrading from flat layout
+    if not dry_run and current_layout != "pom-v1" and rc_path.exists():
+        try:
+            text = rc_path.read_text(encoding="utf-8")
+            if 'layout' not in text:
+                text = text.replace(
+                    f'name             = "{name}"',
+                    f'name             = "{name}"\nlayout           = "pom-v1"',
+                )
+                rc_path.write_text(text, encoding="utf-8")
+                result.created_files.append(str(rc_path) + " [updated layout=pom-v1]")
+        except OSError:
+            pass
+
+    return result

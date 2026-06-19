@@ -125,12 +125,20 @@ class AgentRegistry:
         manual_tests: List[Dict[str, Any]],
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
+        manifest: str = "",
+        use_pom: bool = False,
+        use_bdd: bool = False,
+        keywords: str = "",
     ) -> Dict[str, Any]:
         agent = self._agents.get("test_generator")
         result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,
             application_url=application_url,
             domain_knowledge=domain_knowledge,
+            manifest=manifest,
+            use_pom=use_pom,
+            use_bdd=use_bdd,
+            keywords=keywords,
         )
         return self._with_runtime_metadata(result, "test_generator")
 

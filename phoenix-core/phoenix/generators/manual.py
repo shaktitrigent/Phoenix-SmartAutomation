@@ -343,7 +343,7 @@ class ManualTestGenerator:
 # ------------------------------------------------------------------
 
 
-def _slugify(name: str, max_len: int = 60) -> str:
-    """Convert a test name to a filesystem-safe slug."""
-    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    return slug[:max_len] if slug else "manual_test"
+def _slugify(name: str, max_len: int = 80) -> str:
+    """Convert a test name to a filesystem-safe slug (whole-word trimming)."""
+    from phoenix.utils.slugify import slugify as _slug
+    return _slug(name, max_len=max_len) or "manual_test"

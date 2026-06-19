@@ -1,7 +1,7 @@
 """Pydantic models for the intelligence API."""
 
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TestGenerationOptions(BaseModel):
@@ -71,16 +71,24 @@ class Locator(BaseModel):
 class AutomationTestCase(BaseModel):
     """Automation test case schema."""
 
+    model_config = ConfigDict(extra="allow")
+
     name: str
     description: str
     test_steps: List[str] = []
-    locators: List[Locator] = []
+    locators: List[Dict[str, Any]] = []
     script_template: Optional[str] = None
     script_code: Optional[str] = None
+    manual_test_name: Optional[str] = None
+    source_file: Optional[str] = None
     risk_level: Optional[str] = None
     generation_mode: str = "llm"
     warnings: List[str] = []
+    recommendations: List[str] = []
     tags: List[str] = []
+    application_url: Optional[str] = None
+    pom_bundle: Optional[Dict[str, Any]] = None
+    bdd_bundle: Optional[Dict[str, Any]] = None
 
 
 class ResponseMetadata(BaseModel):
@@ -147,6 +155,22 @@ class AutomateRequest(BaseModel):
     domain_knowledge: Optional[str] = Field(
         default=None,
         description="Project-specific context from domain_knowledge/ directory",
+    )
+    manifest: Optional[str] = Field(
+        default=None,
+        description="Compact text summary of existing pages, tests and locators (pom-v1 projects)",
+    )
+    use_pom: bool = Field(
+        default=False,
+        description="When True, emit POM-structured output (page objects + delta bundle)",
+    )
+    use_bdd: bool = Field(
+        default=False,
+        description="When True, emit BDD delta output (feature + steps + page object)",
+    )
+    keywords: Optional[str] = Field(
+        default=None,
+        description="Keyword catalog summary for injection into the BDD prompt",
     )
 
 

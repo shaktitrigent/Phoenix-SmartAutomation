@@ -46,11 +46,11 @@ except ImportError:
 # Regex patterns for each Playwright locator API
 # ---------------------------------------------------------------------------
 
-_PH_RE = re.compile(r'get_by_placeholder\(["\']([^"\']+)["\']\)')
+_PH_RE = re.compile(r'get_by_placeholder\(["\']([^"\']+)["\']')
 _ROLE_RE = re.compile(r'get_by_role\(["\'](\w+)["\'](?:[^)]*?name=["\']([^"\']+)["\'])?\)')
-_LABEL_RE = re.compile(r'get_by_label\(["\']([^"\']+)["\']\)')
-_TEXT_RE = re.compile(r'get_by_text\(["\']([^"\']+)["\']\)')
-_TESTID_RE = re.compile(r'get_by_test_id\(["\']([^"\']+)["\']\)')
+_LABEL_RE = re.compile(r'get_by_label\(["\']([^"\']+)["\']')
+_TEXT_RE = re.compile(r'get_by_text\(["\']([^"\']+)["\']')
+_TESTID_RE = re.compile(r'get_by_test_id\(["\']([^"\']+)["\']')
 _LOCATOR_RE = re.compile(r'(?<!\w)locator\(["\']([^"\']+)["\']\)')
 _IGNORE_TEXT_RE = re.compile(
     r"\b(loads?\s+successfully|fields?\s+are\s+visible|manual locator review required"

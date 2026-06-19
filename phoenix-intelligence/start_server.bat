@@ -31,7 +31,7 @@ if /I "%PHOENIX_LLM_PROVIDER%"=="gemini" (
         echo Set it with: set ANTHROPIC_API_KEY=your-anthropic-api-key
         echo.
     )
-    if "%PHOENIX_LLM_MODEL%"=="" set PHOENIX_LLM_MODEL=claude-sonnet-4-20250514
+    if "%PHOENIX_LLM_MODEL%"=="" set PHOENIX_LLM_MODEL=claude-sonnet-4-6
 )
 
 echo Starting Phoenix Intelligence Server on port 8001...

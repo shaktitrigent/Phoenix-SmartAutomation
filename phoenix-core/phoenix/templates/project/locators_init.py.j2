@@ -1,0 +1,33 @@
+"""Locator registry helpers for {{ project_name }}.
+
+Generated locator bundles live in locators/<page>.json.
+Use the registry fixture in conftest.py to load them automatically.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+
+def load_locators(page_name: str, locators_dir: str = "locators") -> Dict[str, Any]:
+    """Load the locator bundle for *page_name* from locators/<page_name>.json.
+
+    Returns an empty dict when the file doesn't exist yet.
+    """
+    path = Path(locators_dir) / f"{page_name}.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def get_selector(locators: Dict[str, Any], element_id: str) -> Optional[str]:
+    """Look up the CSS/role selector for *element_id* from a loaded bundle."""
+    for bundle in locators if isinstance(locators, list) else [locators]:
+        if isinstance(bundle, dict) and bundle.get("element_id") == element_id:
+            return bundle.get("selector") or bundle.get("primary", {}).get("value")
+    return None

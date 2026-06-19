@@ -205,6 +205,10 @@ def automate_from_manual(payload: AutomateRequest):
         manual_tests=payload.manual_tests,
         application_url=payload.application_url,
         domain_knowledge=payload.domain_knowledge or "",
+        manifest=payload.manifest or "",
+        use_pom=payload.use_pom,
+        use_bdd=payload.use_bdd,
+        keywords=payload.keywords or "",
     )
     return _decorate_metadata(result)
 

@@ -38,6 +38,53 @@ except ImportError:
     from shared.phoenix_shared.models.locator import LocatorBundle  # type: ignore[no-redef]
 
 
+def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalise raw LLM / legacy JSON into the LocatorBundle field names.
+
+    The LLM prompts emit ``element_id``, ``selector``, and ``interaction_type``
+    whereas the Pydantic model uses ``element_name``, ``value``, and (ignores
+    interaction_type).  ``verified_in_snapshot`` is passed through directly.
+    """
+    item = dict(item)
+
+    # Top-level element_id → element_name
+    if "element_name" not in item and "element_id" in item:
+        item["element_name"] = item.pop("element_id")
+
+    # ``primary`` locator sub-dict normalisation
+    if "primary" in item and isinstance(item["primary"], dict):
+        p = dict(item["primary"])
+        if "element_name" not in p and "element_id" in p:
+            p["element_name"] = p.pop("element_id")
+        # LLM emits "selector" for the raw CSS/XPath/attribute string
+        if "value" not in p and "selector" in p:
+            p["value"] = p.pop("selector")
+        # Pass through verified_in_snapshot (prompt may omit it)
+        if "verified_in_snapshot" in item and "verified_in_snapshot" not in p:
+            p["verified_in_snapshot"] = item["verified_in_snapshot"]
+        # interaction_type is not a model field — remove to avoid validation noise
+        p.pop("interaction_type", None)
+        p.pop("label", None)
+        item["primary"] = p
+
+    # ``alternates`` list — same normalisation per entry
+    if "alternates" in item and isinstance(item["alternates"], list):
+        normed = []
+        for alt in item["alternates"]:
+            if isinstance(alt, dict):
+                alt = dict(alt)
+                if "element_name" not in alt and "element_id" in alt:
+                    alt["element_name"] = alt.pop("element_id")
+                if "value" not in alt and "selector" in alt:
+                    alt["value"] = alt.pop("selector")
+                alt.pop("interaction_type", None)
+                alt.pop("label", None)
+            normed.append(alt)
+        item["alternates"] = normed
+
+    return item
+
+
 class LocatorRegistry:
     """In-memory registry of LocatorBundles, backed by per-page JSON files."""
 
@@ -73,10 +120,7 @@ class LocatorRegistry:
                 raw = [raw]
             for item in raw:
                 try:
-                    # Normalise: LLM output uses "element_id", LocatorBundle expects "element_name"
-                    if "element_name" not in item and "element_id" in item:
-                        item = dict(item)
-                        item["element_name"] = item["element_id"]
+                    item = _normalise_raw_bundle(item)
                     bundle = LocatorBundle.from_dict(item)
                     self._bundles[bundle.element_name] = bundle
                 except Exception:

@@ -5,6 +5,8 @@
 name             = "{{ project_name }}"
 base_url         = "{{ base_url }}"
 default_browser  = "{{ browser }}"
+layout           = "pom-v1"
+bdd              = {{ 'true' if bdd else 'false' }}
 
 [input]
 source      = "user_stories"
@@ -24,6 +26,10 @@ retry_count = 3
 enabled      = true
 max_attempts = 3
 
+[run]
+viewport_width  = 1920
+viewport_height = 1080
+
 [test_data]
 strategy           = "generated"
 locale             = "en_US"
@@ -33,6 +39,26 @@ include_edge_cases = true
 format     = "html"
 output_dir = "./reports"
 
+# ---------------------------------------------------------------------------
+# Page Object Model settings (pom-v1 layout)
+# ---------------------------------------------------------------------------
+[pom]
+pages_dir       = "./pages"
+utils_dir       = "./utils"
+manifest_file   = ".phoenix/manifest.json"
+
+{% if bdd %}
+# ---------------------------------------------------------------------------
+# BDD / keyword-driven settings
+# ---------------------------------------------------------------------------
+[bdd]
+features_dir   = "./features"
+steps_dir      = "./steps"
+keywords_file  = ".phoenix/keywords.json"
+auto_heal_threshold = 0.85
+ask_threshold       = 0.55
+
+{% endif %}
 # ---------------------------------------------------------------------------
 # Jira integration (optional — remove the # to enable)
 # Secrets must be set as environment variables, never in this file:

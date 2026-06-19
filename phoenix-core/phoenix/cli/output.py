@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import sys
 from typing import Any, Dict, List
 
 from rich.console import Console
@@ -9,8 +11,28 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
-console = Console()
-err_console = Console(stderr=True)
+
+def _utf8_console(stderr: bool = False) -> Console:
+    """Return a Rich Console that always writes UTF-8 safely.
+
+    On Windows the default stdout/stderr codec is often cp1252, which cannot
+    encode many Unicode glyphs (e.g. U+2139 ℹ, U+2713 ✓).  Wrapping the
+    underlying binary buffer in a UTF-8 TextIOWrapper with errors='replace'
+    guarantees no UnicodeEncodeError is ever raised.
+    """
+    try:
+        stream = sys.stderr if stderr else sys.stdout
+        utf8_stream = io.TextIOWrapper(
+            stream.buffer, encoding="utf-8", errors="replace", line_buffering=True
+        )
+        return Console(file=utf8_stream, force_terminal=True, legacy_windows=False)
+    except AttributeError:
+        # stream has no .buffer (IDLE, pytest capsys, etc.) — fall back to defaults
+        return Console(stderr=stderr, legacy_windows=False)
+
+
+console = _utf8_console(stderr=False)
+err_console = _utf8_console(stderr=True)
 
 
 def print_success(message: str) -> None:

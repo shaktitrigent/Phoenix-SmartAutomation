@@ -62,10 +62,17 @@ def pytest_addoption(parser):
     )
     _addoption_if_missing(
         parser,
+        "--headed",
+        action="store_true",
+        default=False,
+        help="Run browser in headed (visible) mode.",
+    )
+    _addoption_if_missing(
+        parser,
         "--headless",
         action="store_true",
-        default=True,
-        help="Run headless",
+        default=False,
+        help="Run browser in headless mode (default unless --headed is set).",
     )
 
 
@@ -90,16 +97,33 @@ def browser_type_name(request) -> str:
 
 
 @pytest.fixture(scope="session")
-def browser_type_launch_args():
-    """Launch args read from environment — set PWHEADED=1 for visible browser."""
+def browser_type_launch_args(request):
+    """Launch args — headed when --headed flag or PWHEADED=1 env var is set."""
+    headed = request.config.getoption("--headed", default=False) or os.getenv("PWHEADED") == "1"
     return {
-        "headless": os.getenv("PWHEADED") != "1",
+        "headless": not headed,
         "slow_mo": int(os.getenv("PWSLOWMO", "0")),
         "args": [
             "--disable-save-password-bubble",
             "--disable-features=PasswordManager",
         ],
     }
+
+
+@pytest.fixture(scope="session")
+def browser_context_args(browser_context_args):
+    """Override context args to enforce a consistent viewport across all machines.
+
+    The viewport is read from environment variables set by `phoenix run --viewport`
+    or falls back to the project's .phoenixrc [run] settings (default 1920x1080).
+
+    A fixed viewport ensures layout, element positions, and responsive breakpoints
+    are identical on every laptop, desktop, and CI runner — making failures
+    reproducible from a screenshot alone.
+    """
+    w = int(os.environ.get("PW_VIEWPORT_W", "1920"))
+    h = int(os.environ.get("PW_VIEWPORT_H", "1080"))
+    return {**browser_context_args, "viewport": {"width": w, "height": h}}
 
 
 @pytest.fixture(scope="session")
@@ -184,40 +208,145 @@ def test_data(request) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Screenshot-on-failure hook
+# Rich failure hook — plain-English summary + full technical detail
 # ---------------------------------------------------------------------------
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Capture a screenshot after any test failure and attach it to the report."""
+    """Capture rich failure detail and attach to pytest-html report.
+
+    For every failed test the report contains (in order):
+      1. Plain-English summary (what went wrong, no code)
+      2. Full-page screenshot at the moment of failure
+      3. Page URL and title
+      4. Browser console errors
+      5. Full Python traceback (inside a collapsible section)
+    """
+    from contextlib import suppress as _sup
     outcome = yield
     report = outcome.get_result()
-    if report.when == "call" and report.failed:
-        page_fixture = item.funcargs.get("page")
-        if page_fixture is not None:
-            screenshots_dir = Path("reports") / "screenshots"
-            screenshots_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = re.sub(r"[^\w\-]", "_", item.nodeid)
-            screenshot_path = screenshots_dir / f"{safe_name}.png"
-            with suppress(Exception):
-                page_fixture.screenshot(path=str(screenshot_path))
-                report.screenshots = [str(screenshot_path)]
+
+    if report.when != "call" or not report.failed:
+        return
+
+    page_fixture = item.funcargs.get("page") or item.funcargs.get("authenticated_page")
+    if page_fixture is None:
+        return
+
+    extras = getattr(report, "extras", [])
+    try:
+        import pytest_html  # noqa: F401
+        from pytest_html import extras as _extras
+    except ImportError:
+        _extras = None
+
+    # 1. Screenshot
+    screenshots_dir = Path("reports") / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r"[^\w\-]", "_", item.nodeid)
+    screenshot_path = screenshots_dir / f"{safe_name}.png"
+    screenshot_taken = False
+    with _sup(Exception):
+        page_fixture.screenshot(path=str(screenshot_path), full_page=True)
+        screenshot_taken = True
+        report.screenshots = [str(screenshot_path)]
+
+    # 2. Plain-English summary
+    try:
+        from phoenix.execution.failure_reporter import translate_error
+        plain_summary = translate_error(
+            report.longrepr.reprcrash.message
+            if hasattr(report.longrepr, "reprcrash")
+            else Exception(str(report.longreprtext)[:200])
+        )
+    except Exception:
+        plain_summary = ""
+
+    # 3. Page context
+    page_url = ""
+    page_title = ""
+    with _sup(Exception):
+        page_url = page_fixture.url
+        page_title = page_fixture.title()
+
+    # 4. Console errors
+    console_errors: list = []
+    with _sup(Exception):
+        # collect errors logged via page.on("console", ...) if set up
+        console_errors = getattr(page_fixture, "_phoenix_console_errors", [])
+
+    # Build pytest-html extras
+    if _extras:
+        if plain_summary:
+            extras.append(_extras.text(f"⚠ {plain_summary}", name="What happened"))
+        if screenshot_taken:
+            extras.append(_extras.image(str(screenshot_path), name="Screenshot"))
+        if page_url:
+            extras.append(_extras.text(f"URL:   {page_url}\nTitle: {page_title}", name="Page context"))
+        if console_errors:
+            extras.append(_extras.text("\n".join(console_errors), name="Console errors"))
+        traceback_text = str(report.longreprtext) if hasattr(report, "longreprtext") else ""
+        if traceback_text:
+            extras.append(_extras.text(traceback_text, name="Technical detail (traceback)"))
+        report.extras = extras
 
 
 # ---------------------------------------------------------------------------
 # Authenticated page fixture — extend with your login logic
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Authenticated page fixture — provided by fixtures/auth.py
+# ---------------------------------------------------------------------------
+# The real authenticated_page is defined in fixtures/auth.py (session-scoped
+# storage state, one login for the whole run).  We re-export it here so tests
+# that only import conftest still get the fixture without a second login.
+
+try:
+    from fixtures.auth import (  # noqa: F401  (re-exported for pytest fixture resolution)
+        auth_storage_state,
+        authenticated_context,
+        authenticated_page,
+    )
+except ImportError:
+    # Fallback: fixtures/auth.py not generated yet (e.g. flat layout project).
+    # Provides an unauthenticated page so tests at least import cleanly.
+    @pytest.fixture
+    def authenticated_page(page: Page) -> Page:  # type: ignore[no-redef]
+        """Stub — replace with a real auth fixture or generate with phoenix init --pom."""
+        return page
+{% if bdd %}
+
+
+# ---------------------------------------------------------------------------
+# pytest-bdd hooks — plain-English failure reporting
+# ---------------------------------------------------------------------------
+
+def pytest_bdd_step_error(request, feature, scenario, step, exception, **kwargs):
+    """Translate step failures into plain English and capture a screenshot."""
+    try:
+        from phoenix.execution.failure_reporter import record_step_failure
+        page = request.getfixturevalue("page") if "page" in request.fixturenames else None
+        record_step_failure(
+            feature=feature,
+            scenario=scenario,
+            step=step,
+            exception=exception,
+            page=page,
+        )
+    except Exception:
+        pass  # never let reporting break the test run
+
+
+# ---------------------------------------------------------------------------
+# pytest-bdd page fixtures (one per page class — add more as you add pages)
+# ---------------------------------------------------------------------------
+
 @pytest.fixture
-def authenticated_page(page, base_url) -> Page:
-    """Return a page that has been authenticated.
-
-    Reads credentials from environment variables — never hardcode them here.
-
-        page.goto(f"{base_url}/login")
-        page.get_by_label("Username").fill(os.environ["TEST_USERNAME"])
-        page.get_by_label("Password").fill(os.environ["TEST_PASSWORD"])
-        page.get_by_role("button", name="Login").click()
-    """
-    # TODO: implement login using os.environ["TEST_USERNAME"] / ["TEST_PASSWORD"]
-    return page
+def login_page(page: Page):
+    """LoginPage fixture — used in BDD step definitions."""
+    from pages.login_page import LoginPage
+    lp = LoginPage(page)
+    lp.navigate()
+    return lp
+{% endif %}

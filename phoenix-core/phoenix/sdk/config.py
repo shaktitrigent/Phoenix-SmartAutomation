@@ -49,6 +49,14 @@ class IntelligenceConfig(BaseModel):
     )
     timeout: int = Field(default=300, description="Request timeout in seconds (LLM generation can take up to 5 min)")
     retry_count: int = Field(default=3, description="Number of retries on failure")
+    repair_attempts: int = Field(
+        default=1,
+        description="Max LLM repair calls when a generated script fails syntax/collect gates (0 = no repair)",
+    )
+    collect_only_gate: bool = Field(
+        default=True,
+        description="Run 'pytest --collect-only' on each generated script to catch import/collection errors",
+    )
 
 
 class CacheConfig(BaseModel):
@@ -75,6 +83,8 @@ class ProjectConfig(BaseModel):
     # New schema fields (phoenix init ≥ v2)
     name: Optional[str] = Field(default=None, description="Project name (new schema)")
     base_url: Optional[str] = Field(default=None, description="Application base URL (new schema)")
+    layout: str = Field(default="flat", description="Project layout: 'flat' or 'pom-v1'")
+    bdd: bool = Field(default=False, description="Keyword-driven BDD mode (requires pom-v1)")
     default_browser: str = Field(default="chromium", description="Default browser")
     # Legacy fields kept for backwards compatibility
     application_url: Optional[str] = Field(default=None, description="Default application URL")
@@ -121,6 +131,9 @@ class PhoenixConfig(BaseModel):
                 ),
                 timeout=int(os.environ.get("PHOENIX_INTELLIGENCE_TIMEOUT", "300")),
                 retry_count=int(os.environ.get("PHOENIX_INTELLIGENCE_RETRY_COUNT", "3")),
+                repair_attempts=int(os.environ.get("PHOENIX_REPAIR_ATTEMPTS", "1")),
+                collect_only_gate=os.environ.get("PHOENIX_COLLECT_ONLY_GATE", "true").lower()
+                not in {"0", "false", "no"},
             ),
             cache=CacheConfig(
                 type=os.environ.get("PHOENIX_CACHE_TYPE", "memory"),

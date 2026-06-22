@@ -72,17 +72,19 @@ if __name__ == "__main__":
         --hidden-import phoenix_shared.models `
         --hidden-import phoenix_shared.models.automation_script `
         --hidden-import phoenix_shared.models.locator `
-        --hidden-import phoenix_shared.models.test_case `
         --hidden-import phoenix `
         --hidden-import phoenix.cli `
         --hidden-import phoenix.documents `
         --hidden-import phoenix.exceptions `
         --hidden-import phoenix.execution `
         --hidden-import phoenix.generators `
+        --hidden-import phoenix.healing `
+        --hidden-import phoenix.intelligence `
         --hidden-import phoenix.integrations `
         --hidden-import phoenix.integrations.jira `
         --hidden-import phoenix.locators `
         --hidden-import phoenix.mappings `
+        --hidden-import phoenix.output `
         --hidden-import phoenix.mappings.pages `
         --hidden-import phoenix.models `
         --hidden-import phoenix.parsers `
@@ -95,6 +97,7 @@ if __name__ == "__main__":
         --hidden-import phoenix.sdk `
         --hidden-import phoenix.storage `
         --hidden-import phoenix.test_data `
+        --hidden-import phoenix.utils `
         --hidden-import phoenix.validation `
         --hidden-import services `
         --hidden-import services.agents `

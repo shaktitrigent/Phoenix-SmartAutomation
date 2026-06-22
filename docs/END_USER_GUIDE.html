@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phoenix SmartAutomation — End User Guide v0.1.4</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+    --brand:      #FF6B35;
+    --brand-dark: #C94E1A;
+    --text:       #1A1A2E;
+    --text-muted: #555570;
+    --border:     #E2E8F0;
+    --bg-code:    #1E1E2E;
+    --bg-inline:  #F1F5F9;
+    --bg-note:    #FFF7F3;
+    --bg-page:    #FFFFFF;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-size: 10.5pt;
+    line-height: 1.7;
+    color: var(--text);
+    background: var(--bg-page);
+    padding: 0 48px;
+}
+
+/* ── Cover page ─────────────────────────────────────── */
+.cover {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 96vh;
+    padding: 60px 0 40px;
+    border-bottom: 4px solid var(--brand);
+    margin-bottom: 48px;
+    page-break-after: always;
+}
+.cover-logo {
+    font-size: 13pt;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--brand);
+    margin-bottom: 32px;
+}
+.cover h1 {
+    font-size: 32pt;
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--text);
+    margin-bottom: 16px;
+    border: none;
+    padding: 0;
+}
+.cover h1 span { color: var(--brand); }
+.cover-subtitle {
+    font-size: 13pt;
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-bottom: 48px;
+}
+.cover-meta {
+    font-size: 9.5pt;
+    color: var(--text-muted);
+    line-height: 2;
+}
+.cover-version {
+    display: inline-block;
+    background: var(--brand);
+    color: white;
+    font-size: 9.5pt;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 4px;
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+/* ── Headings ────────────────────────────────────────── */
+h1, h2, h3, h4 {
+    font-family: 'Inter', sans-serif;
+    font-weight: 700;
+    color: var(--text);
+    margin-top: 1.6em;
+    margin-bottom: 0.5em;
+}
+
+h1 {
+    font-size: 18pt;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--brand);
+    color: var(--brand-dark);
+}
+
+h2 {
+    font-size: 13pt;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+h3 { font-size: 11pt; color: var(--brand-dark); }
+h4 { font-size: 10.5pt; font-weight: 600; }
+
+/* ── Body text ──────────────────────────────────────── */
+p { margin-bottom: 0.8em; }
+
+a { color: var(--brand); text-decoration: none; }
+
+strong { font-weight: 600; }
+
+em { font-style: italic; color: var(--text-muted); }
+
+/* ── Code ───────────────────────────────────────────── */
+code {
+    font-family: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 9pt;
+    background: var(--bg-inline);
+    color: #C94E1A;
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+}
+
+pre {
+    background: var(--bg-code);
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 12px 0 16px;
+    overflow: hidden;
+    page-break-inside: avoid;
+    border-left: 3px solid var(--brand);
+}
+
+pre code {
+    font-family: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 8.5pt;
+    background: none;
+    color: #CDD6F4;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.6;
+}
+
+/* PowerShell keyword highlights (simple regex will be applied in Python) */
+.kw  { color: #CBA6F7; }   /* keywords  */
+.str { color: #A6E3A1; }   /* strings   */
+.cm  { color: #6C7086; font-style: italic; } /* comments */
+.fn  { color: #89B4FA; }   /* functions */
+.var { color: #F38BA8; }   /* variables */
+
+/* ── Tables ─────────────────────────────────────────── */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+th {
+    background: var(--text);
+    color: white;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 9pt;
+    letter-spacing: 0.03em;
+}
+
+td {
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+tr:nth-child(even) td { background: #F8FAFC; }
+
+/* ── Blockquotes / notes ─────────────────────────────── */
+blockquote {
+    background: var(--bg-note);
+    border-left: 4px solid var(--brand);
+    margin: 12px 0;
+    padding: 10px 16px;
+    border-radius: 0 4px 4px 0;
+    color: var(--text-muted);
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+
+blockquote p { margin: 0; }
+
+/* ── Lists ──────────────────────────────────────────── */
+ul, ol {
+    margin: 6px 0 12px 24px;
+}
+li { margin-bottom: 4px; }
+
+/* ── Horizontal rule ─────────────────────────────────── */
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 20px 0;
+}
+
+/* ── Page breaks ─────────────────────────────────────── */
+h1 { page-break-before: always; }
+h1:first-of-type { page-break-before: avoid; }
+
+/* ── Print / PDF page setup ──────────────────────────── */
+@page {
+    size: A4;
+    margin: 20mm 16mm 22mm 16mm;
+
+    @bottom-center {
+        font-family: 'Inter', sans-serif;
+        font-size: 8pt;
+        color: #9CA3AF;
+        content: "Phoenix SmartAutomation  ·  End User Guide  ·  v0.1.4  ·  Page " counter(page) " of " counter(pages);
+    }
+}
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="cover-logo">&#9672; Phoenix SmartAutomation</div>
+  <h1>End User<br><span>Guide</span></h1>
+  <p class="cover-subtitle">From user story to running Playwright tests — no build tools required.</p>
+  <div class="cover-meta">
+    Version <span class="cover-version">0.1.4</span><br>
+    Prepared for QA Teams &amp; End Users<br>
+    Phoenix SmartAutomation Platform
+  </div>
+</div>
+
+<blockquote>
+<p>For teams who have received <code>phoenix-intelligence.exe</code> from their administrator.<br />
+No source code or build tools required.</p>
+</blockquote>
+<hr />
+<h2 id="how-phoenix-works">How Phoenix Works</h2>
+<pre><code>You write a user story
+        │
+        ▼  <span class="fn">phoenix</span> generate
+Phoenix reads the story → calls Claude AI → writes human-readable test cases
+        │
+        ▼  You review manual_tests/*.md   ← the only manual step
+        │
+        ▼  <span class="fn">phoenix</span> automate
+Phoenix generates Page Objects (pages/) <span class="kw">and</span> test scripts (tests/)
+        │
+        ▼  <span class="fn">phoenix</span> run
+Phoenix runs all tests, retries failures automatically, saves an HTML report
+</code></pre>
+<hr />
+<h2 id="prerequisites">Prerequisites</h2>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Where to get it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Python ≥ 3.11</td>
+<td><a href="https://www.python.org/downloads/">python.org/downloads</a> — check <strong>"Add Python to PATH"</strong> during install</td>
+</tr>
+<tr>
+<td>Anthropic API key</td>
+<td><a href="https://console.anthropic.com">console.anthropic.com</a></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="part-1-start-the-intelligence-server">Part 1 — Start the Intelligence Server</h2>
+<p>The server must be running before you use any <code>phoenix</code> commands. Start it once and leave it running.</p>
+<h3 id="step-11-place-the-executable">Step 1.1 — Place the executable</h3>
+<pre><code>C:\Phoenix\<span class="fn">phoenix</span>-intelligence.exe
+</code></pre>
+<h3 id="step-12-set-your-api-key">Step 1.2 — Set your API key</h3>
+<pre><code><span class=<span class="str">"var"</span>>$env:ANTHROPIC_API_KEY</span> = &quot;sk-ant-...&quot;
+</code></pre>
+<p>To set it permanently (survives reboots):</p>
+<pre><code>[<span class="fn">System.Environment</span>]::<span class="fn">SetEnvironmentVariable</span>(&quot;ANTHROPIC_API_KEY&quot;, &quot;sk-ant-...&quot;, &quot;User&quot;)
+</code></pre>
+<h3 id="step-13-start-the-server">Step 1.3 — Start the server</h3>
+<p>Run from a terminal — do <strong>not</strong> double-click in Explorer.</p>
+<pre><code>C:\Phoenix\<span class="fn">phoenix</span>-intelligence.exe
+</code></pre>
+<blockquote>
+<p><strong>Windows SmartScreen alert:</strong> First run only — click <strong>"More info"</strong> then <strong>"Run anyway"</strong>.</p>
+</blockquote>
+<p>You will see:</p>
+<pre><code>INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001
+</code></pre>
+<p><strong>Keep this terminal open.</strong> The server must stay running.</p>
+<h3 id="step-14-verify-the-server">Step 1.4 — Verify the server</h3>
+<pre><code><span class="fn">curl</span> http://localhost:8001/health
+</code></pre>
+<p>Expected: <code>{"status": "ok", "llm": {"configured": true, "provider": "anthropic"}}</code></p>
+<hr />
+<h2 id="part-2-install-phoenix-cli">Part 2 — Install Phoenix CLI</h2>
+<h3 id="first-time-setup">First-time setup</h3>
+<pre><code><span class="cm"># Create and activate a virtual environment</span>
+<span class="fn">python</span> -m venv <span class="fn">phoenix</span>-venv
+<span class="fn">phoenix</span>-venv\Scripts\activate
+
+<span class="cm"># Install from the wheel files (run from the folder containing .whl files)</span>
+<span class="fn">pip</span> install phoenix_shared-0.1.4-py3-none-any.whl
+<span class="fn">pip</span> install phoenix_core-0.1.4-py3-none-any.whl
+
+<span class="cm"># Install the Playwright browser</span>
+<span class="fn">playwright</span> install chromium
+
+<span class="cm"># Verify</span>
+<span class="fn">phoenix</span> --version
+</code></pre>
+<h3 id="upgrade-existing-users">Upgrade (existing users)</h3>
+<pre><code><span class="cm"># 1. Activate your virtual environment</span>
+<span class="fn">phoenix</span>-venv\Scripts\activate
+
+<span class="cm"># 2. Uninstall old versions</span>
+<span class="fn">pip</span> uninstall <span class="fn">phoenix</span>-core <span class="fn">phoenix</span>-shared -y
+
+<span class="cm"># 3. Install new versions</span>
+<span class="fn">pip</span> install phoenix_shared-0.1.4-py3-none-any.whl
+<span class="fn">pip</span> install phoenix_core-0.1.4-py3-none-any.whl
+
+<span class="cm"># 4. Replace the server executable (delete old, copy new to C:\Phoenix\)</span>
+
+<span class="cm"># 5. Verify</span>
+<span class="fn">phoenix</span> doctor
+</code></pre>
+<blockquote>
+<p>Your project files (<code>manual_tests/</code>, <code>tests/</code>, <code>.phoenixrc</code>) are not affected by upgrade steps.</p>
+</blockquote>
+<hr />
+<h2 id="part-3-set-up-a-project">Part 3 — Set Up a Project</h2>
+<pre><code><span class="fn">mkdir</span> my-project
+<span class="fn">cd</span> my-project
+<span class="fn">phoenix</span> init --base-url &quot;https://your-app.com&quot;
+</code></pre>
+<p>Creates:</p>
+<pre><code>my-project/
+├── .phoenixrc              ← project config (edit this first)
+├── conftest.py             ← Playwright fixtures
+├── user_stories/           ← write your user stories here
+├── domain_knowledge/       ← project-wide context (URLs, UI patterns, data rules)
+├── pages/                  ← Page Object classes (generated by <span class="fn">phoenix</span> automate)
+│   └── base_page.py        ← base class all page objects inherit <span class="kw">from</span>
+├── manual_tests/           ← Phoenix writes test specs here
+├── tests/                  ← Phoenix writes Playwright test scripts here
+├── locators/               ← Phoenix writes element locators here
+├── reports/                ← HTML reports
+└── logs/                   ← execution logs
+</code></pre>
+<p><strong>Configure <code>.phoenixrc</code>:</strong></p>
+<pre><code>[project]
+name            = &quot;my-project&quot;
+base_url        = &quot;https://your-app.com&quot;
+default_browser = &quot;chromium&quot;
+layout          = &quot;pom-v1&quot;
+
+[intelligence]
+base_url = &quot;http://localhost:8001/api/v1&quot;
+timeout  = 300
+</code></pre>
+<p><strong>Set your test credentials</strong> — copy <code>.env</code> to <code>.env.local</code> and fill in:</p>
+<pre><code>APP_URL=https://your-app.com
+TEST_USERNAME=your_test_username
+TEST_PASSWORD=your_test_password
+ANTHROPIC_API_KEY=sk-ant-...
+</code></pre>
+<p>Load them each session:</p>
+<pre><code><span class="fn">Get-Content</span> .env.local | <span class="fn">ForEach-Object</span> {
+    <span class="kw">if</span> (<span class=<span class="str">"var"</span>>$_</span> -match '^\s*([^#][^=]*)=(.*)$') {
+        [<span class="fn">System.Environment</span>]::<span class="fn">SetEnvironmentVariable</span>(<span class=<span class="str">"var"</span>>$matches</span>[1].Trim(), <span class=<span class="str">"var"</span>>$matches</span>[2].Trim(), &quot;Process&quot;)
+    }
+}
+</code></pre>
+<p><strong>Check everything:</strong></p>
+<pre><code><span class="fn">phoenix</span> doctor
+</code></pre>
+<hr />
+<h2 id="part-4-session-checklist-every-day">Part 4 — Session Checklist (Every Day)</h2>
+<pre><code><span class="cm"># Terminal 1 — start or verify the server (leave open)</span>
+C:\Phoenix\<span class="fn">phoenix</span>-intelligence.exe
+
+<span class="cm"># Terminal 2 — your working terminal</span>
+<span class="fn">phoenix</span>-venv\Scripts\activate
+<span class="cm"># [load .env.local as above]</span>
+</code></pre>
+<hr />
+<h2 id="part-5-commands-reference">Part 5 — Commands Reference</h2>
+<h3 id="phoenix-generate-create-test-cases-from-a-user-story"><code>phoenix generate</code> — Create test cases from a user story</h3>
+<pre><code><span class="fn">phoenix</span> generate --story-file user_stories/login.txt
+</code></pre>
+<p>Writes test cases to <code>manual_tests/</code> as Markdown files. <strong>Open them and review</strong> — add missing steps, fix expected results. This is the only step that requires your attention.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--story-file &lt;path&gt;</code></td>
+<td>Read the user story from a file</td>
+</tr>
+<tr>
+<td><code>--jira PROJ-123</code></td>
+<td>Fetch story + attachments from Jira</td>
+</tr>
+<tr>
+<td><code>--type both</code></td>
+<td>Generate manual + automation scripts in one step</td>
+</tr>
+<tr>
+<td><code>--docs &lt;path&gt;</code></td>
+<td>Attach a supporting document file or folder</td>
+</tr>
+<tr>
+<td><code>--no-gate</code></td>
+<td>Save all tests even if the quality check flags them</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong><code>Generated 0 manual test(s)</code>?</strong> Add <code>--no-gate</code> to save them anyway so you can edit manually.</p>
+</blockquote>
+<hr />
+<h3 id="phoenix-automate-turn-manual-tests-into-playwright-scripts"><code>phoenix automate</code> — Turn manual tests into Playwright scripts</h3>
+<pre><code><span class="fn">phoenix</span> automate
+</code></pre>
+<p>With <code>layout = "pom-v1"</code> in <code>.phoenixrc</code>, produces:<br />
+- <code>pages/&lt;module&gt;_page.py</code> — Page Object class with all interactions<br />
+- <code>tests/&lt;module&gt;/test_&lt;name&gt;.py</code> — thin test wrapper that calls the page object<br />
+- <code>locators/&lt;module&gt;.json</code> — element locators with fallback strategies</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--manual-dir &lt;path&gt;</code></td>
+<td>Use a different directory instead of <code>manual_tests/</code></td>
+</tr>
+<tr>
+<td><code>--file &lt;path&gt;</code></td>
+<td>Automate a single manual test file</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Supported filename patterns in <code>manual_tests/</code>:</strong><br />
+<code>manual_test_*.md</code>, <code>test_*.md</code>, <code>TC-*.md</code>, <code>*_manual.md</code>, <code>*_test.md</code></p>
+<hr />
+<h3 id="phoenix-run-execute-the-tests"><code>phoenix run</code> — Execute the tests</h3>
+<pre><code><span class="fn">phoenix</span> run tests/<path>
+</code></pre>
+<p>If a test fails, Phoenix retries it automatically (up to 3 times) and attempts a locator heal between each retry. An HTML report is saved to <code>reports/</code> after every run.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--headed</code></td>
+<td>Open a visible browser window — useful for debugging</td>
+</tr>
+<tr>
+<td><code>--slow-mo 500</code></td>
+<td>Slow down each action by N ms — use with <code>--headed</code></td>
+</tr>
+<tr>
+<td><code>--failed-only</code></td>
+<td>Re-run only tests that failed in the previous run</td>
+</tr>
+<tr>
+<td><code>--browser firefox</code></td>
+<td><code>chromium</code> (default), <code>firefox</code>, or <code>webkit</code></td>
+</tr>
+<tr>
+<td><code>--max-attempts 5</code></td>
+<td>Increase healing retries</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="phoenix-fix-auto-repair-failing-scripts"><code>phoenix fix</code> — Auto-repair failing scripts</h3>
+<pre><code><span class="fn">phoenix</span> fix
+<span class="fn">phoenix</span> run --failed-only
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--dry-run</code></td>
+<td>Show what would be fixed without writing any files</td>
+</tr>
+<tr>
+<td><code>--run-id &lt;id&gt;</code></td>
+<td>Fix failures from a specific run</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h3 id="phoenix-clean-remove-generated-files"><code>phoenix clean</code> — Remove generated files</h3>
+<pre><code><span class="fn">phoenix</span> clean           # delete test scripts, reports, locators, logs
+<span class="fn">phoenix</span> clean --dry-run # preview what would be deleted
+</code></pre>
+<blockquote>
+<p><strong>Note:</strong> <code>pages/</code> (Page Object files) is <strong>not</strong> cleaned — page objects are long-lived shared code. Delete them manually if you want to regenerate from scratch.</p>
+</blockquote>
+<hr />
+<h3 id="other-commands">Other commands</h3>
+<pre><code><span class="fn">phoenix</span> report --open           # generate <span class="kw">and</span> open HTML report <span class="kw">in</span> browser
+<span class="fn">phoenix</span> report --trend          # multi-run trend report
+<span class="fn">phoenix</span> logs                    # last 10 runs
+<span class="fn">phoenix</span> logs --run-id <id>      # per-test detail <span class="kw">for</span> one run
+<span class="fn">phoenix</span> locators                # inspect all element locators
+<span class="fn">phoenix</span> doctor                  # check API key, server, Playwright, plugins
+<span class="fn">phoenix</span> migrate                 # add missing dirs/files to an existing project
+</code></pre>
+<hr />
+<h2 id="part-6-daily-workflow">Part 6 — Daily Workflow</h2>
+<pre><code><span class="cm"># 1. Write a user story</span>
+<span class="fn">notepad</span> user_stories\login.txt
+
+<span class="cm"># 2. Generate manual test cases</span>
+<span class="fn">phoenix</span> generate --story-file user_stories/login.txt
+
+<span class="cm"># 3. Review manual_tests/  ← only manual step</span>
+
+<span class="cm"># 4. Generate Playwright scripts</span>
+<span class="fn">phoenix</span> automate
+
+<span class="cm"># 5. Run the tests</span>
+<span class="fn">phoenix</span> run tests/
+
+<span class="cm"># 6. Fix any failures</span>
+<span class="fn">phoenix</span> fix
+<span class="fn">phoenix</span> run --failed-only
+
+<span class="cm"># 7. View the report</span>
+<span class="fn">phoenix</span> report --open
+</code></pre>
+<hr />
+<h2 id="part-7-jira-integration-optional">Part 7 — Jira Integration (Optional)</h2>
+<pre><code><span class="cm"># Set environment variables (add to .env.local)</span>
+<span class=<span class="str">"var"</span>>$env:JIRA_URL</span>        = &quot;https://yourcompany.atlassian.net&quot;
+<span class=<span class="str">"var"</span>>$env:JIRA_EMAIL</span>      = &quot;you@company.com&quot;
+<span class=<span class="str">"var"</span>>$env:JIRA_API_TOKEN</span>  = &quot;your-api-token&quot;   # <span class="kw">from</span> id.atlassian.com
+</code></pre>
+<p>Enable in <code>.phoenixrc</code>:</p>
+<pre><code>[jira]
+url                       = &quot;https://yourcompany.atlassian.net&quot;
+project_key               = &quot;PROJ&quot;
+acceptance_criteria_field = &quot;description&quot;
+download_attachments      = true
+</code></pre>
+<pre><code><span class="fn">phoenix</span> jira health           # check connectivity
+<span class="fn">phoenix</span> jira show PROJ-123    # preview before generating
+<span class="fn">phoenix</span> generate --jira PROJ-123
+</code></pre>
+<hr />
+<h2 id="part-8-writing-good-user-stories">Part 8 — Writing Good User Stories</h2>
+<pre><code>User Story: Login to My App
+Application URL: https://your-app.com/login
+
+As a registered user I want to log <span class="kw">in</span>.
+
+Acceptance Criteria:
+
+Scenario 1: Successful Login
+- Navigate to the login page
+- Enter Username 'standard_user' <span class="kw">and</span> Password 'secret_sauce', <span class="kw">then</span> click Login
+- Verify the Products page is displayed
+
+Scenario 2: Invalid Password
+- Enter a correct username <span class="kw">and</span> wrong password, <span class="kw">then</span> click Login
+- Verify an error message is shown
+
+Scenario 3: Empty Fields
+- Leave Username <span class="kw">and</span> Password empty <span class="kw">and</span> click Login
+- Verify a validation error is shown
+</code></pre>
+<p><strong>Tips:</strong><br />
+- One scenario per logical flow (happy path, error, edge case)<br />
+- Name the fields users fill in and what they should see after each action<br />
+- Plain English — no technical jargon needed</p>
+<hr />
+<h2 id="part-9-troubleshooting">Part 9 — Troubleshooting</h2>
+<h3 id="phoenix-command-not-found"><code>phoenix</code> command not found</h3>
+<p>Your virtual environment is not active:</p>
+<pre><code><span class="fn">phoenix</span>-venv\Scripts\activate
+</code></pre>
+<hr />
+<h3 id="generated-0-manual-tests"><code>Generated 0 manual test(s)</code></h3>
+<p>The quality gate rejected the generated tests. Add <code>--no-gate</code> to save them anyway:</p>
+<pre><code><span class="fn">phoenix</span> generate --story-file user_stories/login.txt --no-gate
+</code></pre>
+<hr />
+<h3 id="modulenotfounderror-no-module-named-pagesbase_page"><code>ModuleNotFoundError: No module named 'pages.base_page'</code></h3>
+<p><code>pages/base_page.py</code> is missing. Run:</p>
+<pre><code><span class="fn">phoenix</span> migrate
+</code></pre>
+<p>This adds any missing files to your project. If the error persists, check that <code>pages/base_page.py</code> exists in your project root.</p>
+<hr />
+<h3 id="intelligence-server-wont-start-connection-refused">Intelligence server won't start / "Connection refused"</h3>
+<ul>
+<li>Confirm <code>ANTHROPIC_API_KEY</code> is set: <code>echo $env:ANTHROPIC_API_KEY</code></li>
+<li>Check port 8001 is free: <code>netstat -ano | findstr :8001</code></li>
+<li>Start the server: <code>C:\Phoenix\phoenix-intelligence.exe</code></li>
+</ul>
+<hr />
+<h3 id="tests-fail-with-locator-or-timeout-errors">Tests fail with locator or timeout errors</h3>
+<pre><code><span class="fn">phoenix</span> fix
+<span class="fn">phoenix</span> run --failed-only
+</code></pre>
+<p>If the same test keeps failing, watch it in headed mode:</p>
+<pre><code><span class="fn">phoenix</span> run --headed --slow-mo 1000 tests/<path>
+</code></pre>
+<hr />
+<h3 id="supporting-documents-not-being-used">Supporting documents not being used</h3>
+<p>Place the folder next to the story file with the same name:<br />
+<code>user_stories/checkout.txt</code> → <code>user_stories/checkout/wireframe.pdf</code></p>
+<hr />
+<h2 id="quick-reference">Quick Reference</h2>
+<pre><code>Every session:
+  Terminal 1    C:\Phoenix\<span class="fn">phoenix</span>-intelligence.exe   (keep open)
+  Terminal 2    <span class="fn">phoenix</span>-venv\Scripts\activate
+                [load .env.local]
+
+Full workflow:
+  <span class="fn">phoenix</span> generate --story-file user_stories/myfeature.txt
+<span class="cm">  # review manual_tests/</span>
+  <span class="fn">phoenix</span> automate
+  <span class="fn">phoenix</span> run tests/
+  <span class="fn">phoenix</span> fix  →  <span class="fn">phoenix</span> run --failed-only
+  <span class="fn">phoenix</span> report --open
+
+Useful commands:
+  <span class="fn">phoenix</span> doctor                          check everything is connected
+  <span class="fn">phoenix</span> generate ... --no-gate          bypass quality check
+  <span class="fn">phoenix</span> run --headed --slow-mo 800      debug with visible browser
+  <span class="fn">phoenix</span> clean                           delete all generated scripts/reports
+  <span class="fn">phoenix</span> locators                        inspect element locators
+  <span class="fn">phoenix</span> logs                            see run history
+</code></pre>
+</body>
+</html>

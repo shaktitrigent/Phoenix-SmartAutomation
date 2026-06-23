@@ -91,8 +91,8 @@ python -m venv phoenix-venv
 phoenix-venv\Scripts\activate
 
 # Install from the wheel files (run from the folder containing .whl files)
-pip install phoenix_shared-0.1.4-py3-none-any.whl
-pip install phoenix_core-0.1.4-py3-none-any.whl
+pip install phoenix_shared-0.1.5-py3-none-any.whl
+pip install phoenix_core-0.1.5-py3-none-any.whl
 
 # Install the Playwright browser
 playwright install chromium
@@ -111,8 +111,8 @@ phoenix-venv\Scripts\activate
 pip uninstall phoenix-core phoenix-shared -y
 
 # 3. Install new versions
-pip install phoenix_shared-0.1.4-py3-none-any.whl
-pip install phoenix_core-0.1.4-py3-none-any.whl
+pip install phoenix_shared-0.1.5-py3-none-any.whl
+pip install phoenix_core-0.1.5-py3-none-any.whl
 
 # 4. Replace the server executable (delete old, copy new to C:\Phoenix\)
 

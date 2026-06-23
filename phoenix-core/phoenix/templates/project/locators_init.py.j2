@@ -26,8 +26,21 @@ def load_locators(page_name: str, locators_dir: str = "locators") -> Dict[str, A
 
 
 def get_selector(locators: Dict[str, Any], element_id: str) -> Optional[str]:
-    """Look up the CSS/role selector for *element_id* from a loaded bundle."""
-    for bundle in locators if isinstance(locators, list) else [locators]:
-        if isinstance(bundle, dict) and bundle.get("element_id") == element_id:
-            return bundle.get("selector") or bundle.get("primary", {}).get("value")
+    """Look up the CSS/role selector for *element_id* from a loaded bundle.
+
+    Accepts both list (standard JSON array format) and dict (legacy) bundles.
+    Matches on element_name (canonical key written by persist_locators) and
+    falls back to element_id for backward compatibility.
+    """
+    items = locators if isinstance(locators, list) else [locators]
+    for bundle in items:
+        if not isinstance(bundle, dict):
+            continue
+        name = bundle.get("element_name") or bundle.get("element_id")
+        if name != element_id:
+            continue
+        if bundle.get("selector"):
+            return bundle["selector"]
+        primary = bundle.get("primary")
+        return primary.get("value") if isinstance(primary, dict) else None
     return None

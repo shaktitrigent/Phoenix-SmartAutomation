@@ -51,7 +51,7 @@ def auth_storage_state(browser: Browser) -> dict:
         from pages.login_page import LoginPage
         lp = LoginPage(page)
         lp.navigate()
-        lp.login(os.environ["TEST_USERNAME"])
+        lp.login(os.environ["TEST_USERNAME"], os.environ["TEST_PASSWORD"])
     except ImportError:
         # Fallback when pages/ are not yet generated
         page.goto(f"{_BASE_URL}/login", timeout=60_000)

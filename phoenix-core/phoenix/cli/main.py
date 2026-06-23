@@ -1,11 +1,18 @@
 """CLI entry point"""
 
 import click
+
+try:
+    from importlib.metadata import version as _pkg_version
+    _PHOENIX_VERSION = _pkg_version("phoenix-core")
+except Exception:
+    _PHOENIX_VERSION = "0.0.0-dev"
+
 from phoenix.cli.commands import clean, doctor, fix, generate, execute, init, jira, locators, logs, migrate, run, report, automate
 
 
 @click.group()
-@click.version_option(version="0.1.3", prog_name="phoenix")
+@click.version_option(version=_PHOENIX_VERSION, prog_name="phoenix")
 @click.option("--config", "-c", type=click.Path(exists=True), help="Path to configuration file")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.pass_context

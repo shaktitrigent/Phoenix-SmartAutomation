@@ -60,20 +60,7 @@ def pytest_addoption(parser):
         choices=["chromium", "firefox", "webkit"],
         help="Browser to use",
     )
-    _addoption_if_missing(
-        parser,
-        "--headed",
-        action="store_true",
-        default=False,
-        help="Run browser in headed (visible) mode.",
-    )
-    _addoption_if_missing(
-        parser,
-        "--headless",
-        action="store_true",
-        default=False,
-        help="Run browser in headless mode (default unless --headed is set).",
-    )
+    # --headed is owned by pytest-playwright; do not re-register it here.
 
 
 # ---------------------------------------------------------------------------

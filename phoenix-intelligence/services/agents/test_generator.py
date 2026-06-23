@@ -1130,6 +1130,25 @@ def _parse_bdd_bundle_output(raw: str) -> Tuple[Dict[str, Any], List[Dict[str, A
     return bundle, locators_raw, recommendations
 
 
+_AUTH_PRECONDITION_PHRASES = (
+    "logged in",
+    "authenticated",
+    "on the dashboard",
+    "already logged in",
+    "signed in",
+    "valid session",
+    "active session",
+    "user is logged",
+    "user has logged",
+)
+
+
+def _needs_authenticated_page(preconditions: str) -> bool:
+    """Return True when the preconditions indicate the user must already be logged in."""
+    low = preconditions.lower()
+    return any(phrase in low for phrase in _AUTH_PRECONDITION_PHRASES)
+
+
 def _extract_test_body_lines(script_code: str) -> List[str]:
     """Extract the body lines of the first ``test_*`` function in *script_code*.
 
@@ -1174,7 +1193,13 @@ def _extract_test_body_lines(script_code: str) -> List[str]:
     return []
 
 
-def _synthesize_pom_bundle(script_code: str, module_name: str, test_name: str) -> Dict[str, Any]:
+def _synthesize_pom_bundle(
+    script_code: str,
+    module_name: str,
+    test_name: str,
+    preconditions: str = "",
+    human_name: str = "",
+) -> Dict[str, Any]:
     """Build a minimal ``pom_bundle`` from a flat Playwright script.
 
     The entire flat-script body is wrapped in a single page-object method; a
@@ -1183,8 +1208,15 @@ def _synthesize_pom_bundle(script_code: str, module_name: str, test_name: str) -
     validate→repair loop in ``AutomationTestGenerator`` still runs on the
     synthesized test file.
     """
-    # Derive class name: "login_checkout" → "LoginCheckoutPage"
-    page_class = "".join(w.capitalize() for w in re.split(r"[_\-]+", module_name)) + "Page"
+    # Derive class name from the human-readable test name when available so that
+    # the class captures the full intent (e.g. "SuccessfulLoginWithValidCredentialsPage")
+    # rather than the truncated module slug.
+    if human_name:
+        _clean = re.sub(r"^[A-Z]+-\d+[:\s\-]+", "", human_name).strip()
+        _clean = re.sub(r"[^a-zA-Z0-9 ]", " ", _clean)
+        page_class = "".join(w.capitalize() for w in _clean.split() if w) + "Page"
+    else:
+        page_class = "".join(w.capitalize() for w in re.split(r"[_\-]+", module_name)) + "Page"
     page_file = f"pages/{module_name}_page.py"
     test_file = f"tests/{module_name}/test_{test_name}.py"
 
@@ -1201,7 +1233,13 @@ def _synthesize_pom_bundle(script_code: str, module_name: str, test_name: str) -
     ]
 
     if not body_lines:
-        body_lines = ["        pass  # no actions extracted from flat script"]
+        body_lines = [
+            "        # [NEEDS MANUAL REVIEW] No automation steps were extracted.",
+            "        # This usually means the MCP browser connection was unavailable during",
+            "        # `phoenix automate`. Re-run after resolving the MCP connection, or",
+            "        # fill in the Playwright steps manually.",
+            "        pass",
+        ]
 
     method_body = "\n".join(body_lines)
 
@@ -1222,6 +1260,11 @@ def _synthesize_pom_bundle(script_code: str, module_name: str, test_name: str) -
         f"{method_body}\n"
     )
 
+    # Choose the correct pytest fixture based on preconditions: tests that start
+    # from an already-authenticated state should use authenticated_page so the
+    # session-scoped storage state is reused instead of logging in again.
+    _fixture = "authenticated_page" if _needs_authenticated_page(preconditions) else "page"
+
     # ── Test file ──────────────────────────────────────────────────────────
     test_code = (
         f'"""Test: {test_name.replace("_", " ")}'
@@ -1230,9 +1273,9 @@ def _synthesize_pom_bundle(script_code: str, module_name: str, test_name: str) -
         f"import pytest\n"
         f"from playwright.sync_api import Page\n"
         f"from pages.{module_name}_page import {page_class}\n\n\n"
-        f"def test_{test_name}(page: Page) -> None:\n"
+        f"def test_{test_name}({_fixture}: Page) -> None:\n"
         f'    """{test_name.replace("_", " ")}."""\n'
-        f"    _po = {page_class}(page)\n"
+        f"    _po = {page_class}({_fixture})\n"
         f"    _po.navigate()\n"
         f"    _po.{test_name}()\n"
     )
@@ -1530,8 +1573,10 @@ class TestGeneratorAgent(BaseAgent):
                 page_snapshot = self.mcp_client.inspect_page(application_url) or ""
                 logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
             except Exception as _mcp_exc:
-                logger.warning(
-                    "MCP inspect_page failed for %s — continuing without snapshot: %s",
+                logger.error(
+                    "MCP inspect_page failed for %s — generation will proceed without a DOM "
+                    "snapshot. Page object methods will contain [NEEDS MANUAL REVIEW] markers "
+                    "and must be completed before tests can run. Error: %s",
                     application_url, _mcp_exc,
                 )
                 page_snapshot = ""
@@ -1864,8 +1909,10 @@ class TestGeneratorAgent(BaseAgent):
             try:
                 page_snapshot = self.mcp_client.inspect_page(application_url) or ""
             except Exception as _mcp_exc:
-                logger.warning(
-                    "MCP inspect_page failed for %s — continuing without snapshot: %s",
+                logger.error(
+                    "MCP inspect_page failed for %s — generation will proceed without a DOM "
+                    "snapshot. Page object methods will contain [NEEDS MANUAL REVIEW] markers "
+                    "and must be completed before tests can run. Error: %s",
                     application_url, _mcp_exc,
                 )
                 page_snapshot = ""
@@ -1881,8 +1928,8 @@ class TestGeneratorAgent(BaseAgent):
             if source_file:
                 _stem = re.sub(r"[^\w]", "_", Path(source_file).stem).strip("_").lower()
                 _stem = re.sub(r"^(?:manual_test_\d+_|tc_\d+_|test_\d+_)+", "", _stem).strip("_")
-                if len(_stem) > 30:
-                    _trunc = _stem[:30]
+                if len(_stem) > 50:
+                    _trunc = _stem[:50]
                     _last_us = _trunc.rfind("_")
                     _stem = (_trunc[:_last_us].strip("_") if _last_us > 5 else _trunc).strip("_")
                 module_name = _stem or test_name
@@ -1932,7 +1979,13 @@ class TestGeneratorAgent(BaseAgent):
                     manifest=manifest,
                 )
                 script_code = gen["script_code"]
-                pom_bundle = _synthesize_pom_bundle(script_code, module_name, test_name)
+                pom_bundle = _synthesize_pom_bundle(
+                    script_code,
+                    module_name,
+                    test_name,
+                    preconditions=manual_test.get("preconditions", ""),
+                    human_name=manual_test.get("name", ""),
+                )
                 results.append(
                     {
                         "name": test_name,

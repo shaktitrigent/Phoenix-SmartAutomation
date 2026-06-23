@@ -105,9 +105,9 @@ class ModuleAwareWriter:
         if out_path.exists():
             existing = _extract_test_functions(out_path.read_text(encoding="utf-8"))
 
-        # Incoming replaces existing
+        # Incoming replaces existing (with marks injected into the body)
         for tf in new_tests:
-            existing[tf.name] = tf.body
+            existing[tf.name] = _inject_marks(tf.body, tf.marks)
 
         # Sort: smoke first, then everything else (stable within each group)
         def _sort_key(item: tuple) -> tuple:
@@ -248,6 +248,30 @@ def _extract_test_functions(source: str) -> Dict[str, str]:
         funcs[node.name] = "".join(block_lines)
 
     return funcs
+
+
+def _inject_marks(body: str, marks: List[str]) -> str:
+    """Prepend @pytest.mark.<tag> decorators to *body* for each mark not already present.
+
+    Hyphens are converted to underscores for valid Python identifiers.
+    The 'manual' tag is skipped — it is an internal convention, not a useful marker.
+    Decorators are inserted immediately before the first 'def test_' line.
+    """
+    _SKIP = {"manual"}
+    new_marks = []
+    for m in marks:
+        identifier = re.sub(r"[^a-z0-9_]", "_", m.lower().replace("-", "_"))
+        decorator = f"@pytest.mark.{identifier}"
+        if identifier not in _SKIP and decorator not in body:
+            new_marks.append(decorator)
+    if not new_marks:
+        return body
+    prefix = "\n".join(new_marks) + "\n"
+    # Insert before the first `def test_` line (which may already have decorators above it)
+    match = re.search(r"^def test_", body, re.MULTILINE)
+    if match:
+        return body[: match.start()] + prefix + body[match.start() :]
+    return prefix + body
 
 
 def _extract_case_ids(content: str) -> set[str]:

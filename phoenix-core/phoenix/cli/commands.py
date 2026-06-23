@@ -80,6 +80,13 @@ def _write_module_artifacts(
         if verbose:
             print_info(f"  Module manual:  {path}")
 
+    # Collect all unique tags from the manual tests for this module (excluding "manual")
+    _module_tags = sorted({
+        t for m in (all_manual or [])
+        for t in m.get("tags", [])
+        if t != "manual"
+    })
+
     # Automation test functions (extracted from already-written individual scripts)
     test_funcs: list[TestFunction] = []
     for test in all_automation:
@@ -88,7 +95,7 @@ def _write_module_artifacts(
             try:
                 code = Path(script_path).read_text(encoding="utf-8")
                 for name, body in _extract_test_functions(code).items():
-                    test_funcs.append(TestFunction(name=name, body=body))
+                    test_funcs.append(TestFunction(name=name, body=body, marks=_module_tags))
             except Exception:
                 pass
     if test_funcs:

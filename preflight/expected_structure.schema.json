@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "expected_structure.schema.json",
+  "title": "ExpectedStructure",
+  "description": "JSON Schema (draft-07) validating the parsed expected_structure.yaml document.",
+  "type": "object",
+  "required": [
+    "required_folders",
+    "required_files",
+    "test_grouping_rule",
+    "spec_grouping_rule",
+    "page_object_rule",
+    "locator_registry_rule",
+    "import_rules",
+    "syntax_check",
+    "collect_check"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "required_folders": {
+      "type": "array",
+      "description": "List of folder names that must exist in the generated project.",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "required_files": {
+      "type": "array",
+      "description": "List of file paths (relative to project root) that must exist.",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "test_grouping_rule": {
+      "type": "object",
+      "description": "Rule enforcing one test module per feature, not one file per test case.",
+      "required": ["description", "pattern", "violation_pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "pattern":     { "type": "string" },
+        "violation_pattern": { "type": "string" }
+      }
+    },
+    "spec_grouping_rule": {
+      "type": "object",
+      "description": "Rule enforcing one manual_tests/<feature>.md per feature.",
+      "required": ["description", "violation_pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "description":       { "type": "string" },
+        "violation_pattern": { "type": "string" }
+      }
+    },
+    "page_object_rule": {
+      "type": "object",
+      "description": "Rule forbidding raw selector strings inside page objects.",
+      "required": ["description", "forbidden_patterns"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "forbidden_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      }
+    },
+    "locator_registry_rule": {
+      "type": "object",
+      "description": "Rule requiring tiered locator JSON with mandatory keys and no degenerate primaries.",
+      "required": ["description", "required_keys", "forbidden_primaries"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "required_keys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "forbidden_primaries": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "import_rules": {
+      "type": "object",
+      "description": "Static-analysis rules for Python import hygiene.",
+      "required": ["no_duplicate_imports", "no_imports_in_docstrings"],
+      "additionalProperties": false,
+      "properties": {
+        "no_duplicate_imports":    { "type": "boolean" },
+        "no_imports_in_docstrings": { "type": "boolean" }
+      }
+    },
+    "syntax_check": {
+      "type": "boolean",
+      "description": "When true, the gate runs py_compile on every generated .py file."
+    },
+    "collect_check": {
+      "type": "boolean",
+      "description": "When true, the gate runs pytest --collect-only to verify test discovery."
+    }
+  }
+}

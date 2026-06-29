@@ -1,0 +1,43 @@
+# TARGET project shape both gates assert against
+required_folders:
+  - pages
+  - locators
+  - tests
+  - manual_tests
+  - reports
+  - logs
+
+required_files:
+  - conftest.py
+  - pages/base_page.py
+
+test_grouping_rule:
+  description: "One test module per feature under tests/<feature>/, not one file per test case"
+  pattern: "tests/{feature}/test_{feature}.py"
+  violation_pattern: "tests/test_tc_*.py"
+
+spec_grouping_rule:
+  description: "One manual_tests/<feature>.md per feature, not one per test case"
+  violation_pattern: "manual_tests/manual_test_00*.md"
+
+page_object_rule:
+  description: "No raw selector strings inside page objects"
+  forbidden_patterns:
+    - '\.locator\("[#\.]'
+    - '\.locator\(''[#\.]'
+
+locator_registry_rule:
+  description: "locators/<feature>.json must have tiered primary + non-empty element list"
+  required_keys:
+    - element_name
+    - primary
+  forbidden_primaries:
+    - "css=body"
+    - "body"
+
+import_rules:
+  no_duplicate_imports: true
+  no_imports_in_docstrings: true
+
+syntax_check: true
+collect_check: true

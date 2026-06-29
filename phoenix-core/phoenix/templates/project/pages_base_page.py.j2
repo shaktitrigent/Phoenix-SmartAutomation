@@ -12,7 +12,7 @@ Usage::
         URL_PATH = "/auth/login"
 
         def login(self, username: str) -> None:
-            """Login with username; password is resolved from TEST_PASSWORD env var."""
+            # Login with username; password resolved from TEST_PASSWORD env var.
             password = os.environ.get(f"PASS_{username.upper()}", os.environ["TEST_PASSWORD"])
             self.fill(self._page.get_by_label("Username"), username)
             self.fill(self._page.get_by_label("Password"), password)

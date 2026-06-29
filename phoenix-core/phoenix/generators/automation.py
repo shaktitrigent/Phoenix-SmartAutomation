@@ -37,6 +37,42 @@ from phoenix.storage.models import TestType
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Fixture selection — authenticated_page vs plain page
+# ---------------------------------------------------------------------------
+
+_AUTH_PRECONDITION_PHRASES = (
+    "logged in",
+    "authenticated",
+    "on the dashboard",
+    "already logged in",
+    "signed in",
+    "valid session",
+    "active session",
+    "user is logged",
+    "user has logged",
+)
+
+
+def _needs_authenticated_page(preconditions: str) -> bool:
+    """Return True when preconditions indicate the user must already be logged in."""
+    low = preconditions.lower()
+    return any(phrase in low for phrase in _AUTH_PRECONDITION_PHRASES)
+
+
+def _swap_to_authenticated_fixture(code: str) -> str:
+    """Replace ``page: Page`` with ``authenticated_page: Page`` in test_* signatures.
+
+    Only touches the function-signature line to avoid mangling calls to
+    page-object methods or helper functions that coincidentally use 'page'.
+    """
+    return re_module.sub(
+        r"(def test_\w+\s*\()page(\s*:\s*Page)",
+        r"\1authenticated_page\2",
+        code,
+    )
+
+
 # Title-case two-or-more word pattern used to detect person display names
 _PERSON_NAME_RE = re_module.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$")
 
@@ -147,6 +183,10 @@ class AutomationTestGenerator:
             )
 
         code = self._normalise(script_code)
+
+        # Swap fixture to authenticated_page when preconditions require a live session
+        if _needs_authenticated_page(test.get("preconditions", "")):
+            code = _swap_to_authenticated_fixture(code)
 
         # ── Determine output path (needed by repair-loop logging) ──────────────────
         safe_name = _slugify(test.get("name", f"test_{idx}"))
@@ -315,8 +355,15 @@ class AutomationTestGenerator:
 
 
 def _strip_code_fences(code: str) -> str:
-    """Remove markdown ```python ... ``` fences an LLM may wrap the script in."""
+    """Remove markdown ```python ... ``` fences an LLM may wrap the script in.
+
+    Extracts content between the first opening and first closing fence so that
+    trailing prose appended by the LLM after the closing fence is discarded.
+    """
     code = code.strip()
+    fence_match = re_module.search(r"^```[a-zA-Z]*\r?\n(.*?)```", code, re_module.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
     code = re_module.sub(r"^```[a-zA-Z]*\r?\n?", "", code)
     code = re_module.sub(r"\r?\n?```\s*$", "", code)
     return code.strip()
@@ -799,17 +846,38 @@ def _slugify(name: str, max_len: int = 80) -> str:
 
 
 def _prepend_fixme_header(code: str, error_text: str) -> str:
-    """Prepend a FIXME comment block so developers can see exactly why repair failed.
+    """Return a syntactically valid stub that pytest can collect when auto-repair fails.
 
-    The script is still written to disk — this is intentional.  A broken file
-    with a clear error message is far more useful than a silent missing file.
+    A ``pytest.skip()`` stub is far more useful than a broken file with FIXME
+    comments: pytest can collect and report it, the skip message points the
+    developer at the problem, and test-run summaries show the file as *skipped*
+    rather than crashing the collection phase entirely.
+
+    The original broken code is preserved in a comment block below the stub so
+    developers can read it without losing context.
     """
-    truncated = (error_text or "unknown error")[:500].replace("\n", "\n#   ")
-    header = (
+    error_text = error_text or "unknown error"
+    # Build a one-line safe message: strip newlines and quotes that would break
+    # the Python string literal inside the stub.
+    safe_msg = error_text[:200].replace("\\", "\\\\").replace('"', "'").replace("\n", " ")
+    # Preserve the full error as a comment block for debugging
+    comment_lines = "\n".join(f"#   {ln}" for ln in error_text[:2000].splitlines())
+    stub = (
         "# " + "=" * 74 + "\n"
-        "# FIXME(phoenix): This script could not be auto-repaired.\n"
-        f"#   Last error: {truncated}\n"
+        "# phoenix auto-repair failed — pytest.skip() stub written instead.\n"
+        "# Re-run `phoenix automate` after resolving the error shown below.\n"
+        "#\n"
+        f"{comment_lines}\n"
         "# " + "=" * 74 + "\n"
         "\n"
+        "import pytest\n"
+        "from playwright.sync_api import Page\n"
+        "\n"
+        "\n"
+        "def test_auto_repair_failed(page: Page) -> None:\n"
+        f'    """Auto-repair failed: {safe_msg}"""\n'
+        '    pytest.skip(\n'
+        '        "phoenix auto-repair failed — re-run `phoenix automate` to regenerate"\n'
+        '    )\n'
     )
-    return header + code
+    return stub

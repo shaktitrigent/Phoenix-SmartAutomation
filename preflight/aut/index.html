@@ -1,0 +1,218 @@
+<!--
+  AUT (Application Under Test) — Phoenix SmartAutomation VH-1 Preflight Demo App
+  =============================================================================
+  Exposed elements (stable IDs):
+    id="username"       label="Username"          type=text     (login form)
+    id="password"       label="Password"          type=password (login form)
+    id="login-btn"      label="Login"             type=submit   (login form)
+    id="error-msg"      label=n/a                 type=div      (error feedback, class="error")
+    id="dashboard"      label=n/a                 type=section  (visible after successful login)
+    id="first-name"     label="First Name"        type=text     (add-employee form)
+    id="last-name"      label="Last Name"         type=text     (add-employee form)
+    id="employee-id"    label="Employee ID"       type=text     (add-employee form)
+    id="save-btn"       label="Save Employee"     type=submit   (add-employee form)
+    id="success-toast"  label=n/a                 type=div      (save confirmation, hidden by default)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phoenix SmartAutomation — Demo AUT</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1a1a2e;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.10);
+      padding: 2.5rem 2rem;
+      width: 100%;
+      max-width: 440px;
+    }
+
+    h1 { font-size: 1.4rem; margin-bottom: 1.5rem; color: #1a1a2e; }
+    h2 { font-size: 1.15rem; margin-bottom: 1.25rem; color: #1a1a2e; }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 1rem;
+    }
+
+    label {
+      font-size: 0.875rem;
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      padding: 0.5rem 0.75rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 1rem;
+      transition: border-color 0.15s;
+    }
+
+    input[type="text"]:focus,
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #4f46e5;
+    }
+
+    button[type="submit"] {
+      margin-top: 0.5rem;
+      padding: 0.6rem 1.25rem;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button[type="submit"]:hover { background: #4338ca; }
+
+    .error {
+      color: #c0392b;
+      background: #fdecea;
+      border: 1px solid #f5c6cb;
+      border-radius: 4px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.9rem;
+      margin-top: 0.75rem;
+    }
+
+    #success-toast {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+      border-radius: 4px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.9rem;
+      margin-top: 0.75rem;
+    }
+
+    hr { border: none; border-top: 1px solid #e5e7eb; margin: 1.5rem 0; }
+
+    /* Visibility helpers — JS toggles these */
+    [data-hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="card">
+
+    <!-- ═══ LOGIN SECTION ═══ -->
+    <section id="login-section">
+      <h1>Phoenix Demo App</h1>
+
+      <form id="login-form" novalidate>
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input id="username" name="username" type="text" autocomplete="username" placeholder="Enter username" />
+        </div>
+
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter password" />
+        </div>
+
+        <button id="login-btn" type="submit">Login</button>
+      </form>
+
+      <!-- Shown only on validation failure -->
+      <div id="error-msg" class="error" data-hidden aria-live="assertive">Invalid credentials</div>
+    </section>
+
+    <!-- ═══ DASHBOARD SECTION (hidden until login succeeds) ═══ -->
+    <section id="dashboard" data-hidden>
+      <h2>Dashboard — Add Employee</h2>
+
+      <form id="employee-form" novalidate>
+        <div class="form-group">
+          <label for="first-name">First Name</label>
+          <input id="first-name" name="firstName" type="text" placeholder="Jane" />
+        </div>
+
+        <div class="form-group">
+          <label for="last-name">Last Name</label>
+          <input id="last-name" name="lastName" type="text" placeholder="Smith" />
+        </div>
+
+        <div class="form-group">
+          <label for="employee-id">Employee ID</label>
+          <input id="employee-id" name="employeeId" type="text" placeholder="EMP-001" />
+        </div>
+
+        <button id="save-btn" type="submit">Save Employee</button>
+      </form>
+
+      <!-- Shown after a successful save -->
+      <div id="success-toast" data-hidden aria-live="polite">Employee saved successfully</div>
+    </section>
+
+  </div>
+
+  <script>
+    // ── helpers ──────────────────────────────────────────────────────────────
+    function show(el) { el.removeAttribute('data-hidden'); }
+    function hide(el) { el.setAttribute('data-hidden', ''); }
+
+    // ── element references ───────────────────────────────────────────────────
+    const loginForm    = document.getElementById('login-form');
+    const usernameEl   = document.getElementById('username');
+    const passwordEl   = document.getElementById('password');
+    const errorMsg     = document.getElementById('error-msg');
+    const loginSection = document.getElementById('login-section');
+    const dashboard    = document.getElementById('dashboard');
+
+    const employeeForm   = document.getElementById('employee-form');
+    const successToast   = document.getElementById('success-toast');
+
+    // ── login handler ────────────────────────────────────────────────────────
+    loginForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      const user = usernameEl.value.trim();
+      const pass = passwordEl.value.trim();
+
+      if (!user || !pass) {
+        // Invalid credentials — show error, ensure dashboard hidden
+        show(errorMsg);
+        hide(dashboard);
+        return;
+      }
+
+      // Valid (any non-empty creds) — transition to dashboard
+      hide(errorMsg);
+      hide(loginSection);
+      show(dashboard);
+    });
+
+    // ── employee save handler ────────────────────────────────────────────────
+    employeeForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+
+      // Show success toast, auto-hide after 4 s and reset form
+      show(successToast);
+      employeeForm.reset();
+
+      setTimeout(function () {
+        hide(successToast);
+      }, 4000);
+    });
+  </script>
+</body>
+</html>

@@ -209,7 +209,6 @@ def pytest_runtest_makereport(item, call):
       4. Browser console errors
       5. Full Python traceback (inside a collapsible section)
     """
-    from contextlib import suppress as _sup
     outcome = yield
     report = outcome.get_result()
 
@@ -233,7 +232,7 @@ def pytest_runtest_makereport(item, call):
     safe_name = re.sub(r"[^\w\-]", "_", item.nodeid)
     screenshot_path = screenshots_dir / f"{safe_name}.png"
     screenshot_taken = False
-    with _sup(Exception):
+    with suppress(Exception):
         page_fixture.screenshot(path=str(screenshot_path), full_page=True)
         screenshot_taken = True
         report.screenshots = [str(screenshot_path)]
@@ -252,13 +251,13 @@ def pytest_runtest_makereport(item, call):
     # 3. Page context
     page_url = ""
     page_title = ""
-    with _sup(Exception):
+    with suppress(Exception):
         page_url = page_fixture.url
         page_title = page_fixture.title()
 
     # 4. Console errors
     console_errors: list = []
-    with _sup(Exception):
+    with suppress(Exception):
         # collect errors logged via page.on("console", ...) if set up
         console_errors = getattr(page_fixture, "_phoenix_console_errors", [])
 

@@ -28,8 +28,19 @@ def _safe_substitute(template: str, **kwargs: str) -> str:
 
 
 def _strip_code_fences(text: str) -> str:
-    """Remove markdown code fences that LLMs sometimes wrap around Python scripts."""
+    """Remove markdown code fences that LLMs sometimes wrap around Python scripts.
+
+    Handles the common LLM pattern of appending prose after the closing fence
+    (e.g. "```\\nNote: remember to set APP_URL…") by extracting only the content
+    between the first opening and first closing fence.
+    """
     text = text.strip()
+    # Greedy extraction: pull the body from the first ``` block even when there
+    # is trailing text after the closing fence.
+    fence_match = re.search(r"^```[a-zA-Z]*\r?\n(.*?)```", text, re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+    # Fallback for bare fences at start/end only
     text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
     text = re.sub(r"\r?\n?```\s*$", "", text)
     return text.strip()
@@ -784,6 +795,25 @@ _GLOB_URL_WAIT_RE = re.compile(
     r'(?P<indent>\s*)page\.wait_for_url\("(?P<glob>\*\*[^"]+)",\s*timeout=(?P<timeout>\d+)\)'
 )
 
+# Known placeholder domains that indicate the LLM hallucinated a URL instead of
+# using os.environ["APP_URL"].  Matches patterns like:
+#   https://your-app.com/...   https://./your-app.com/...   http://example.com/...
+_PLACEHOLDER_URL_RE = re.compile(
+    r'(?:https?://)?(?:\./)?(?:your[-_]app\.com|example\.com|your[-_]domain\.com)[^\s"\']*',
+    re.IGNORECASE,
+)
+
+
+def _scrub_placeholder_urls(script: str) -> str:
+    """Replace known placeholder URLs with os.environ['APP_URL'].
+
+    The LLM sometimes emits template URLs (e.g. ``https://your-app.com/login``)
+    when the real application URL is not provided.  This turns them into the
+    canonical env-var reference so tests fail with a clear NameError rather than
+    a mysterious net::ERR_NAME_NOT_RESOLVED.
+    """
+    return _PLACEHOLDER_URL_RE.sub('os.environ["APP_URL"]', script)
+
 _FALLBACK_RUNTIME_HELPERS = textwrap.dedent(
     """
     ACTION_TIMEOUT_MS = 30_000
@@ -876,6 +906,9 @@ def _inject_runtime_helpers(script: str) -> str:
     if "import os" not in script:
         script = "import os\n" + script
 
+    if "import re" not in script:
+        script = "import re\n" + script
+
     script = re.sub(
         r"from playwright\.sync_api import Page, expect",
         "from playwright.sync_api import Locator, Page, expect",
@@ -902,6 +935,7 @@ def _inject_runtime_helpers(script: str) -> str:
 def _normalise_generated_script(script: str) -> str:
     """Tighten generated Playwright code for dynamic UIs and strict-mode safety."""
     script = _strip_automation_placeholders(script)
+    script = _scrub_placeholder_urls(script)
     script = _inject_runtime_helpers(script)
 
     script = _GLOB_URL_WAIT_RE.sub(
@@ -1250,11 +1284,12 @@ def _synthesize_pom_bundle(
         f"from __future__ import annotations\n\n"
         f"import os\n"
         f"import re\n"
-        f"from playwright.sync_api import expect\n"
+        f"from playwright.sync_api import Locator, Page, expect\n"
         f"from pages.base_page import BasePage\n\n\n"
+        f"{_FALLBACK_RUNTIME_HELPERS}\n\n\n"
         f"class {page_class}(BasePage):\n"
         f'    """Page object for {module_name} tests."""\n\n'
-        f'    URL_PATH = "/"\n\n'
+        f'    URL_PATH = ""\n\n'
         f"    def {test_name}(self) -> None:\n"
         f'        """{test_name.replace("_", " ")}."""\n'
         f"{method_body}\n"
@@ -1570,8 +1605,20 @@ class TestGeneratorAgent(BaseAgent):
         if self.mcp_client and application_url:
             logger.info("Inspecting page via MCP: %s", application_url)
             try:
-                page_snapshot = self.mcp_client.inspect_page(application_url) or ""
-                logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                import concurrent.futures as _cf
+                _mcp_pool = _cf.ThreadPoolExecutor(max_workers=1)
+                _mcp_fut = _mcp_pool.submit(self.mcp_client.inspect_page, application_url)
+                try:
+                    page_snapshot = _mcp_fut.result(timeout=60) or ""
+                    logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                except _cf.TimeoutError:
+                    logger.warning(
+                        "MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
+                        application_url,
+                    )
+                    page_snapshot = ""
+                finally:
+                    _mcp_pool.shutdown(wait=False)  # don't block; hung thread runs in background
             except Exception as _mcp_exc:
                 logger.error(
                     "MCP inspect_page failed for %s — generation will proceed without a DOM "
@@ -1716,8 +1763,34 @@ class TestGeneratorAgent(BaseAgent):
             )
             raw = self.llm_client.generate(system_prompt, user_prompt)
             script, locators, recommendations = _parse_structured_v2_output(raw)
+            normalised = _normalise_generated_script(script)
+            # Validate the normalised script is syntactically correct before
+            # sending it to the client.  If not, fall back to the heuristic stub
+            # so the client never receives a file that will fail pytest collection.
+            try:
+                compile(normalised, "<generated>", "exec")
+            except SyntaxError as _syn:
+                logger.error(
+                    "LLM returned syntactically invalid Python for '%s' "
+                    "(line %d: %s) — falling back to heuristic stub.",
+                    manual_test.get("name", ""),
+                    _syn.lineno or 0,
+                    _syn.msg,
+                )
+                normalised = _normalise_generated_script(
+                    self._build_fallback_script_from_manual_test(
+                        manual_test=manual_test,
+                        application_url=application_url,
+                    )
+                )
+                locators = []
+                recommendations = [
+                    f"LLM generated invalid Python (SyntaxError: {_syn.msg} at line "
+                    f"{_syn.lineno}) — review this stub and fill in the Playwright steps "
+                    "manually, or re-run `phoenix automate` once the prompt is improved."
+                ]
             return {
-                "script_code": _normalise_generated_script(script),
+                "script_code": normalised,
                 "locators": locators,
                 "recommendations": recommendations,
             }
@@ -1907,7 +1980,19 @@ class TestGeneratorAgent(BaseAgent):
         page_snapshot = ""
         if self.mcp_client and application_url:
             try:
-                page_snapshot = self.mcp_client.inspect_page(application_url) or ""
+                import concurrent.futures as _cf
+                _mcp_pool = _cf.ThreadPoolExecutor(max_workers=1)
+                _mcp_fut = _mcp_pool.submit(self.mcp_client.inspect_page, application_url)
+                try:
+                    page_snapshot = _mcp_fut.result(timeout=60) or ""
+                except _cf.TimeoutError:
+                    logger.warning(
+                        "MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
+                        application_url,
+                    )
+                    page_snapshot = ""
+                finally:
+                    _mcp_pool.shutdown(wait=False)  # don't block; hung thread runs in background
             except Exception as _mcp_exc:
                 logger.error(
                     "MCP inspect_page failed for %s — generation will proceed without a DOM "
@@ -2008,7 +2093,7 @@ class TestGeneratorAgent(BaseAgent):
                 logger.info("Generated POM bundle for manual test: %s", manual_test.get("name", ""))
 
             else:
-                # ── Flat mode (unchanged) ─────────────────────────────────
+                # ── Flat mode ────────────────────────────────────────────
                 gen = self._generate_script_for_manual_test(
                     manual_test=manual_test,
                     application_url=application_url,
@@ -2026,6 +2111,7 @@ class TestGeneratorAgent(BaseAgent):
                         "source_file": source_file,
                         "script_template": "playwright",
                         "script_code": script_code,
+                        "preconditions": manual_test.get("preconditions", ""),
                         "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
                         "locators": gen["locators"],
                         "recommendations": gen["recommendations"],

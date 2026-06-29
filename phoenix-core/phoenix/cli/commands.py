@@ -901,6 +901,13 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
 
     # Use application URL from flag or config
     application_url = url or config.project.resolved_base_url
+    if not application_url:
+        print_warning(
+            "No application URL provided. Pass --url https://your-app.com or set "
+            "'base_url' in .phoenixrc.\n"
+            "Without a real URL the generated tests will contain placeholder navigation "
+            "and locators cannot be grounded against a live DOM snapshot."
+        )
 
     # Load project-specific domain knowledge
     project_root = Path(config_path).parent if config_path else Path.cwd()
@@ -1132,7 +1139,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     project_root = Path(config_path).parent if config_path else Path.cwd()
     _write_module_artifacts(
         module=_module_from_file(manual_path),
-        all_manual=[],
+        all_manual=manual_tests,  # pass manual tests so tags flow into @pytest.mark decorators
         all_automation=written,
         project_root=project_root,
         verbose=verbose,

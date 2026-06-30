@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "_sandbox"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.44",
+    "pytest>=8",
+    "pytest-playwright>=0.5",
+    "phoenix-automation",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: fast, critical-path tests run on every commit",
+    "regression: full regression suite",
+    "sanity: post-deployment sanity checks",
+    "login: login module tests",
+    "checkout: checkout module tests",
+]

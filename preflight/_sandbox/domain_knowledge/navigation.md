@@ -1,0 +1,44 @@
+# Navigation Patterns
+
+Document URL patterns and routing rules for _sandbox.
+
+## Base URL
+
+- Production: (fill in)
+- Staging: (fill in)
+- QA: https://opensource-demo.orangehrmlive.com/web/index.php/auth/login
+
+## Key Page URLs
+
+Example:
+| Page            | URL Path                    |
+|-----------------|-----------------------------|
+| Login           | /auth/login                 |
+| Dashboard       | /dashboard/index            |
+| Employee List   | /pim/viewEmployeeList       |
+| Add Employee    | /pim/addEmployee            |
+| Apply Leave     | /leave/applyLeave           |
+
+YOUR TABLE:
+| Page | URL Path |
+|------|----------|
+| Login | (fill in) |
+
+## Authentication Flow
+
+Example:
+- Login URL: `/auth/login`
+- After login: redirects to `/dashboard/index`
+- Session timeout: 30 minutes idle
+
+YOUR NOTES:
+[Add your observations here]
+
+## Non-Standard Routing
+
+Example:
+- Our app uses hash-based routing: `/#/dashboard`
+- Some pages require query params: `/reports?type=annual`
+
+YOUR NOTES:
+[Add your observations here]

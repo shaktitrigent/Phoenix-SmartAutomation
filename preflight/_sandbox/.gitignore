@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+phoenix-venv/
+
+# Environment / secrets — NEVER commit these
+.env.local
+.env.*.local
+*.env
+
+# Phoenix generated artifacts
+traces/
+videos/
+*.zip
+logs/*.jsonl
+
+# Reports and screenshots
+reports/
+playwright-report/
+
+# Playwright raw output
+test-results/
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+

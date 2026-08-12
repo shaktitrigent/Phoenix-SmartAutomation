@@ -94,3 +94,32 @@ Thumbs.db
 # Ignore Phoenix runtime artifacts
 PhoenixRuntime/
 **/phoenix_runtime/
+
+# Local application verification projects
+hrm/
+orange/
+projec/
+smart/
+skylark/
+
+# Local verification tests
+test_hardcoded_login_verification.py
+test_hardcoded_with_intelligent_runtime.py
+test_healing_direct.py
+test_healing_engine_verification.py
+test_healing_realistic.py
+test_healing_with_context.py
+test_locator_repository_verification.py
+
+# Local runtime artifacts
+cache/
+logs/
+reports/
+preflight/_sandbox/
+.pytest_cache/
+__pycache__/
+# Local verification artifacts
+dashboard_verification.png
+login_page_verification.png
+test_dom_snapshot.png
+test_healing_local.html

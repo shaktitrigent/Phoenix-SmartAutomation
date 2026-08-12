@@ -1,5 +1,6 @@
 """CLI commands"""
 
+import logging
 import re as _re
 import shutil
 import sys
@@ -20,6 +21,8 @@ from phoenix.cli.output import (
     print_warning,
 )
 from phoenix.sdk.config import PhoenixConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _module_from_file(path: Path) -> str:
@@ -614,8 +617,17 @@ def migrate(ctx, target_dir, dry_run):
         "Suitable for CI pipelines."
     ),
 )
+@click.option(
+    "--pom",
+    is_flag=True,
+    default=True,
+    help=(
+        "Generate Page Object Model (POM) structure. "
+        "Default enabled for automation tests. Disable to generate flat scripts."
+    ),
+)
 @click.pass_context
-def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, docs, clean, no_gate, strict_gate):
+def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, docs, clean, no_gate, strict_gate, pom):
     """Generate test cases from user story and application URL"""
     config_path = ctx.obj.get("config_path")
     verbose = ctx.obj.get("verbose", False)
@@ -704,6 +716,7 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
                     risk_level=risk,
                     domain_knowledge=_domain_knowledge,
                     supporting_documents=_supporting_docs,
+                    use_pom=pom,
                     **_gate_kwargs,
                 )
             )
@@ -724,6 +737,7 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
                         risk_level=risk,
                         domain_knowledge=_domain_knowledge,
                         supporting_documents=_supporting_docs,
+                        use_pom=pom,
                         **_gate_kwargs,
                     )
                 )
@@ -737,6 +751,7 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
                     risk_level=risk,
                     domain_knowledge=_domain_knowledge,
                     supporting_documents=_supporting_docs,
+                    use_pom=pom,
                     **_gate_kwargs,
                 )
             )
@@ -1406,6 +1421,7 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     """
     from phoenix.execution.healing import HealingEngine
     from phoenix.execution.logger import ExecutionLogger
+    from phoenix.execution.runner import TestRunner
     from phoenix.locators.registry import LocatorRegistry
 
     config_path = ctx.obj.get("config_path")
@@ -1422,14 +1438,18 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     if _resolved_file:
         fp = Path(_resolved_file)
         if not fp.exists():
-            test_dir = Path(client.config.project.test_output_dir)
-            available = sorted(test_dir.rglob("test_*.py"))
-            print_error(f"File not found: {_resolved_file}")
-            if available:
-                print_info("Available test files:")
-                for f in available:
-                    print_info(f"  {f}")
-            raise click.Abort()
+            # Try to resolve relative to current directory
+            current_dir = Path.cwd()
+            fp = current_dir / _resolved_file
+            if not fp.exists():
+                test_dir = Path(client.config.project.test_output_dir)
+                available = sorted(test_dir.rglob("test_*.py"))
+                print_error(f"File not found: {_resolved_file}")
+                if available:
+                    print_info("Available test files:")
+                    for f in available:
+                        print_info(f"  {f}")
+                raise click.Abort()
 
     # --feature (BDD): run a .feature file
     if run_feature:
@@ -1468,7 +1488,12 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
             test_paths = [tc.script_path for tc in tcs if tc.script_path]
     else:
         test_dir = Path(client.config.project.test_output_dir)
-        test_paths = [str(p) for p in sorted(test_dir.glob("test_*.py"))]
+        test_paths = [str(p) for p in sorted(test_dir.rglob("test_*.py"))]
+        
+        # Filter out empty test files
+        test_paths = [p for p in test_paths if Path(p).stat().st_size > 0]
+    
+
 
     if not test_paths:
         print_warning("No test scripts found to run.")
@@ -1492,14 +1517,18 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     if Path(locators_dir).exists():
         locator_registry = LocatorRegistry.load_all(locators_dir)
 
-    # Set up logger + engine
-    exec_logger = ExecutionLogger(logs_dir=logs_dir)
-    run_id = exec_logger.start_run(test_paths=test_paths)
+    # Get project name from client or config
+    project_name = client.get_project() or client.config.project.name or "default"
 
-    engine = HealingEngine(
-        logger=exec_logger,
-        max_attempts=max_attempts if heal else 1,
-        locator_registry=locator_registry,
+    # Initialize TestRunner with IntelligentRuntime (self-learning execution engine)
+    test_runner = TestRunner(
+        test_output_dir=client.config.project.test_output_dir,
+        reports_dir=client.config.project.report_output_dir,
+        headed=headed,
+        slow_mo=slow_mo,
+        enable_healing=heal,
+        enable_intelligent_runtime=True,  # Always enable intelligent runtime for DOM reuse
+        project_name=project_name
     )
 
     # Propagate headed/slow_mo to the subprocess environment
@@ -1507,6 +1536,7 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     if headed:
         _os.environ["PWHEADED"] = "1"
         print_info("Running in headed mode (browser visible).")
+        print_info("Flow discovery and semantic analysis will be visible in browser.")
     if slow_mo:
         _os.environ["PWSLOWMO"] = str(slow_mo)
         print_info(f"Slow-mo: {slow_mo}ms per action.")
@@ -1532,50 +1562,59 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
         _browsers_to_run = [_browser_lower]
 
     print_header(
-        f"Running {len(test_paths)} test(s) — "
+        f"Running {len(test_paths)} test(s) with Intelligent Runtime — "
         f"healing={'on' if heal else 'off'}, max_attempts={max_attempts}"
         + (f", browsers={','.join(_browsers_to_run)}" if len(_browsers_to_run) > 1 else f", browser={_browsers_to_run[0]}")
         + (f", k={extra_pytest_args[extra_pytest_args.index('-k')+1]}" if "-k" in extra_pytest_args else "")
         + (f", m={extra_pytest_args[extra_pytest_args.index('-m')+1]}" if "-m" in extra_pytest_args else "")
     )
+    print_info("Intelligent Runtime: DOM Snapshot & Reuse ENABLED")
 
     import time as _time
 
     total = len(test_paths) * len(_browsers_to_run)
-    passed = failed = healed = 0
     start_all = _time.monotonic()
 
-    for _cur_browser in _browsers_to_run:
-        if len(_browsers_to_run) > 1:
-            click.echo(f"\n  === {_cur_browser.upper()} ===")
-        for _tp in test_paths:
-            result = engine.run(
-                test_path=_tp,
-                run_id=run_id,
-                browser=_cur_browser,
-            )
-            if result.final_status == "passed":
-                passed += 1
-                sym = "✓"
-            else:
-                failed += 1
-                sym = "✗"
-            if result.healed:
-                healed += 1
-            msg = f"  {sym} {Path(_tp).name}  ({result.attempts} attempt(s)"
-            if result.healed:
-                msg += f", healed via {result.error_class}"
-            msg += f")  {result.duration_seconds:.1f}s"
-            click.echo(msg)
+    # Build kwargs for test runner
+    runner_kwargs = {
+        "headed": headed,
+        "slow_mo": slow_mo,
+        "browser": _browsers_to_run[0] if len(_browsers_to_run) == 1 else None,
+    }
+    
+    # Add extra pytest args
+    if extra_pytest_args:
+        if "-k" in extra_pytest_args:
+            k_idx = extra_pytest_args.index("-k")
+            runner_kwargs["keyword"] = extra_pytest_args[k_idx + 1]
+        if "-m" in extra_pytest_args:
+            m_idx = extra_pytest_args.index("-m")
+            runner_kwargs["marker"] = extra_pytest_args[m_idx + 1]
+
+    # Run tests using IntelligentRuntime
+    result = test_runner.run_tests(test_paths, project_name=project_name, **runner_kwargs)
 
     duration = _time.monotonic() - start_all
-    run_record = exec_logger.finish_run(
-        run_id,
-        passed=passed,
-        failed=failed,
-        total=total,
-        duration_seconds=round(duration, 2),
+    
+    # Display results
+    passed = result.get("passed_tests", 0)
+    failed = result.get("failed_tests", 0)
+    total_tests = result.get("total_tests", 0)
+    
+    print_header(
+        f"Execution Summary: {passed}/{total_tests} passed, {failed} failed in {duration:.1f}s"
     )
+    
+    # Display intelligent runtime summary if available
+    if test_runner.intelligent_runtime and test_runner.intelligent_runtime.runtime_evidence:
+        evidence = test_runner.intelligent_runtime.runtime_evidence
+        print_info(f"DOM Cache: {evidence.cache_hits} hits, {evidence.cache_misses} misses")
+        print_info(f"DOM Reuse: {evidence.dom_reuse_count} reused, {evidence.dom_generation_count} generated")
+        print_info(f"Time Saved: {evidence.time_saved_ms:.0f}ms ({evidence.time_saved_percentage:.1f}%)")
+        if evidence.mcp_calls_saved > 0:
+            print_info(f"MCP Calls Saved: {evidence.mcp_calls_saved}")
+        if evidence.llm_calls_saved > 0:
+            print_info(f"LLM Calls Saved: {evidence.llm_calls_saved}")
 
     # Generate HTML report in reports/
     try:
@@ -1584,20 +1623,30 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
         reports_dir = Path("reports")
         if config_path:
             reports_dir = Path(config_path).parent / "reports"
-        attempts = exec_logger.get_attempts(run_id)
-        html_path = generate_html_report(run_id, run_record.model_dump(), attempts, reports_dir)
-        print_info(f"HTML report: {html_path}")
+        # Note: HTML report generation would need to be adapted for TestRunner results
+        print_info(f"Reports available in: {reports_dir}")
     except Exception:
         pass  # Report generation is best-effort; never block the run
 
-    print_info(f"\nRun ID: {run_id}  |  logs/{run_id}")
-    if healed:
-        print_success(f"Self-healed: {healed} test(s) recovered after retry")
     if failed == 0:
-        print_success(f"All {total} test(s) passed in {duration:.1f}s")
+        print_success(f"All {total_tests} test(s) passed in {duration:.1f}s")
     else:
-        print_error(f"{failed}/{total} test(s) failed after {max_attempts} attempt(s)")
-    print_info("Review details: phoenix logs --run-id " + run_id)
+        print_error(f"{failed}/{total_tests} test(s) failed")
+    
+    # Print Phoenix Intelligent Runtime summary
+    if test_runner.intelligent_runtime:
+        try:
+            # Mark intelligent runtime as active in the legacy tracker
+            try:
+                from phoenix.execution.runtime_wrapper import get_runtime_tracker
+                tracker = get_runtime_tracker()
+                tracker.set_intelligent_runtime_active(True)
+            except ImportError:
+                pass
+            
+            test_runner.intelligent_runtime.print_summary()
+        except Exception as e:
+            logger.warning(f"Failed to print intelligent runtime summary: {e}")
 
 
 @click.command()

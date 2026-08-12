@@ -23,6 +23,11 @@ class LocatorExpertAgent(BaseAgent):
         4. Falls back to role/test-id heuristic when LLM is unavailable.
     """
 
+    def __init__(self, *args, artifacts_manager=None, dom_snapshot_manager=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.artifacts_manager = artifacts_manager
+        self.dom_snapshot_manager = dom_snapshot_manager
+
     def process(self, input_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         page_url = input_data.get("page_url", "")
         element_name = input_data.get("element_name", "")
@@ -45,6 +50,10 @@ class LocatorExpertAgent(BaseAgent):
                 "mcp_used": bool(self.mcp_client and page_url),
             },
         }
+
+        # Save locator artifacts if artifacts manager is available
+        if self.artifacts_manager and locators:
+            self._save_locator_artifacts(element_name, locators, page_url)
 
         self.cache.set(cache_key, result, ttl=7200)
         return result
@@ -75,7 +84,26 @@ class LocatorExpertAgent(BaseAgent):
         if not snapshot and self.mcp_client and page_url:
             logger.info("Fetching page snapshot via MCP: %s", page_url)
             try:
-                snapshot = self.mcp_client.inspect_page(page_url) or ""
+                # Pass project, page, and execution_id for DOM reuse
+                import time
+                execution_id = f"locator_{int(time.time())}"
+                snapshot = self.mcp_client.inspect_page(
+                    page_url,
+                    project="locator_generation",
+                    page=element_name,
+                    execution_id=execution_id
+                ) or ""
+                
+                # Record DOM consumption
+                if self.dom_snapshot_manager and snapshot:
+                    dom_hash = self.dom_snapshot_manager.compute_dom_hash(snapshot)
+                    self.dom_snapshot_manager.record_dom_consumer(
+                        module_name="LocatorExpertAgent",
+                        dom_hash=dom_hash,
+                        purpose="locator_generation",
+                        success=True
+                    )
+                    
             except Exception as _mcp_exc:
                 logger.warning(
                     "MCP inspect_page failed for %s — continuing without snapshot: %s",
@@ -160,3 +188,44 @@ class LocatorExpertAgent(BaseAgent):
                 "description": "test-id fallback (heuristic)",
             },
         ]
+    
+    def _save_locator_artifacts(
+        self,
+        element_name: str,
+        locators: List[Dict[str, Any]],
+        page_url: str
+    ) -> None:
+        """Save locator artifacts with full metadata.
+        
+        Args:
+            element_name: Name of the element
+            locators: List of locator dictionaries
+            page_url: Page URL
+        """
+        if not self.artifacts_manager:
+            return
+        
+        try:
+            from phoenix.execution.artifacts import LocatorRecord
+            
+            # Convert locator dicts to LocatorRecord objects
+            locator_records = []
+            for idx, loc in enumerate(locators):
+                record = LocatorRecord(
+                    element_name=element_name,
+                    locator=loc.get("playwright_code", loc.get("value", "")),
+                    locator_type=loc.get("strategy", "unknown"),
+                    priority=idx,
+                    confidence=loc.get("confidence", 0.0),
+                    source="llm" if self.llm_client else "heuristic",
+                    generated_by="LocatorExpertAgent",
+                    validation_result="pending",
+                    reason=loc.get("description", "")
+                )
+                locator_records.append(record)
+            
+            self.artifacts_manager.save_locators(element_name, locator_records)
+            logger.info(f"[LOCATOR] Artifacts saved for {element_name}: {len(locators)} locators")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save locator artifacts: {e}")

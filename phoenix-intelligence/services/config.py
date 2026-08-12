@@ -55,7 +55,7 @@ class MCPSettings:
 
     enabled: bool = os.environ.get("PHOENIX_MCP_ENABLED", "true").lower() == "true"
     command: str = os.environ.get("PHOENIX_MCP_COMMAND", "npx")
-    args: str = os.environ.get("PHOENIX_MCP_ARGS", "@playwright/mcp@latest --headless")
+    args: str = os.environ.get("PHOENIX_MCP_ARGS", "@playwright/mcp@latest")
     timeout: int = int(os.environ.get("PHOENIX_MCP_TIMEOUT", "30"))
 
 

@@ -90,7 +90,7 @@ def _parse_list_steps(block: str) -> List[Dict[str, Any]]:
 
     Handles:
         1. Navigate to the login page
-        2. Enter admin / admin123
+        2. Enter username / password
         - Click Login button
     """
     steps: List[Dict[str, Any]] = []

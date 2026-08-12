@@ -11,6 +11,24 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
+print(f"[CONFTEST DEBUG] Loading preflight/_sandbox/conftest.py from current directory: {Path.cwd()}")
+print(f"[CONFTEST DEBUG] File path: {__file__}")
+
+# Phoenix runtime integration
+try:
+    from phoenix.execution.runtime_wrapper import get_runtime_integration, print_runtime_summary
+    PHOENIX_RUNTIME_AVAILABLE = True
+except ImportError:
+    PHOENIX_RUNTIME_AVAILABLE = False
+
+# Phoenix Intelligent Runtime integration
+try:
+    from phoenix.execution.intelligent_runtime import IntelligentRuntime
+    from phoenix.execution.intelligent_page import create_intelligent_page
+    INTELLIGENT_RUNTIME_AVAILABLE = True
+except ImportError:
+    INTELLIGENT_RUNTIME_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -133,11 +151,33 @@ def context(browser) -> BrowserContext:
 
 
 @pytest.fixture
-def page(context) -> Page:
+def page(context, intelligent_runtime, request) -> Page:
     p = context.new_page()
     p.set_default_timeout(ACTION_TIMEOUT_MS)
     p.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
     p.on("dialog", lambda dialog: dialog.dismiss())
+    
+    # Wrap with intelligent page if IntelligentRuntime is available
+    if intelligent_runtime:
+        from phoenix.execution.intelligent_page import create_intelligent_page
+        test_name = request.node.name if hasattr(request, 'node') else "sandbox_test"
+        execution_id = getattr(intelligent_runtime, 'execution_id', '')
+        
+        print(f"[PAGE FIXTURE] Wrapping page with intelligent runtime")
+        print(f"[PAGE FIXTURE] Intelligent runtime base_dir: {intelligent_runtime.base_dir}")
+        print(f"[PAGE FIXTURE] Test name: {test_name}")
+        print(f"[PAGE FIXTURE] Execution ID: {execution_id}")
+        
+        p = create_intelligent_page(
+            page=p,
+            intelligent_runtime=intelligent_runtime,
+            project_name="sandbox",
+            test_name=test_name,
+            execution_id=execution_id
+        )
+    else:
+        print(f"[PAGE FIXTURE] Intelligent runtime not available, using standard page")
+    
     yield p
     with suppress(Exception):
         p.close()
@@ -192,6 +232,105 @@ def test_data(request) -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return {"scenarios": [], "edge_cases": []}
+
+
+# ---------------------------------------------------------------------------
+# Phoenix Intelligent Runtime Integration Fixture
+# ---------------------------------------------------------------------------
+
+# Global variable to store intelligent_runtime instance for session finish hook
+_intelligent_runtime_instance = None
+
+@pytest.fixture(scope="session")
+def intelligent_runtime():
+    """IntelligentRuntime instance for production test execution.
+    
+    This fixture loads the IntelligentRuntime state that was created by
+    TestRunner before spawning the pytest subprocess. The state is stored
+    in phoenix_runtime/.execution_context.json.
+    """
+    global _intelligent_runtime_instance
+    
+    if not INTELLIGENT_RUNTIME_AVAILABLE:
+        return None
+    
+    # Use absolute path to ensure consistent location
+    import os
+    current_dir = Path(os.getcwd())
+    # Use the main project directory's phoenix_runtime for evidence tracking
+    # This ensures that the evidence file is in the main phoenix_runtime directory
+    # where TestRunner will look for it
+    # Go up to find the main project directory (Phoenix-SmartAutomation)
+    parent_dir = current_dir
+    while parent_dir.name != "Phoenix-SmartAutomation" and parent_dir.parent != parent_dir:
+        parent_dir = parent_dir.parent
+    base_dir = parent_dir / "phoenix_runtime"
+    
+    # Try to load execution context from TestRunner
+    execution_context_path = base_dir / ".execution_context.json"
+    
+    print(f"[INTELLIGENT RUNTIME] Current working directory: {current_dir}")
+    print(f"[INTELLIGENT RUNTIME] Parent directory: {parent_dir}")
+    print(f"[INTELLIGENT RUNTIME] Base directory: {base_dir}")
+    print(f"[INTELLIGENT RUNTIME] Execution context path: {execution_context_path}")
+    print(f"[INTELLIGENT RUNTIME] Execution context exists: {execution_context_path.exists()}")
+    
+    if execution_context_path.exists():
+        try:
+            with open(execution_context_path, 'r', encoding='utf-8') as f:
+                context = json.load(f)
+            
+            execution_id = context.get("execution_id")
+            project_name = context.get("project_name", "default")
+            
+            # Recreate IntelligentRuntime with the same configuration
+            intelligent_runtime = IntelligentRuntime(
+                base_dir=str(base_dir),
+                project_name=project_name,
+                enable_cache=True,
+                enable_repository=True,
+                enable_diff=True,
+                enable_healing=True,
+                enable_metrics=True,
+                enable_timeline=True
+            )
+            
+            # Restore execution state
+            intelligent_runtime.execution_id = execution_id
+            intelligent_runtime.test_name = context.get("test_name", "default")
+            
+            # Start execution tracking with the existing execution ID
+            intelligent_runtime.start_execution(intelligent_runtime.test_name)
+            
+            # Store globally for session finish hook
+            _intelligent_runtime_instance = intelligent_runtime
+            
+            print(f"[INTELLIGENT RUNTIME] Loaded from execution context: {execution_id}")
+            print(f"[INTELLIGENT RUNTIME] Project: {project_name}")
+            
+            return intelligent_runtime
+            
+        except Exception as e:
+            print(f"[INTELLIGENT RUNTIME] Failed to load execution context: {e}")
+            return None
+    
+    # Fallback: create new IntelligentRuntime instance
+    print("[INTELLIGENT RUNTIME] No execution context found, creating new instance")
+    intelligent_runtime = IntelligentRuntime(
+        base_dir=str(base_dir),
+        project_name="default",
+        enable_cache=True,
+        enable_repository=True,
+        enable_diff=True,
+        enable_healing=True,
+        enable_metrics=True,
+        enable_timeline=True
+    )
+    
+    # Store globally for session finish hook
+    _intelligent_runtime_instance = intelligent_runtime
+    
+    return intelligent_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +414,42 @@ def pytest_runtest_makereport(item, call):
         if traceback_text:
             extras.append(_extras.text(traceback_text, name="Technical detail (traceback)"))
         report.extras = extras
+
+
+# ---------------------------------------------------------------------------
+# Phoenix Runtime Summary Hook
+# ---------------------------------------------------------------------------
+
+def pytest_sessionfinish(session, exitstatus):
+    """Print Phoenix intelligent runtime summary at the end of test session."""
+    # Call IntelligentRuntime end_execution to save evidence
+    global _intelligent_runtime_instance
+    if _intelligent_runtime_instance:
+        try:
+            status = "passed" if exitstatus == 0 else "failed"
+            _intelligent_runtime_instance.end_execution(status=status)
+            print(f"[INTELLIGENT RUNTIME] Saved execution evidence with status: {status}")
+        except Exception as e:
+            print(f"[INTELLIGENT RUNTIME] Failed to end execution: {e}")
+    
+    # Note: IntelligentRuntime summary is now handled by the CLI run command
+    # when using `phoenix run`. For direct pytest execution, use evidence-based summary
+    if PHOENIX_RUNTIME_AVAILABLE and _intelligent_runtime_instance:
+        # Use IntelligentRuntime evidence-based summary
+        evidence = _intelligent_runtime_instance.runtime_evidence
+        print("\n" + "=" * 50)
+        print("PHOENIX RUNTIME SUMMARY")
+        print("=" * 50)
+        print(f"MCP                  NOT EXECUTED (generation-time only)")
+        print(f"DOM Snapshot      : {'EXECUTED' if evidence.dom_reuse_count > 0 or evidence.dom_generation_count > 0 else 'NOT EXECUTED'}")
+        print(f"DOM Cache         : {'EXECUTED' if evidence.cache_hits + evidence.cache_misses > 0 else 'NOT EXECUTED'}")
+        print(f"Locator Repository: {'EXECUTED' if evidence.locator_reuse_count + evidence.locator_generation_count > 0 else 'NOT EXECUTED'}")
+        print(f"Healing           : {'EXECUTED' if evidence.healing_attempts > 0 else 'NOT EXECUTED'}")
+        print(f"Runtime Timeline  : {'EXECUTED' if _intelligent_runtime_instance.timeline_tracker else 'NOT EXECUTED'}")
+        print(f"Runtime Metrics   : {'EXECUTED' if _intelligent_runtime_instance.metrics_collector else 'NOT EXECUTED'}")
+        print("=" * 50)
+    elif PHOENIX_RUNTIME_AVAILABLE:
+        print_runtime_summary()
 
 
 # ---------------------------------------------------------------------------

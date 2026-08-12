@@ -86,8 +86,31 @@ else:
 
 _mcp_settings = MCPSettings()
 _mcp_client = None
+
+# Initialize intelligent runtime components for DOM reuse
+_artifacts_manager = None
+_dom_snapshot_manager = None
+
+try:
+    from phoenix.execution.artifacts import get_artifacts_manager
+    from phoenix.execution.dom_snapshot_manager import DOMSnapshotManager
+    
+    # Initialize artifacts manager
+    _artifacts_manager = get_artifacts_manager(base_dir="PhoenixRuntime/artifacts")
+    
+    # Initialize DOM snapshot manager
+    _dom_snapshot_manager = DOMSnapshotManager(base_dir="PhoenixRuntime")
+    
+    logger.info("Intelligent runtime components initialized for DOM reuse")
+except ImportError as e:
+    logger.warning(f"Could not initialize intelligent runtime components: {e}")
+
 if _mcp_settings.enabled:
-    _mcp_client = MCPClient(_mcp_settings)
+    _mcp_client = MCPClient(
+        _mcp_settings, 
+        artifacts_manager=_artifacts_manager,
+        dom_snapshot_manager=_dom_snapshot_manager
+    )
     logger.info("MCP client initialised (command=%s %s)", _mcp_settings.command, _mcp_settings.args)
 else:
     logger.info("MCP is disabled via PHOENIX_MCP_ENABLED=false")

@@ -11,6 +11,8 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from services.agents.base import BaseAgent
 from services.llm.prompt_loader import PromptLoader
+from services.locator_validator import LocatorValidator
+from services.locator_corrector import LocatorCorrector
 
 logger = logging.getLogger(__name__)
 
@@ -590,10 +592,10 @@ def _criterion_to_playwright_lines(
                 )
 
     elif control == ControlType.LOGIN_CREDENTIALS:
-        # "Login using valid Admin credentials" — use env vars; no URL extraction needed
+        # "Login using valid credentials" — use env vars; no URL extraction needed
         lines += [
-            '    fill_ready(page, page.locator("input[name=\'username\']"), os.environ.get("TEST_USERNAME", "Admin"), "Username input")',
-            '    fill_ready(page, page.locator("input[name=\'password\']"), os.environ.get("TEST_PASSWORD", "admin123"), "Password input")',
+            '    fill_ready(page, page.locator("input[name=\'username\']"), os.environ.get("TEST_USERNAME", "test_user"), "Username input")',
+            '    fill_ready(page, page.locator("input[name=\'password\']"), os.environ.get("TEST_PASSWORD", "test_password"), "Password input")',
             '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
             '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
         ]
@@ -1603,14 +1605,34 @@ class TestGeneratorAgent(BaseAgent):
         # Phase D: best-effort grounding — never block generation on MCP failure.
         page_snapshot = ""
         if self.mcp_client and application_url:
+            logger.info("=== DOM SNAPSHOT CAPTURE ===")
             logger.info("Inspecting page via MCP: %s", application_url)
             try:
                 import concurrent.futures as _cf
+                import time
                 _mcp_pool = _cf.ThreadPoolExecutor(max_workers=1)
-                _mcp_fut = _mcp_pool.submit(self.mcp_client.inspect_page, application_url)
+                
+                # Generate execution ID for DOM reuse tracking
+                execution_id = f"testgen_{int(time.time())}"
+                project_name = "test_generation"
+                page_name = user_story[:50].replace(" ", "_").lower() if user_story else "default"
+                
+                _mcp_fut = _mcp_pool.submit(
+                    self.mcp_client.inspect_page, 
+                    application_url,
+                    project_name,
+                    page_name,
+                    execution_id
+                )
                 try:
                     page_snapshot = _mcp_fut.result(timeout=60) or ""
                     logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                    logger.info("DOM snapshot preview (first 500 chars): %s", page_snapshot[:500])
+                    
+                    # Extract and log key DOM statistics
+                    element_count = page_snapshot.count("element") or page_snapshot.count("role")
+                    logger.info("Estimated DOM elements: %d", element_count)
+                    
                 except _cf.TimeoutError:
                     logger.warning(
                         "MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
@@ -1721,7 +1743,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Live DOM Snapshot (ground every locator in this snapshot)",
-                    page_snapshot[:3000],
+                    page_snapshot[:10000],  # Increased from 3000 to 10000 for better locator context
                 ]
             else:
                 user_parts += [
@@ -1758,12 +1780,111 @@ class TestGeneratorAgent(BaseAgent):
                 ]
 
             user_prompt = "\n".join(user_parts)
+            logger.info("=== LLM AUTOMATION GENERATION ===")
             logger.info(
                 "Generating automation via LLM for manual test: %s", manual_test.get("name", "")
             )
+            logger.info("System prompt length: %d chars", len(system_prompt))
+            logger.info("User prompt length: %d chars", len(user_prompt))
+            logger.info("DOM snapshot included: %s (%d chars)", "Yes" if page_snapshot else "No", len(page_snapshot) if page_snapshot else 0)
+            
             raw = self.llm_client.generate(system_prompt, user_prompt)
+            logger.info("LLM response received (%d chars)", len(raw))
+            
             script, locators, recommendations = _parse_structured_v2_output(raw)
+            logger.info("Parsed LLM output: script (%d chars), locators (%d items), recommendations (%d items)", 
+                       len(script), len(locators), len(recommendations))
+            
+            # Validate locators if DOM snapshot is available
+            if page_snapshot and locators:
+                logger.info("=== LOCATOR VALIDATION ===")
+                logger.info("Validating %d generated locators against DOM snapshot", len(locators))
+                validator = LocatorValidator(dom_snapshot=page_snapshot)
+                valid_locators, invalid_locators = validator.validate_locators_batch(locators)
+                
+                # Log validation results
+                logger.info("Locator validation complete: %d valid, %d invalid", 
+                           len(valid_locators), len(invalid_locators))
+                
+                # Log detailed validation results
+                for locator in locators:
+                    element_id = locator.get('element_id', 'unknown')
+                    selector = locator.get('selector', 'unknown')
+                    logger.info("Candidate locator: %s -> %s", element_id, selector)
+                
+                # Add validation results to recommendations
+                if invalid_locators:
+                    logger.warning("=== INVALID LOCATORS REJECTED ===")
+                    invalid_summary = "\n".join([
+                        f"- {loc.get('element_id', 'unknown')}: {loc.get('rejection_reason', 'unknown')}"
+                        for loc in invalid_locators
+                    ])
+                    logger.warning("Invalid locators:\n%s", invalid_summary)
+                    recommendations.append(
+                        f"Invalid locators rejected:\n{invalid_summary}\n"
+                        f"These locators did not pass validation and were not included in the final script."
+                    )
+                
+                # Use only valid locators
+                locators = valid_locators
+                
+                # Log locator quality metrics
+                logger.info("=== VALID LOCATOR QUALITY METRICS ===")
+                for locator in locators:
+                    confidence = locator.get('confidence_score', 0.0)
+                    element_id = locator.get('element_id', 'unknown')
+                    selector = locator.get('selector', 'unknown')
+                    alternates = locator.get('alternate_locators', [])
+                    logger.info(
+                        "VALID: %s -> %s (confidence: %.2f, alternates: %d)",
+                        element_id, selector, confidence, len(alternates)
+                    )
+                    if alternates:
+                        for alt in alternates:
+                            logger.info("  Alternate: %s", alt)
+            
             normalised = _normalise_generated_script(script)
+            
+            # Apply post-LLM locator correction for field mapping errors
+            if page_snapshot:
+                logger.info("=== POST-LLM LOCATOR CORRECTION ===")
+                corrector = LocatorCorrector(dom_snapshot=page_snapshot)
+                
+                # Extract step descriptions from manual test for context
+                step_descriptions = [
+                    step.get('action', '') 
+                    for step in manual_test.get('steps', [])
+                ]
+                
+                corrected_script, corrections = corrector.apply_corrections_to_fill_operations(normalised)
+                
+                if corrections:
+                    logger.warning("=== LOCATOR CORRECTIONS APPLIED ===")
+                    for correction in corrections:
+                        logger.warning(
+                            "Corrected: %s (value: %s) - %s -> %s",
+                            correction['description'],
+                            correction['value'],
+                            correction['original_locator'],
+                            correction['corrected_locator']
+                        )
+                    
+                    # Add correction info to recommendations
+                    correction_summary = "\n".join([
+                        f"- {corr['description']}: {corr['original_locator']} -> {corr['corrected_locator']}"
+                        for corr in corrections
+                    ])
+                    recommendations.append(
+                        f"Field mapping errors corrected:\n{correction_summary}\n"
+                        f"The LLM initially generated locators targeting wrong field types. "
+                        f"These have been automatically corrected."
+                    )
+                    
+                    normalised = corrected_script
+                else:
+                    logger.info("No field mapping errors detected")
+            
+            # Validate the normalised script is syntactically correct before
             # Validate the normalised script is syntactically correct before
             # sending it to the client.  If not, fall back to the heuristic stub
             # so the client never receives a file that will fail pytest collection.
@@ -1951,7 +2072,7 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
         manifest: str = "",
-        use_pom: bool = False,
+        use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
     ) -> Dict[str, Any]:
@@ -1981,8 +2102,21 @@ class TestGeneratorAgent(BaseAgent):
         if self.mcp_client and application_url:
             try:
                 import concurrent.futures as _cf
+                import time
                 _mcp_pool = _cf.ThreadPoolExecutor(max_workers=1)
-                _mcp_fut = _mcp_pool.submit(self.mcp_client.inspect_page, application_url)
+                
+                # Generate execution ID for DOM reuse tracking
+                execution_id = f"automate_{int(time.time())}"
+                project_name = "automation"
+                page_name = "manual_automation"
+                
+                _mcp_fut = _mcp_pool.submit(
+                    self.mcp_client.inspect_page,
+                    application_url,
+                    project_name,
+                    page_name,
+                    execution_id
+                )
                 try:
                     page_snapshot = _mcp_fut.result(timeout=60) or ""
                 except _cf.TimeoutError:
@@ -2187,7 +2321,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Live DOM Snapshot (ground every locator in this snapshot)",
-                    page_snapshot[:3000],
+                    page_snapshot[:10000],  # Increased from 3000 to 10000 for better locator context
                 ]
             else:
                 user_parts += [

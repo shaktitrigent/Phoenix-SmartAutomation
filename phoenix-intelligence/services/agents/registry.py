@@ -76,6 +76,7 @@ class AgentRegistry:
         risk_level: Optional[str] = None,
         domain_knowledge: str = "",
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
+        use_pom: bool = True,
     ) -> Dict[str, Any]:
         return self.invoke_agent(
             "test_generator",
@@ -88,6 +89,7 @@ class AgentRegistry:
             },
             test_type=test_type,
             risk_level=risk_level,
+            use_pom=use_pom,
         )
 
     def discover_locators(
@@ -126,7 +128,7 @@ class AgentRegistry:
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
         manifest: str = "",
-        use_pom: bool = False,
+        use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
     ) -> Dict[str, Any]:

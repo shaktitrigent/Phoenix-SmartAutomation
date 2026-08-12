@@ -51,7 +51,11 @@ class PhoenixClient:
             output_dir=self.config.project.test_output_dir
         )
 
-        self._test_runner = TestRunner(test_output_dir=self.config.project.test_output_dir)
+        self._test_runner = TestRunner(
+            test_output_dir=self.config.project.test_output_dir,
+            enable_intelligent_runtime=True,
+            project_name=self.config.project.default_project
+        )
         self._reporter = HTMLReporter(output_dir=self.config.project.report_output_dir)
 
     def set_project(self, project_name: str) -> None:
@@ -72,6 +76,7 @@ class PhoenixClient:
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
         gate: bool = True,
         strict_gate: bool = False,
+        use_pom: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
         """
@@ -82,6 +87,7 @@ class PhoenixClient:
             application_url: Application URL to test (required for automation)
             acceptance_criteria: List of acceptance criteria
             project: Project name (uses current project if None)
+            use_pom: Generate Page Object Model structure (default True)
             **kwargs: Additional options (e.g., test_type, risk_level)
 
         Returns:
@@ -115,6 +121,7 @@ class PhoenixClient:
             risk_level=risk_level,
             domain_knowledge=domain_knowledge,
             supporting_documents=supporting_documents or [],
+            use_pom=kwargs.get("use_pom", True),
         )
 
         manual_tests_payload = intelligence_result.get("manual_tests", [])

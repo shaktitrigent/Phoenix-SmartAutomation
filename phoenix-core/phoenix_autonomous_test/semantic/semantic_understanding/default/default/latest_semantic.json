@@ -1,0 +1,366 @@
+{
+  "url": "https://example.com",
+  "page_type": "landing_page",
+  "title": "Example Domain",
+  "heading": "Example Domain",
+  "components": [
+    {
+      "component_id": "comp_0_6805",
+      "component_type": "link",
+      "element_id": "",
+      "element_class": "",
+      "xpath": "",
+      "css_selector": "",
+      "text_content": "example domain",
+      "label": "",
+      "placeholder": "",
+      "name": "",
+      "aria_role": "",
+      "aria_label": "",
+      "semantic_role": "",
+      "semantic_purpose": "navigation_trigger",
+      "purpose_confidence": 0.25,
+      "purpose_evidence": [
+        "Business intent matches: navigation"
+      ],
+      "page_type": "landing_page",
+      "business_intent": "navigation",
+      "parent_component_id": "",
+      "child_component_ids": [],
+      "nearby_component_ids": [],
+      "relationship_type": "",
+      "confidence": 0.125,
+      "is_interactive": true,
+      "is_required": false,
+      "is_disabled": false,
+      "is_visible": true,
+      "position": {},
+      "layout_info": {},
+      "attributes": {},
+      "supported_actions": [
+        "click",
+        "hover",
+        "verify_url",
+        "navigate"
+      ],
+      "interaction_confidence": 0.9,
+      "validation_rules": [],
+      "validation_characteristics": {},
+      "locator_candidates": [
+        {
+          "strategy": "text",
+          "locator": "get_by_text('example domain')",
+          "confidence": 0.7,
+          "stability_score": 0.5,
+          "uniqueness_score": 0.6,
+          "success_count": 0,
+          "failure_count": 0,
+          "evidence": [
+            "Text content present"
+          ],
+          "generation_method": "text",
+          "last_used": "2026-08-10T18:55:12.442990+00:00",
+          "timestamp": "2026-08-10T18:55:12.442990+00:00"
+        }
+      ],
+      "selected_locator": "get_by_text('example domain')",
+      "locator_confidence": 0.7,
+      "runtime_observations": [],
+      "success_count": 0,
+      "failure_count": 0,
+      "first_seen": "2026-08-10T18:55:12.403019+00:00",
+      "last_seen": "2026-08-10T18:55:12.403019+00:00",
+      "learned_behavior": {},
+      "detection_method": "semantic_pattern_matching",
+      "timestamp": "2026-08-10T18:55:12.403019+00:00"
+    },
+    {
+      "component_id": "comp_1_9321",
+      "component_type": "link",
+      "element_id": "",
+      "element_class": "",
+      "xpath": "",
+      "css_selector": "",
+      "text_content": "learn more",
+      "label": "",
+      "placeholder": "",
+      "name": "",
+      "aria_role": "",
+      "aria_label": "",
+      "semantic_role": "",
+      "semantic_purpose": "navigation_trigger",
+      "purpose_confidence": 0.25,
+      "purpose_evidence": [
+        "Business intent matches: navigation"
+      ],
+      "page_type": "landing_page",
+      "business_intent": "navigation",
+      "parent_component_id": "",
+      "child_component_ids": [],
+      "nearby_component_ids": [],
+      "relationship_type": "",
+      "confidence": 0.425,
+      "is_interactive": true,
+      "is_required": false,
+      "is_disabled": false,
+      "is_visible": true,
+      "position": {},
+      "layout_info": {},
+      "attributes": {},
+      "supported_actions": [
+        "click",
+        "hover",
+        "verify_url",
+        "navigate"
+      ],
+      "interaction_confidence": 0.9,
+      "validation_rules": [],
+      "validation_characteristics": {},
+      "locator_candidates": [
+        {
+          "strategy": "text",
+          "locator": "get_by_text('learn more')",
+          "confidence": 0.7,
+          "stability_score": 0.5,
+          "uniqueness_score": 0.6,
+          "success_count": 0,
+          "failure_count": 0,
+          "evidence": [
+            "Text content present"
+          ],
+          "generation_method": "text",
+          "last_used": "2026-08-10T18:55:12.447425+00:00",
+          "timestamp": "2026-08-10T18:55:12.447425+00:00"
+        }
+      ],
+      "selected_locator": "get_by_text('learn more')",
+      "locator_confidence": 0.7,
+      "runtime_observations": [],
+      "success_count": 0,
+      "failure_count": 0,
+      "first_seen": "2026-08-10T18:55:12.403562+00:00",
+      "last_seen": "2026-08-10T18:55:12.403562+00:00",
+      "learned_behavior": {},
+      "detection_method": "semantic_pattern_matching",
+      "timestamp": "2026-08-10T18:55:12.403562+00:00"
+    }
+  ],
+  "interactive_components": [
+    {
+      "component_id": "comp_0_6805",
+      "component_type": "link",
+      "element_id": "",
+      "element_class": "",
+      "xpath": "",
+      "css_selector": "",
+      "text_content": "example domain",
+      "label": "",
+      "placeholder": "",
+      "name": "",
+      "aria_role": "",
+      "aria_label": "",
+      "semantic_role": "",
+      "semantic_purpose": "navigation_trigger",
+      "purpose_confidence": 0.25,
+      "purpose_evidence": [
+        "Business intent matches: navigation"
+      ],
+      "page_type": "landing_page",
+      "business_intent": "navigation",
+      "parent_component_id": "",
+      "child_component_ids": [],
+      "nearby_component_ids": [],
+      "relationship_type": "",
+      "confidence": 0.125,
+      "is_interactive": true,
+      "is_required": false,
+      "is_disabled": false,
+      "is_visible": true,
+      "position": {},
+      "layout_info": {},
+      "attributes": {},
+      "supported_actions": [
+        "click",
+        "hover",
+        "verify_url",
+        "navigate"
+      ],
+      "interaction_confidence": 0.9,
+      "validation_rules": [],
+      "validation_characteristics": {},
+      "locator_candidates": [
+        {
+          "strategy": "text",
+          "locator": "get_by_text('example domain')",
+          "confidence": 0.7,
+          "stability_score": 0.5,
+          "uniqueness_score": 0.6,
+          "success_count": 0,
+          "failure_count": 0,
+          "evidence": [
+            "Text content present"
+          ],
+          "generation_method": "text",
+          "last_used": "2026-08-10T18:55:12.442990+00:00",
+          "timestamp": "2026-08-10T18:55:12.442990+00:00"
+        }
+      ],
+      "selected_locator": "get_by_text('example domain')",
+      "locator_confidence": 0.7,
+      "runtime_observations": [],
+      "success_count": 0,
+      "failure_count": 0,
+      "first_seen": "2026-08-10T18:55:12.403019+00:00",
+      "last_seen": "2026-08-10T18:55:12.403019+00:00",
+      "learned_behavior": {},
+      "detection_method": "semantic_pattern_matching",
+      "timestamp": "2026-08-10T18:55:12.403019+00:00"
+    },
+    {
+      "component_id": "comp_1_9321",
+      "component_type": "link",
+      "element_id": "",
+      "element_class": "",
+      "xpath": "",
+      "css_selector": "",
+      "text_content": "learn more",
+      "label": "",
+      "placeholder": "",
+      "name": "",
+      "aria_role": "",
+      "aria_label": "",
+      "semantic_role": "",
+      "semantic_purpose": "navigation_trigger",
+      "purpose_confidence": 0.25,
+      "purpose_evidence": [
+        "Business intent matches: navigation"
+      ],
+      "page_type": "landing_page",
+      "business_intent": "navigation",
+      "parent_component_id": "",
+      "child_component_ids": [],
+      "nearby_component_ids": [],
+      "relationship_type": "",
+      "confidence": 0.425,
+      "is_interactive": true,
+      "is_required": false,
+      "is_disabled": false,
+      "is_visible": true,
+      "position": {},
+      "layout_info": {},
+      "attributes": {},
+      "supported_actions": [
+        "click",
+        "hover",
+        "verify_url",
+        "navigate"
+      ],
+      "interaction_confidence": 0.9,
+      "validation_rules": [],
+      "validation_characteristics": {},
+      "locator_candidates": [
+        {
+          "strategy": "text",
+          "locator": "get_by_text('learn more')",
+          "confidence": 0.7,
+          "stability_score": 0.5,
+          "uniqueness_score": 0.6,
+          "success_count": 0,
+          "failure_count": 0,
+          "evidence": [
+            "Text content present"
+          ],
+          "generation_method": "text",
+          "last_used": "2026-08-10T18:55:12.447425+00:00",
+          "timestamp": "2026-08-10T18:55:12.447425+00:00"
+        }
+      ],
+      "selected_locator": "get_by_text('learn more')",
+      "locator_confidence": 0.7,
+      "runtime_observations": [],
+      "success_count": 0,
+      "failure_count": 0,
+      "first_seen": "2026-08-10T18:55:12.403562+00:00",
+      "last_seen": "2026-08-10T18:55:12.403562+00:00",
+      "learned_behavior": {},
+      "detection_method": "semantic_pattern_matching",
+      "timestamp": "2026-08-10T18:55:12.403562+00:00"
+    }
+  ],
+  "form_components": [],
+  "business_intent": {
+    "primary_intent": "navigation",
+    "secondary_intents": [],
+    "evidence": [
+      "Required components: 0.50"
+    ],
+    "available_actions": [
+      "example domain",
+      "learn more"
+    ],
+    "primary_action": "",
+    "can_create": false,
+    "can_read": false,
+    "can_update": false,
+    "can_delete": false,
+    "can_search": false,
+    "can_filter": false,
+    "can_sort": false,
+    "can_export": false,
+    "confidence": 0.05,
+    "timestamp": "2026-08-10T18:55:12.432980+00:00"
+  },
+  "navigation_context": {
+    "has_navigation_menu": false,
+    "has_breadcrumbs": false,
+    "has_tabs": false,
+    "has_sidebar": false,
+    "has_header": false,
+    "has_footer": false,
+    "navigation_type": "minimal",
+    "active_menu_item": "",
+    "breadcrumb_trail": [],
+    "navigation_links": [
+      {
+        "text": "example domain",
+        "href": "",
+        "element_id": "",
+        "element_class": ""
+      },
+      {
+        "text": "learn more",
+        "href": "",
+        "element_id": "",
+        "element_class": ""
+      }
+    ],
+    "menu_hierarchy": {
+      "root": [],
+      "items": []
+    },
+    "back_available": true,
+    "forward_available": false,
+    "confidence": 0.2,
+    "timestamp": "2026-08-10T18:55:12.433978+00:00"
+  },
+  "has_forms": false,
+  "has_tables": false,
+  "has_charts": false,
+  "has_wizards": false,
+  "has_modals": false,
+  "has_tabs": false,
+  "form_fields": [],
+  "submit_buttons": [],
+  "cancel_buttons": [],
+  "tables": [],
+  "confidence": 0.020000000000000004,
+  "dom_hash": "",
+  "dom_snapshot_id": "",
+  "project_name": "default",
+  "test_name": "default",
+  "execution_id": "",
+  "timestamp": "2026-08-10T18:55:12.447425+00:00",
+  "classification_evidence": [
+    "Text indicator match: 0.20"
+  ]
+}

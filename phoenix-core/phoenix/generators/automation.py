@@ -462,8 +462,8 @@ def _fix_dynamic_person_name_in_locator(code: str) -> str:
 
     Replacement strategy — tries, in order:
       1. button[aria-haspopup] — ARIA-correct user-menu buttons in any framework
-      2. [class*='userdropdown'] — OrangeHRM and similar naming conventions
-      3. [class*='user-dropdown'], [class*='user-menu'] — generic SPA patterns
+      2. [class*='userdropdown'] — Common user dropdown naming conventions
+      3. [class*='user-dropdown'], [class*='user-menu'] — Generic SPA patterns
     Falls back to the .first match so the script is always syntactically valid.
     """
     pattern = re_module.compile(

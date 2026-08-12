@@ -82,3 +82,15 @@ sandbox/
 # OS
 .DS_Store
 Thumbs.db
+# Ignore all Markdown files
+*.md
+
+# Allow README files
+!README.md
+!**/README.md
+# But keep the main README
+!README.md
+
+# Ignore Phoenix runtime artifacts
+PhoenixRuntime/
+**/phoenix_runtime/

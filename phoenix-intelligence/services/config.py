@@ -47,6 +47,12 @@ class LLMSettings:
         "PHOENIX_PROMPTS_DIR",
         str(Path(__file__).resolve().parents[1] / "prompts"),
     )
+    
+    def is_configured(self) -> bool:
+        """Check if LLM is properly configured with an API key."""
+        if self.provider.lower() == "ollama":
+            return True  # Ollama doesn't need API key
+        return bool(self.api_key)
 
 
 @dataclass

@@ -264,7 +264,11 @@ class AutomationGenerationCoordinator:
         if plan.navigation_steps:
             for nav in plan.navigation_steps:
                 if nav.get("step") == "navigate_to_login":
-                    lines.append('    page.goto("https://PLACEHOLDER_URL/login")')
+                    # CRITICAL FIX: Never infer URL from business intent
+                    # Use configured application start URL instead
+                    # The actual login component will be detected from DOM at runtime
+                    lines.append('    page.goto(base_url)  # Open application start URL')
+                    lines.append('    # Login component will be detected from DOM at runtime')
                     lines.append("")
         
         # Add actions

@@ -55,8 +55,7 @@ def _provider_key_name(provider: str) -> str:
 
 _llm_settings = LLMSettings()
 _llm_client = None
-_provider_key = _provider_key_name(_llm_settings.provider)
-if _provider_key and os.environ.get(_provider_key, ""):
+if _llm_settings.is_configured():
     _llm_client = LLMClient(_llm_settings)
     logger.info(
         "LLM client initialised (provider=%s model=%s)",
@@ -64,6 +63,7 @@ if _provider_key and os.environ.get(_provider_key, ""):
         _llm_settings.model,
     )
 else:
+    _provider_key = _provider_key_name(_llm_settings.provider)
     _banner = (
         "\n"
         "╔══════════════════════════════════════════════════════════╗\n"
@@ -124,7 +124,7 @@ def _decorate_metadata(result: dict) -> dict:
     result.setdefault("metadata", {})
     result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
     result["metadata"]["version"] = "2.0.0"
-    result["metadata"]["llm_configured"] = _llm_client is not None
+    result["metadata"]["llm_configured"] = _llm_settings.is_configured()
     result["metadata"]["prompt_hot_reload"] = True
 
     warnings = list(result["metadata"].get("warnings", []))
@@ -147,7 +147,8 @@ def _decorate_metadata(result: dict) -> dict:
 @app.get("/health")
 def health_check():
     """Health check endpoint — reports LLM and MCP availability."""
-    llm_ok = _llm_client is not None
+    llm_ok = _llm_settings.is_configured()
+    _provider_key = _provider_key_name(_llm_settings.provider)
     return {
         "status": "ok" if llm_ok else "degraded",
         "llm": {

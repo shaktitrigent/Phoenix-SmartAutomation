@@ -436,19 +436,18 @@ class AutomationPlanner:
         return assertions
     
     def _plan_navigation(self, scenario: TestScenario) -> List[Dict[str, Any]]:
-        """Plan navigation steps from scenario."""
+        """Plan navigation steps from scenario.
+        
+        CRITICAL FIX: Never infer URLs from business intent.
+        Navigation should only be based on explicit navigation requirements
+        in the scenario, not assumed from intent like "login".
+        """
         navigation = []
         
-        # Check if authentication is needed
-        if any(
-            phrase in scenario.business_intent.lower()
-            for phrase in ["authentication", "login", "sign in"]
-        ):
-            navigation.append({
-                "step": "navigate_to_login",
-                "target": "authentication_page",
-                "confidence": 0.9,
-            })
+        # CRITICAL FIX: Removed automatic navigate_to_login generation
+        # Business intent like "login" does NOT imply a specific URL path
+        # The application start URL should be configured externally
+        # Login components will be detected from DOM at runtime
         
         # Check if navigation is mentioned in preconditions
         for precondition in scenario.preconditions:

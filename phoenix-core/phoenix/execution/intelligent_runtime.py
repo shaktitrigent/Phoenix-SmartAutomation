@@ -17,6 +17,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
+# Add try-except for semantic module imports to handle missing dependencies gracefully
+try:
+    from phoenix.semantic.semantic_integrator import SemanticIntegrator
+    SEMANTIC_AVAILABLE = True
+except ImportError:
+    SEMANTIC_AVAILABLE = False
+    SemanticIntegrator = None
+
 logger = logging.getLogger(__name__)
 
 from phoenix.execution.artifacts import get_artifacts_manager
@@ -27,7 +35,10 @@ from phoenix.execution.dom_diff import DOMDifferenceEngine
 from phoenix.execution.runtime_metrics import RuntimeMetricsCollector
 from phoenix.execution.runtime_timeline import RuntimeTimelineTracker
 from phoenix.healing.engine import HealingEngine
-from phoenix.semantic.semantic_integrator import SemanticIntegrator
+
+# Conditional imports for semantic modules
+if SEMANTIC_AVAILABLE:
+    from phoenix.semantic.semantic_integrator import SemanticIntegrator
 from phoenix.flow_detection.flow_discovery import FlowDiscoveryEngine
 
 
@@ -158,9 +169,11 @@ class IntelligentRuntime:
         # Initialize artifacts manager
         self.artifacts_manager = get_artifacts_manager(base_dir=str(self.base_dir / "artifacts"))
         
-        # Initialize DOM Snapshot Manager for permanent storage
+        # Initialize DOM Snapshot Manager for permanent storage with configurable validation
         self.dom_snapshot_manager = DOMSnapshotManager(
-            base_dir=str(self.base_dir)
+            base_dir=str(self.base_dir),
+            min_dom_size_bytes=100,  # Configurable minimum DOM size
+            enable_size_validation=True  # Enable size validation
         ) if enable_cache else None
         
         # Initialize intelligent components
@@ -194,14 +207,20 @@ class IntelligentRuntime:
         ) if enable_timeline else None
         
         # Initialize Semantic Understanding (Priority 20 + Priority 22)
-        self.semantic_integrator = SemanticIntegrator(
-            base_dir=str(self.base_dir),
-            enable_page_classification=enable_semantic,
-            enable_component_analysis=enable_semantic,
-            enable_intent_detection=enable_semantic,
-            enable_navigation_analysis=enable_semantic,
-            enable_component_intelligence=enable_semantic,  # Priority 22: Universal Component Intelligence
-        ) if enable_semantic else None
+        self.semantic_integrator = None
+        if enable_semantic and SEMANTIC_AVAILABLE:
+            try:
+                self.semantic_integrator = SemanticIntegrator(
+                    base_dir=str(self.base_dir),
+                    enable_page_classification=enable_semantic,
+                    enable_component_analysis=enable_semantic,
+                    enable_intent_detection=enable_semantic,
+                    enable_navigation_analysis=enable_semantic,
+                    enable_component_intelligence=enable_semantic,  # Priority 22: Universal Component Intelligence
+                )
+            except Exception as e:
+                logger.warning(f"[INTELLIGENT RUNTIME] Failed to initialize SemanticIntegrator: {e}")
+                self.semantic_integrator = None
         
         # Initialize Flow Detection (Priority 21)
         self.flow_discovery = FlowDiscoveryEngine(
@@ -780,6 +799,8 @@ class IntelligentRuntime:
             
         except Exception as e:
             logger.warning(f"[INTELLIGENT RUNTIME] Semantic analysis failed: {e}")
+            import traceback
+            logger.debug(f"[INTELLIGENT RUNTIME] Semantic analysis traceback: {traceback.format_exc()}")
             return None
     
     def get_semantic_context(self) -> str:
@@ -801,6 +822,11 @@ class IntelligentRuntime:
         """Save runtime evidence to file."""
         evidence_file = self.base_dir / "runtime_reports" / f"evidence_{self.execution_id}.json"
         evidence_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        print(f"[PHOENIX EVIDENCE] Saving runtime evidence")
+        print(f"[PHOENIX EVIDENCE] Evidence path: {evidence_file.absolute()}")
+        print(f"[PHOENIX EVIDENCE] Base directory: {self.base_dir.absolute()}")
+        print(f"[PHOENIX EVIDENCE] Execution ID: {self.execution_id}")
         
         with open(evidence_file, 'w', encoding='utf-8') as f:
             # Convert to dict for JSON serialization
@@ -846,13 +872,21 @@ class IntelligentRuntime:
             json.dump(evidence_dict, f, indent=2, ensure_ascii=False)
         
         logger.info(f"[INTELLIGENT RUNTIME] Saved runtime evidence to {evidence_file}")
+        print(f"[PHOENIX EVIDENCE] Runtime evidence saved successfully")
+        print(f"[PHOENIX EVIDENCE] Cache hits: {self.runtime_evidence.cache_hits}")
+        print(f"[PHOENIX EVIDENCE] Cache misses: {self.runtime_evidence.cache_misses}")
+        print(f"[PHOENIX EVIDENCE] DOM reuse count: {self.runtime_evidence.dom_reuse_count}")
+        print(f"[PHOENIX EVIDENCE] DOM generation count: {self.runtime_evidence.dom_generation_count}")
+        print(f"[PHOENIX EVIDENCE] Time saved: {self.runtime_evidence.time_saved_ms:.2f}ms")
         
         # Also save to a known location for TestRunner to load
         evidence_sync_file = self.base_dir / ".runtime_evidence_sync.json"
+        print(f"[PHOENIX EVIDENCE] Evidence sync path: {evidence_sync_file.absolute()}")
         with open(evidence_sync_file, 'w', encoding='utf-8') as f:
             json.dump(evidence_dict, f, indent=2, ensure_ascii=False)
         
         logger.info(f"[INTELLIGENT RUNTIME] Saved runtime evidence sync to {evidence_sync_file}")
+        print(f"[PHOENIX EVIDENCE] Evidence sync saved successfully")
     
     def _save_execution_history(self):
         """Save execution to history."""

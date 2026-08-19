@@ -11,6 +11,7 @@ enabling DOM reuse decisions, MCP calls, locator healing, and runtime evidence c
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -81,6 +82,19 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
         self._last_dom_capture_time: float = 0.0
         self._dom_cache_ttl_seconds: int = 30  # Cache DOM for 30 seconds
         
+        # Load latest DOM hash from cache if available (for reuse across test executions)
+        if self._dom_snapshot_manager:
+            try:
+                latest_snapshot = self._dom_snapshot_manager.load_latest_dom_snapshot(
+                    self._project_name, self._test_name
+                )
+                if latest_snapshot and latest_snapshot.metadata:
+                    self._current_dom_hash = latest_snapshot.metadata.dom_hash
+                    logger.info(f"[INTELLIGENT PAGE] Loaded cached DOM hash: {self._current_dom_hash[:8]}...")
+                    print(f"[PHOENIX DOM] Loaded cached DOM hash on page creation: {self._current_dom_hash[:8]}...")
+            except Exception as e:
+                logger.debug(f"[INTELLIGENT PAGE] Failed to load cached DOM hash: {e}")
+        
         # Initialize semantic integrator if available (Priority 20)
         self._semantic_integrator = None
         if intelligent_runtime and hasattr(intelligent_runtime, 'semantic_integrator'):
@@ -126,83 +140,102 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
         Returns:
             Tuple of (dom_content, was_reused)
         """
+        print(f"[PHOENIX DOM] _capture_dom_with_intelligence called - force_refresh: {force_refresh}")
         url = self._get_current_url()
         page_name = self._test_name or "unknown"
         
-        # Check if we should use cached DOM
-        if not force_refresh and not self._should_refresh_dom() and self._current_dom_hash:
-            logger.info(f"[INTELLIGENT PAGE] Using cached DOM (hash: {self._current_dom_hash[:8]}...)")
-            return "", True  # Return empty but indicate reuse
+        print(f"[PHOENIX DOM] URL: {url}")
+        print(f"[PHOENIX DOM] Page: {page_name}")
+        print(f"[PHOENIX DOM] Project: {self._project_name}")
         
-        # Consult DOM Snapshot Manager for reuse decision
-        if self._dom_snapshot_manager:
-            try:
-                reuse_decision = self._dom_snapshot_manager.should_reuse_dom(
-                    url=url,
-                    project=self._project_name,
-                    page=page_name,
-                    current_dom=None,
-                    execution_id=self._execution_id
-                )
-                
-                if reuse_decision.decision == "REUSE":
-                    logger.info(f"[INTELLIGENT PAGE] DOM REUSE DECISION: REUSE")
-                    logger.info(f"[INTELLIGENT PAGE] Reason: {reuse_decision.reason}")
-                    logger.info(f"[INTELLIGENT PAGE] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
-                    logger.info(f"[INTELLIGENT PAGE] MCP skipped: {reuse_decision.mcp_skipped}")
-                    
-                    # Load and return reused DOM
-                    previous_snapshot = self._dom_snapshot_manager.load_latest_dom_snapshot(
-                        self._project_name, page_name
+        # If force_refresh is True, skip cache decision and go directly to capture
+        if force_refresh:
+            print(f"[PHOENIX DOM] FORCE REFRESH - Skipping cache decision, will capture new DOM")
+            # Proceed to capture new DOM below (skip the cache decision block)
+        else:
+            # Check if we should use cached DOM
+            if not self._should_refresh_dom() and self._current_dom_hash:
+                logger.info(f"[INTELLIGENT PAGE] Using cached DOM (hash: {self._current_dom_hash[:8]}...)")
+                print(f"[PHOENIX DOM] CACHE HIT - Using cached DOM (hash: {self._current_dom_hash[:8]}...)")
+                return "", True  # Return empty but indicate reuse
+            
+            # Consult DOM Snapshot Manager for reuse decision
+            if self._dom_snapshot_manager:
+                try:
+                    print(f"[PHOENIX DOM] Consulting DOM Snapshot Manager for reuse decision")
+                    reuse_decision = self._dom_snapshot_manager.should_reuse_dom(
+                        url=url,
+                        project=self._project_name,
+                        page=page_name,
+                        current_dom=None,
+                        execution_id=self._execution_id
                     )
-                    if previous_snapshot:
-                        self._current_dom_hash = previous_snapshot.metadata.dom_hash
-                        self._last_dom_capture_time = time.time()
+                    print(f"[PHOENIX DOM CACHE] Decision: {reuse_decision.decision}")
+                    print(f"[PHOENIX DOM CACHE] Reason: {reuse_decision.reason}")
+                    
+                    if reuse_decision.decision == "REUSE":
+                        logger.info(f"[INTELLIGENT PAGE] DOM REUSE DECISION: REUSE")
+                        logger.info(f"[INTELLIGENT PAGE] Reason: {reuse_decision.reason}")
+                        logger.info(f"[INTELLIGENT PAGE] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
+                        logger.info(f"[INTELLIGENT PAGE] MCP skipped: {reuse_decision.mcp_skipped}")
+                        print(f"[PHOENIX DOM] REUSE decision - Reusing cached DOM")
                         
-                        # Update runtime evidence counters directly
-                        if self._intelligent_runtime and hasattr(self._intelligent_runtime, 'runtime_evidence'):
-                            try:
-                                self._intelligent_runtime.runtime_evidence.artifacts_reused.append("dom_snapshot")
-                                self._intelligent_runtime.runtime_evidence.cache_hits += 1
-                                self._intelligent_runtime.runtime_evidence.dom_reuse_count += 1
-                                self._intelligent_runtime.runtime_evidence.time_saved_ms += reuse_decision.time_saved_ms
-                                self._intelligent_runtime.runtime_evidence.mcp_calls_saved += 1
-                                
-                                # Record time saved in metrics
-                                if self._intelligent_runtime.metrics_collector:
-                                    self._intelligent_runtime.metrics_collector.record_time_saved(reuse_decision.time_saved_ms)
+                        # Load and return reused DOM
+                        previous_snapshot = self._dom_snapshot_manager.load_latest_dom_snapshot(
+                            self._project_name, page_name
+                        )
+                        if previous_snapshot:
+                            self._current_dom_hash = previous_snapshot.metadata.dom_hash
+                            self._last_dom_capture_time = time.time()
+                            
+                            # Update runtime evidence counters directly
+                            if self._intelligent_runtime and hasattr(self._intelligent_runtime, 'runtime_evidence'):
+                                try:
+                                    self._intelligent_runtime.runtime_evidence.artifacts_reused.append("dom_snapshot")
+                                    self._intelligent_runtime.runtime_evidence.cache_hits += 1
+                                    self._intelligent_runtime.runtime_evidence.dom_reuse_count += 1
+                                    self._intelligent_runtime.runtime_evidence.time_saved_ms += reuse_decision.time_saved_ms
+                                    self._intelligent_runtime.runtime_evidence.mcp_calls_saved += 1
                                     
-                                logger.info(f"[INTELLIGENT PAGE] Updated runtime evidence: dom_reuse_count={self._intelligent_runtime.runtime_evidence.dom_reuse_count}")
-                            except Exception as e:
-                                logger.warning(f"[INTELLIGENT PAGE] Failed to update runtime evidence: {e}")
-                        
-                        # Record intelligent decision
-                        if self._intelligent_runtime and hasattr(self._intelligent_runtime, 'make_intelligent_decision'):
-                            try:
-                                self._intelligent_runtime.make_intelligent_decision(
-                                    decision_type="dom_capture",
-                                    context={
-                                        "url": url,
-                                        "project_name": self._project_name,
-                                        "page_name": page_name,
-                                        "decision": "reuse",
-                                        "reason": reuse_decision.reason
-                                    }
-                                )
-                            except Exception as e:
-                                logger.warning(f"[INTELLIGENT PAGE] Failed to record intelligent decision: {e}")
-                        
-                        return previous_snapshot.dom_content, True
-                
-                logger.info(f"[INTELLIGENT PAGE] DOM REUSE DECISION: CAPTURE")
-                logger.info(f"[INTELLIGENT PAGE] Reason: {reuse_decision.reason}")
-                
-            except Exception as e:
-                logger.warning(f"[INTELLIGENT PAGE] DOM reuse decision failed: {e}")
+                                    # Record time saved in metrics
+                                    if self._intelligent_runtime.metrics_collector:
+                                        self._intelligent_runtime.metrics_collector.record_time_saved(reuse_decision.time_saved_ms)
+                                        
+                                    logger.info(f"[INTELLIGENT PAGE] Updated runtime evidence: dom_reuse_count={self._intelligent_runtime.runtime_evidence.dom_reuse_count}")
+                                except Exception as e:
+                                    logger.warning(f"[INTELLIGENT PAGE] Failed to update runtime evidence: {e}")
+                            
+                            # Record intelligent decision
+                            if self._intelligent_runtime and hasattr(self._intelligent_runtime, 'make_intelligent_decision'):
+                                try:
+                                    self._intelligent_runtime.make_intelligent_decision(
+                                        decision_type="dom_capture",
+                                        context={
+                                            "url": url,
+                                            "project_name": self._project_name,
+                                            "page_name": page_name,
+                                            "decision": "reuse",
+                                            "reason": reuse_decision.reason
+                                        }
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[INTELLIGENT PAGE] Failed to record intelligent decision: {e}")
+                            
+                            return previous_snapshot.dom_content, True
+                    
+                    logger.info(f"[INTELLIGENT PAGE] DOM REUSE DECISION: CAPTURE")
+                    logger.info(f"[INTELLIGENT PAGE] Reason: {reuse_decision.reason}")
+                    print(f"[PHOENIX DOM] CAPTURE decision - Will capture new DOM")
+                    
+                except Exception as e:
+                    logger.warning(f"[INTELLIGENT PAGE] DOM reuse decision failed: {e}")
         
         # Capture new DOM via Playwright
         logger.info(f"[INTELLIGENT PAGE] Capturing new DOM via Playwright")
+        print(f"[PHOENIX DOM] CAPTURE requested - Capturing new DOM via Playwright")
         start_time = time.time()
+        
+        accessibility_tree = ""
         
         try:
             # Ensure page is ready before capturing DOM
@@ -223,36 +256,100 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
             except Exception as e:
                 logger.warning(f"[INTELLIGENT PAGE] Body element not found: {e}")
             
-            # Wait for dynamic content to render (e.g., login forms)
-            try:
-                # Wait for common interactive elements to be present
-                self._page.wait_for_load_state("load", timeout=3000)
-            except Exception as e:
-                logger.debug(f"[INTELLIGENT PAGE] Load state wait failed: {e}")
+            # Wait for SPA/React rendering by checking for meaningful content
+            # This ensures we capture the rendered DOM, not just the initial shell
+            max_retries = 10  # Increased retries for slower SPAs
+            dom_content = ""
             
-            dom_content = self._page.content()
+            for attempt in range(max_retries):
+                # Use JavaScript evaluation to get the live rendered DOM
+                # This is critical for SPAs - page.content() returns source HTML, not rendered DOM
+                try:
+                    dom_content = self._page.evaluate("() => document.documentElement.outerHTML")
+                except Exception as e:
+                    logger.warning(f"[INTELLIGENT PAGE] Failed to evaluate DOM content: {e}")
+                    # Fallback to page.content()
+                    try:
+                        dom_content = self._page.content()
+                    except Exception as e2:
+                        logger.warning(f"[INTELLIGENT PAGE] Failed to get page content: {e2}")
+                        dom_content = ""
+                
+                # Check if DOM has meaningful content (not just empty shell)
+                min_dom_size = 100
+                if self._dom_snapshot_manager and hasattr(self._dom_snapshot_manager, 'min_dom_size_bytes'):
+                    min_dom_size = self._dom_snapshot_manager.min_dom_size_bytes
+                
+                # Count meaningful elements (inputs, buttons, forms, links, divs with content)
+                meaningful_elements = dom_content.count('<input') + dom_content.count('<button') + dom_content.count('<form') + dom_content.count('<a ')
+                
+                # Also check for common SPA indicators - if we have the root div but no content inside, it's still empty
+                has_root = '<div id="root"' in dom_content or '<div id="root">' in dom_content
+                root_has_content = False
+                if has_root:
+                    # Check if root div has children beyond just the opening tag
+                    root_start = dom_content.find('<div id="root"')
+                    if root_start != -1:
+                        # Look for content after the root div opening
+                        after_root = dom_content[root_start:]
+                        # Check if there are actual elements inside root (not just whitespace/closing tags)
+                        if '<input' in after_root or '<button' in after_root or '<form' in after_root or '<a ' in after_root or '<h1' in after_root or '<h2' in after_root:
+                            root_has_content = True
+                
+                logger.info(f"[INTELLIGENT PAGE] DOM capture attempt {attempt + 1}/{max_retries}: {len(dom_content)} bytes, {meaningful_elements} meaningful elements, root_has_content: {root_has_content}")
+                
+                # Accept DOM if: it has meaningful elements AND either (root has content OR no root div exists)
+                if meaningful_elements > 0 and (root_has_content or not has_root):
+                    logger.info(f"[INTELLIGENT PAGE] DOM has meaningful content, capture complete")
+                    break
+                
+                # If this is the last attempt, don't wait more
+                if attempt == max_retries - 1:
+                    logger.warning(f"[INTELLIGENT PAGE] DOM capture completed with {len(dom_content)} bytes (may be partially rendered)")
+                    logger.warning(f"[INTELLIGENT PAGE] Final state: {meaningful_elements} meaningful elements, root_has_content: {root_has_content}")
+                    break
+                
+                # Wait a bit for SPA rendering (longer wait for each attempt)
+                wait_time = 0.5 + (attempt * 0.2)  # Progressive wait: 0.5s, 0.7s, 0.9s, etc.
+                logger.info(f"[INTELLIGENT PAGE] Waiting for SPA rendering (attempt {attempt + 1}, waiting {wait_time}s)")
+                time.sleep(wait_time)
+            
             capture_duration = (time.time() - start_time) * 1000
             
             logger.info(f"[INTELLIGENT PAGE] DOM captured: {len(dom_content)} bytes in {capture_duration:.2f}ms")
+            print(f"[PHOENIX DOM] CAPTURE completed - {len(dom_content)} bytes in {capture_duration:.2f}ms")
             
-            # Check if DOM is suspiciously small (empty page)
-            if len(dom_content) < 100:
-                logger.warning(f"[INTELLIGENT PAGE] DOM content is very small ({len(dom_content)} bytes), page may not be loaded")
-                logger.warning(f"[INTELLIGENT PAGE] Current URL: {self._page.url}")
-                logger.warning(f"[INTELLIGENT PAGE] Page title: {self._page.title()}")
-                
-                # Try waiting a bit more and capturing again
+            # Capture accessibility tree if available
+            try:
+                # Use Playwright's accessibility tree capture
+                accessibility_snapshot = self._page.accessibility.snapshot()
+                if accessibility_snapshot:
+                    import json
+                    accessibility_tree = json.dumps(accessibility_snapshot, indent=2)
+                    logger.info(f"[INTELLIGENT PAGE] Accessibility tree captured: {len(accessibility_tree)} bytes")
+                else:
+                    logger.debug(f"[INTELLIGENT PAGE] Accessibility tree snapshot returned None")
+                    # Fallback: try to generate a basic accessibility tree from DOM
+                    accessibility_tree = self._generate_basic_accessibility_tree(dom_content)
+                    if accessibility_tree:
+                        logger.info(f"[INTELLIGENT PAGE] Basic accessibility tree generated: {len(accessibility_tree)} bytes")
+            except Exception as e:
+                logger.debug(f"[INTELLIGENT PAGE] Failed to capture accessibility tree: {e}")
+                # Fallback: try to generate a basic accessibility tree from DOM
                 try:
-                    time.sleep(2)
-                    dom_content = self._page.content()
-                    logger.info(f"[INTELLIGENT PAGE] Retry DOM capture: {len(dom_content)} bytes")
-                except Exception as retry_e:
-                    logger.warning(f"[INTELLIGENT PAGE] Retry DOM capture failed: {retry_e}")
+                    accessibility_tree = self._generate_basic_accessibility_tree(dom_content)
+                    if accessibility_tree:
+                        logger.info(f"[INTELLIGENT PAGE] Fallback accessibility tree generated: {len(accessibility_tree)} bytes")
+                except Exception as fallback_e:
+                    logger.debug(f"[INTELLIGENT PAGE] Failed to generate fallback accessibility tree: {fallback_e}")
             
             # Store new snapshot
             if self._dom_snapshot_manager:
                 try:
                     logger.info(f"[INTELLIGENT PAGE] DOM SNAPSHOT STARTED - Storing for {self._project_name}/{page_name}")
+                    print(f"[PHOENIX DOM] SNAPSHOT started - Storing for {self._project_name}/{page_name}")
+                    print(f"[PHOENIX DOM] Execution ID: {self._execution_id}")
+                    
                     self._dom_snapshot_manager.store_dom_snapshot(
                         dom_content=dom_content,
                         url=url,
@@ -260,9 +357,12 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
                         page=page_name,
                         execution_id=self._execution_id,
                         capture_source="playwright",
-                        capture_duration_ms=capture_duration
+                        capture_duration_ms=capture_duration,
+                        accessibility_tree=accessibility_tree
                     )
+                    
                     logger.info(f"[INTELLIGENT PAGE] DOM SNAPSHOT STORED - Successfully stored for {self._project_name}/{page_name}")
+                    print(f"[PHOENIX DOM] SNAPSHOT stored - Successfully stored for {self._project_name}/{page_name}")
                     
                     # Update cache
                     if self._dom_snapshot_manager:
@@ -371,76 +471,185 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
     def _extract_heading_from_dom(self, dom_content: str) -> str:
         """Extract main heading from DOM content."""
         import re
-        # Try h1 first
-        h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', dom_content, re.IGNORECASE)
-        if h1_match:
-            return h1_match.group(1).strip()
-        
-        # Try h2
-        h2_match = re.search(r'<h2[^>]*>([^<]+)</h2>', dom_content, re.IGNORECASE)
-        if h2_match:
-            return h2_match.group(1).strip()
-        
-        # Try title tag
-        title_match = re.search(r'<title[^>]*>([^<]+)</title>', dom_content, re.IGNORECASE)
-        if title_match:
-            return title_match.group(1).strip()
+        try:
+            # Try h1 first
+            h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', dom_content, re.IGNORECASE)
+            if h1_match:
+                return h1_match.group(1).strip()
+            
+            # Try h2
+            h2_match = re.search(r'<h2[^>]*>([^<]+)</h2>', dom_content, re.IGNORECASE)
+            if h2_match:
+                return h2_match.group(1).strip()
+            
+            # Try title tag
+            title_match = re.search(r'<title[^>]*>([^<]+)</title>', dom_content, re.IGNORECASE)
+            if title_match:
+                return title_match.group(1).strip()
+        except Exception as e:
+            logger.debug(f"[INTELLIGENT PAGE] Failed to extract heading: {e}")
         
         return ""
     
     def _extract_text_from_dom(self, dom_content: str) -> str:
         """Extract text content from DOM."""
-        import re
-        # Remove script and style tags
-        dom_content = re.sub(r'<script[^>]*>.*?</script>', '', dom_content, flags=re.IGNORECASE | re.DOTALL)
-        dom_content = re.sub(r'<style[^>]*>.*?</style>', '', dom_content, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Remove all HTML tags
-        text = re.sub(r'<[^>]+>', ' ', dom_content)
-        
-        # Clean up whitespace
-        text = ' '.join(text.split())
-        
-        return text[:5000]  # Limit to 5000 characters
+        try:
+            # Remove script and style tags
+            dom_content = re.sub(r'<script[^>]*>.*?</script>', '', dom_content, flags=re.IGNORECASE | re.DOTALL)
+            dom_content = re.sub(r'<style[^>]*>.*?</style>', '', dom_content, flags=re.IGNORECASE | re.DOTALL)
+            
+            # Remove all HTML tags
+            text = re.sub(r'<[^>]+>', ' ', dom_content)
+            
+            # Clean up whitespace
+            text = ' '.join(text.split())
+            
+            return text[:5000]  # Limit to 5000 characters
+        except Exception as e:
+            logger.debug(f"[INTELLIGENT PAGE] Failed to extract text from DOM: {e}")
+            return ""
     
     def _parse_dom_elements(self, dom_content: str) -> List[Dict[str, Any]]:
         """Parse DOM content into element dictionaries."""
-        import re
-        elements = []
+        try:
+            elements = []
+            
+            # Simple regex-based parsing for common elements
+            tag_pattern = re.compile(r'<([a-zA-Z][a-zA-Z0-9]*)([^>]*)>')
+            
+            for match in tag_pattern.finditer(dom_content):
+                tag = match.group(1)
+                attrs_str = match.group(2)
+                
+                # Parse attributes
+                attrs = {}
+                attr_pattern = re.compile(r'([a-zA-Z-]+)="([^"]*)"')
+                for attr_match in attr_pattern.finditer(attrs_str):
+                    attrs[attr_match.group(1)] = attr_match.group(2)
+                
+                # Extract text content (simplified)
+                text = ""
+                text_match = re.search(r'>{([^<]+)<', dom_content[match.end():match.end()+100])
+                if text_match:
+                    text = text_match.group(1).strip()
+                
+                element = {
+                    "tag": tag,
+                    "attributes": attrs,
+                    "text": text,
+                    "xpath": f"//{tag}",
+                    "css_selector": f"{tag}",
+                    "visible": True,
+                    "position": {},
+                    "layout": {},
+                }
+                
+                elements.append(element)
+            
+            return elements
+        except Exception as e:
+            logger.debug(f"[INTELLIGENT PAGE] Failed to parse DOM elements: {e}")
+            return []
+    
+    def _generate_basic_accessibility_tree(self, dom_content: str) -> str:
+        """Generate a basic accessibility tree from DOM content as fallback.
         
-        # Simple regex-based parsing for common elements
-        tag_pattern = re.compile(r'<([a-zA-Z][a-zA-Z0-9]*)([^>]*)>')
+        This method extracts meaningful accessibility information from the DOM
+        when Playwright's accessibility snapshot is not available.
         
-        for match in tag_pattern.finditer(dom_content):
-            tag = match.group(1)
-            attrs_str = match.group(2)
+        Args:
+            dom_content: HTML DOM content
             
-            # Parse attributes
-            attrs = {}
-            attr_pattern = re.compile(r'([a-zA-Z-]+)="([^"]*)"')
-            for attr_match in attr_pattern.finditer(attrs_str):
-                attrs[attr_match.group(1)] = attr_match.group(2)
-            
-            # Extract text content (simplified)
-            text = ""
-            text_match = re.search(r'>{([^<]+)<', dom_content[match.end():match.end()+100])
-            if text_match:
-                text = text_match.group(1).strip()
-            
-            element = {
-                "tag": tag,
-                "attributes": attrs,
-                "text": text,
-                "xpath": f"//{tag}",
-                "css_selector": f"{tag}",
-                "visible": True,
-                "position": {},
-                "layout": {},
-            }
-            
-            elements.append(element)
+        Returns:
+            JSON string representing a basic accessibility tree
+        """
+        import json
         
-        return elements
+        tree = {
+            "role": "root",
+            "name": "",
+            "children": []
+        }
+        
+        try:
+            # Extract interactive elements with accessibility properties
+            tag_pattern = re.compile(r'<(input|button|a|form|label|select|textarea)([^>]*)>([^<]*)</\1>', re.IGNORECASE)
+            
+            for match in tag_pattern.finditer(dom_content):
+                tag = match.group(1).lower()
+                attrs_str = match.group(2)
+                text = match.group(3).strip()
+                
+                # Parse attributes
+                attrs = {}
+                attr_pattern = re.compile(r'([a-zA-Z-]+)="([^"]*)"')
+                for attr_match in attr_pattern.finditer(attrs_str):
+                    attrs[attr_match.group(1).lower()] = attr_match.group(2)
+                
+                # Determine accessibility role
+                role = tag
+                if tag == "input":
+                    input_type = attrs.get("type", "text")
+                    role = f"textbox" if input_type in ["text", "email", "password"] else input_type
+                elif tag == "button":
+                    role = "button"
+                elif tag == "a":
+                    role = "link"
+                elif tag == "form":
+                    role = "form"
+                elif tag == "label":
+                    role = "label"
+                elif tag == "select":
+                    role = "combobox"
+                elif tag == "textarea":
+                    role = "textbox"
+                
+                # Extract accessible name (prioritize aria-label, then placeholder, then text)
+                accessible_name = attrs.get("aria-label", "")
+                if not accessible_name:
+                    accessible_name = attrs.get("placeholder", "")
+                if not accessible_name:
+                    accessible_name = attrs.get("title", "")
+                if not accessible_name:
+                    accessible_name = text
+                
+                # Create accessibility node
+                node = {
+                    "role": role,
+                    "name": accessible_name,
+                    "attributes": {
+                        "id": attrs.get("id", ""),
+                        "class": attrs.get("class", ""),
+                        "type": attrs.get("type", ""),
+                        "name": attrs.get("name", ""),
+                        "aria-label": attrs.get("aria-label", ""),
+                        "placeholder": attrs.get("placeholder", ""),
+                    }
+                }
+                
+                tree["children"].append(node)
+            
+            # Also extract heading elements
+            heading_pattern = re.compile(r'<h([1-6])([^>]*)>([^<]*)</h\1>', re.IGNORECASE)
+            for match in heading_pattern.finditer(dom_content):
+                level = match.group(1)
+                attrs_str = match.group(2)
+                text = match.group(3).strip()
+                
+                node = {
+                    "role": f"heading",
+                    "level": int(level),
+                    "name": text,
+                    "attributes": {}
+                }
+                
+                tree["children"].append(node)
+            
+            return json.dumps(tree, indent=2)
+            
+        except Exception as e:
+            logger.debug(f"[INTELLIGENT PAGE] Failed to generate accessibility tree: {e}")
+            return json.dumps({"role": "root", "name": "", "children": []})
     
     # ------------------------------------------------------------------
     # Playwright Page Method Wrappers
@@ -468,7 +677,11 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
                     logger.debug(f"[INTELLIGENT PAGE] Wait for networkidle failed: {e2}")
             
             # Capture DOM after navigation and page load
-            self._capture_dom_with_intelligence(force_refresh=True)
+            # Only force capture if we don't have a DOM hash yet (first navigation)
+            # Otherwise, let the cache decision logic determine if we should reuse
+            force_capture = self._current_dom_hash is None
+            print(f"[PHOENIX DOM] goto() - force_capture: {force_capture}, has_dom_hash: {self._current_dom_hash is not None}")
+            self._capture_dom_with_intelligence(force_refresh=force_capture)
             
             duration_ms = (time.time() - start_time) * 1000
             self._record_action_end("goto", duration_ms, True, {"url": url})
@@ -581,6 +794,15 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
                     healing_engine = self._intelligent_runtime.healing_engine
                     if healing_engine:
                         logger.info(f"[INTELLIGENT PAGE] HEALING ENGINE - Attempting to heal {selector}")
+                        
+                        # Record healing attempt in runtime evidence
+                        if self._intelligent_runtime and hasattr(self._intelligent_runtime, 'runtime_evidence'):
+                            try:
+                                self._intelligent_runtime.runtime_evidence.healing_attempts += 1
+                                logger.info(f"[INTELLIGENT PAGE] Healing attempt count: {self._intelligent_runtime.runtime_evidence.healing_attempts}")
+                            except Exception as evidence_e:
+                                logger.warning(f"[INTELLIGENT PAGE] Failed to update healing attempt evidence: {evidence_e}")
+                        
                         context = {
                             "project_name": self._project_name,
                             "page_name": self._test_name,
@@ -594,6 +816,16 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
                             context=context
                         )
                         logger.info(f"[INTELLIGENT PAGE] HEALING ENGINE RESULT - healing_success: {healing_success}")
+                        
+                        # Record healing success in runtime evidence
+                        if healing_success and self._intelligent_runtime and hasattr(self._intelligent_runtime, 'runtime_evidence'):
+                            try:
+                                self._intelligent_runtime.runtime_evidence.healing_successes += 1
+                                self._intelligent_runtime.runtime_evidence.artifacts_updated.append("healing_repository")
+                                logger.info(f"[INTELLIGENT PAGE] Healing success count: {self._intelligent_runtime.runtime_evidence.healing_successes}")
+                            except Exception as evidence_e:
+                                logger.warning(f"[INTELLIGENT PAGE] Failed to update healing success evidence: {evidence_e}")
+                        
                         if healing_success:
                             logger.info(f"[INTELLIGENT PAGE] Healing succeeded for {selector}")
                             # Retry the click after healing
@@ -708,6 +940,15 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
                     healing_engine = self._intelligent_runtime.healing_engine
                     if healing_engine:
                         logger.info(f"[INTELLIGENT PAGE] HEALING ENGINE - Attempting to heal {selector}")
+                        
+                        # Record healing attempt in runtime evidence
+                        if self._intelligent_runtime and hasattr(self._intelligent_runtime, 'runtime_evidence'):
+                            try:
+                                self._intelligent_runtime.runtime_evidence.healing_attempts += 1
+                                logger.info(f"[INTELLIGENT PAGE] Healing attempt count: {self._intelligent_runtime.runtime_evidence.healing_attempts}")
+                            except Exception as evidence_e:
+                                logger.warning(f"[INTELLIGENT PAGE] Failed to update healing attempt evidence: {evidence_e}")
+                        
                         context = {
                             "project_name": self._project_name,
                             "page_name": self._test_name,
@@ -721,6 +962,16 @@ class IntelligentPage(PAGE_TYPE if PAGE_TYPE != type(None) else object):
                             context=context
                         )
                         logger.info(f"[INTELLIGENT PAGE] HEALING ENGINE RESULT - healing_success: {healing_success}")
+                        
+                        # Record healing success in runtime evidence
+                        if healing_success and self._intelligent_runtime and hasattr(self._intelligent_runtime, 'runtime_evidence'):
+                            try:
+                                self._intelligent_runtime.runtime_evidence.healing_successes += 1
+                                self._intelligent_runtime.runtime_evidence.artifacts_updated.append("healing_repository")
+                                logger.info(f"[INTELLIGENT PAGE] Healing success count: {self._intelligent_runtime.runtime_evidence.healing_successes}")
+                            except Exception as evidence_e:
+                                logger.warning(f"[INTELLIGENT PAGE] Failed to update healing success evidence: {evidence_e}")
+                        
                         if healing_success:
                             logger.info(f"[INTELLIGENT PAGE] Healing succeeded for {selector}")
                             # Retry the fill after healing

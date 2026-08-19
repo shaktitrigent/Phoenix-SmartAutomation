@@ -64,7 +64,9 @@ class MCPClient:
                 start_time = time.time()
                 result = self._run_async(self._inspect_page_async(target_url))
                 duration = time.time() - start_time
-                return result, "", duration
+                # For now, accessibility tree is embedded in the result
+                # We'll parse it out if needed
+                return result, result, duration
             
             try:
                 dom_content, reuse_decision = self.dom_snapshot_manager.get_dom_with_automatic_reuse(
@@ -174,9 +176,40 @@ class MCPClient:
             await session.call_tool("browser_navigate", {"url": url})
 
             # Wait for page to fully load before taking snapshot
-            logger.info("MCP: waiting for page load (3 seconds)")
-            await asyncio.sleep(3)
-
+            # Use intelligent waiting instead of fixed sleep for SPA support
+            logger.info("MCP: waiting for page load and SPA rendering")
+            await asyncio.sleep(2)  # Initial wait for navigation
+            
+            # Additional intelligent wait for SPA rendering
+            max_wait_attempts = 5
+            for attempt in range(max_wait_attempts):
+                await asyncio.sleep(0.5)  # Wait between checks
+                logger.info(f"MCP: checking if page has rendered (attempt {attempt + 1}/{max_wait_attempts})")
+                
+                # Check if page has meaningful content by checking the DOM
+                try:
+                    # Try to get page content to check if rendered
+                    dom_check_result = await session.call_tool("browser_evaluate", {
+                        "expression": "() => document.documentElement.outerHTML"
+                    })
+                    
+                    if dom_check_result and dom_check_result.content:
+                        dom_text = ""
+                        for block in dom_check_result.content:
+                            if hasattr(block, "text"):
+                                dom_text += block.text
+                            elif isinstance(block, dict):
+                                dom_text += block.get("text", "")
+                        
+                        # Check for meaningful elements
+                        meaningful_elements = dom_text.count('<input') + dom_text.count('<button') + dom_text.count('<form') + dom_text.count('<a ')
+                        
+                        if len(dom_text) > 100 and meaningful_elements > 0:
+                            logger.info(f"MCP: Page has rendered content ({len(dom_text)} bytes, {meaningful_elements} elements)")
+                            break
+                except Exception as e:
+                    logger.debug(f"MCP: DOM check failed: {e}")
+            
             logger.info("MCP: taking accessibility snapshot")
             snapshot_result = await session.call_tool("browser_snapshot", {})
 
@@ -192,6 +225,12 @@ class MCPClient:
                 "MCP: snapshot received (%d chars)",
                 len(text),
             )
+            
+            # Log accessibility tree size for debugging
+            if text:
+                logger.info(f"MCP: Accessibility tree captured successfully")
+            else:
+                logger.warning(f"MCP: Accessibility tree is empty")
 
             await session.call_tool("browser_close", {})
 

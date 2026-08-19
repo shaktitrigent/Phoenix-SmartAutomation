@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 # Try to import sqlite3, but handle DLL load failures gracefully
 sqlite3_available = True
 try:

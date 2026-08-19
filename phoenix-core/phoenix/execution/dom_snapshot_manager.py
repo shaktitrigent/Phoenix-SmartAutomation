@@ -82,16 +82,27 @@ class DOMSnapshotManager:
                         execution_{id}.json  # Historical snapshots
     """
     
-    def __init__(self, base_dir: str | Path = "PhoenixRuntime"):
+    def __init__(
+        self, 
+        base_dir: str | Path = "PhoenixRuntime",
+        min_dom_size_bytes: int = 100,
+        enable_size_validation: bool = True
+    ):
         self.base_dir = Path(base_dir)
         self.dom_storage_dir = self.base_dir / "dom"
         self.dom_storage_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Configurable DOM validation settings
+        self.min_dom_size_bytes = min_dom_size_bytes
+        self.enable_size_validation = enable_size_validation
         
         # Initialize runtime evidence tracker
         from phoenix.execution.dom_runtime_evidence import DOMRuntimeEvidenceTracker
         self.evidence_tracker = DOMRuntimeEvidenceTracker(base_dir=base_dir)
         
         logger.info(f"[DOM SNAPSHOT MANAGER] Initialized with storage: {self.dom_storage_dir}")
+        logger.info(f"[DOM SNAPSHOT MANAGER] Min DOM size: {self.min_dom_size_bytes} bytes")
+        logger.info(f"[DOM SNAPSHOT MANAGER] Size validation: {self.enable_size_validation}")
     
     def _get_page_storage_path(self, project: str, page: str) -> Path:
         """Get storage path for a specific project/page."""
@@ -131,6 +142,8 @@ class DOMSnapshotManager:
             Stored DOM snapshot
         """
         logger.info(f"[DOM SNAPSHOT MANAGER] STORE DOM SNAPSHOT - Project: {project}, Page: {page}, Execution ID: {execution_id}")
+        print(f"[PHOENIX DOM STORAGE] Store DOM snapshot - Project: {project}, Page: {page}, Execution ID: {execution_id}")
+        print(f"[PHOENIX DOM STORAGE] Runtime base directory: {self.base_dir.absolute()}")
         start_time = time.time()
         
         # Compute hash
@@ -159,17 +172,22 @@ class DOMSnapshotManager:
         # Get storage path
         page_dir = self._get_page_storage_path(project, page)
         
+        print(f"[PHOENIX DOM STORAGE] Page directory: {page_dir.absolute()}")
+        
         # Store latest snapshot
         latest_path = page_dir / "latest_dom.json"
         latest_path.write_text(snapshot.model_dump_json(indent=2), encoding='utf-8')
+        print(f"[PHOENIX DOM STORAGE] Latest snapshot path: {latest_path.absolute()}")
         
         # Store metadata separately
         metadata_path = page_dir / "metadata.json"
         metadata_path.write_text(metadata.model_dump_json(indent=2), encoding='utf-8')
+        print(f"[PHOENIX DOM STORAGE] Metadata path: {metadata_path.absolute()}")
         
         # Store in history
         history_path = page_dir / "history" / f"execution_{execution_id}.json"
         history_path.write_text(snapshot.model_dump_json(indent=2), encoding='utf-8')
+        print(f"[PHOENIX DOM STORAGE] History path: {history_path.absolute()}")
         
         duration_ms = (time.time() - start_time) * 1000
         
@@ -181,6 +199,13 @@ class DOMSnapshotManager:
         logger.info(f"[DOM SNAPSHOT] Elements: {metadata.num_elements}")
         logger.info(f"[DOM SNAPSHOT] Source: {capture_source}")
         logger.info(f"[DOM SNAPSHOT] Storage duration: {duration_ms:.2f}ms")
+        logger.info(f"[DOM SNAPSHOT] Accessibility tree size: {len(accessibility_tree)} bytes")
+        
+        print(f"[PHOENIX DOM STORAGE] DOM snapshot stored successfully")
+        print(f"[PHOENIX DOM STORAGE] Hash: {dom_hash}")
+        print(f"[PHOENIX DOM STORAGE] Size: {metadata.dom_size_bytes} bytes")
+        print(f"[PHOENIX DOM STORAGE] Storage duration: {duration_ms:.2f}ms")
+        print(f"[PHOENIX DOM STORAGE] Accessibility tree size: {len(accessibility_tree)} bytes")
         
         return snapshot
     
@@ -323,8 +348,8 @@ class DOMSnapshotManager:
                 previous_dom_size = len(previous_snapshot.dom_content) if previous_snapshot.dom_content else 0
                 current_dom_size = len(current_dom) if current_dom else 0
                 
-                # Reject reuse if previous snapshot is empty or suspiciously small
-                if previous_dom_size < 100 or current_dom_size < 100:
+                # Reject reuse if previous snapshot is empty or suspiciously small (if validation enabled)
+                if self.enable_size_validation and (previous_dom_size < self.min_dom_size_bytes or current_dom_size < self.min_dom_size_bytes):
                     logger.warning(f"[DOM SNAPSHOT] Snapshot too small (previous: {previous_dom_size} bytes, current: {current_dom_size} bytes), forcing CAPTURE")
                     duration_ms = (time.time() - start_time) * 1000
                     decision = DOMReuseDecision(
@@ -395,53 +420,29 @@ class DOMSnapshotManager:
                 logger.info(f"[DOM SNAPSHOT] MCP skipped: NO")
                 return decision
         
-        # No current DOM provided - check if previous snapshot is valid before reusing
+        # No current DOM provided means Phoenix has not inspected the live page
+        # for this decision. Reusing here can apply a stale snapshot to a new
+        # execution, route, or post-action state, so force a capture.
         previous_dom_size = len(previous_snapshot.dom_content) if previous_snapshot.dom_content else 0
-        
-        # Reject reuse if previous snapshot is empty or suspiciously small
-        if previous_dom_size < 100:
-            logger.warning(f"[DOM SNAPSHOT] Previous snapshot is too small ({previous_dom_size} bytes), forcing CAPTURE")
-            duration_ms = (time.time() - start_time) * 1000
-            decision = DOMReuseDecision(
-                decision="CAPTURE",
-                url=url,
-                project=project,
-                page=page,
-                previous_hash=previous_snapshot.metadata.dom_hash,
-                reason=f"Previous snapshot invalid (too small: {previous_dom_size} bytes)",
-                mcp_skipped=False,
-                time_saved_ms=0.0
-            )
-            
-            self.evidence_tracker.record_reuse_decision("CAPTURE", decision.reason, False, 0.0)
-            self.evidence_tracker.record_mcp_call(True, "", 0.0)
-            
-            logger.info(f"[DOM SNAPSHOT] Decision: CAPTURE (invalid previous snapshot)")
-            logger.info(f"[DOM SNAPSHOT] Previous size: {previous_dom_size} bytes")
-            logger.info(f"[DOM SNAPSHOT] MCP skipped: NO")
-            return decision
-        
-        # Previous snapshot looks valid, allow reuse
         duration_ms = (time.time() - start_time) * 1000
         decision = DOMReuseDecision(
-            decision="REUSE",
+            decision="CAPTURE",
             url=url,
             project=project,
             page=page,
             previous_hash=previous_snapshot.metadata.dom_hash,
-            reason="No current DOM provided - assuming unchanged",
-            mcp_skipped=True,
-            time_saved_ms=duration_ms
+            reason="No live DOM provided for validation",
+            mcp_skipped=False,
+            time_saved_ms=0.0
         )
         
-        self.evidence_tracker.record_reuse_decision("REUSE", decision.reason, True, duration_ms)
-        self.evidence_tracker.record_mcp_call(False, "No current DOM for comparison", 0.0)
+        self.evidence_tracker.record_reuse_decision("CAPTURE", decision.reason, False, 0.0)
+        self.evidence_tracker.record_mcp_call(True, "", 0.0)
         
-        logger.info(f"[DOM SNAPSHOT] Decision: REUSE (no current DOM for comparison)")
+        logger.info(f"[DOM SNAPSHOT] Decision: CAPTURE (no live DOM for comparison)")
         logger.info(f"[DOM SNAPSHOT] Previous hash: {previous_snapshot.metadata.dom_hash}")
         logger.info(f"[DOM SNAPSHOT] Previous size: {previous_dom_size} bytes")
-        logger.info(f"[DOM SNAPSHOT] MCP skipped: YES")
-        logger.info(f"[DOM SNAPSHOT] Time saved: {duration_ms:.2f}ms")
+        logger.info(f"[DOM SNAPSHOT] MCP skipped: NO")
         return decision
     
     def get_dom_with_automatic_reuse(

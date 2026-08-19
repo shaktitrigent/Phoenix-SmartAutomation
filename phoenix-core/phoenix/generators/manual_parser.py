@@ -92,8 +92,11 @@ def _parse_list_steps(block: str) -> List[Dict[str, Any]]:
         1. Navigate to the login page
         2. Enter username / password
         - Click Login button
+    Also handles embedded numbered lists in text blocks.
     """
     steps: List[Dict[str, Any]] = []
+    
+    # First try the standard line-by-line parsing
     for line in block.splitlines():
         m = _LIST_ITEM_RE.match(line)
         if not m:
@@ -112,6 +115,32 @@ def _parse_list_steps(block: str) -> List[Dict[str, Any]]:
             "expected_result": "",
             "test_data": "",
         })
+    
+    # If no steps found, try to extract numbered patterns from the entire text
+    if not steps:
+        # Look for patterns like "1. Action" anywhere in the text
+        # This handles cases where steps are embedded in paragraphs like "Main Flow 1. Open 2. Enter"
+        # Improved pattern to handle embedded markdown formatting and bullet points
+        numbered_pattern = re.compile(r'(?:^|\s)(\d+)\.\s+([^.!?]+[.!?]?)', re.MULTILINE)
+        matches = numbered_pattern.findall(block)
+        
+        for num_str, action in matches:
+            action = action.strip()
+            # Clean up common markdown artifacts but preserve backticks for value extraction
+            action = re.sub(r'\*\*', '', action)  # Remove bold markdown
+            # Don't remove backticks - they are needed for value extraction
+            if action:
+                try:
+                    step_num = int(num_str)
+                except (TypeError, ValueError):
+                    step_num = len(steps) + 1
+                steps.append({
+                    "step_number": step_num,
+                    "action": action,
+                    "expected_result": "",
+                    "test_data": "",
+                })
+    
     return steps
 
 
@@ -205,9 +234,23 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
     if not steps and steps_block:
         steps = _parse_list_steps(steps_block)
 
+    # Extract steps from description if available (Main Flow, etc.)
+    # Some manual tests embed numbered steps in the description
+    # Prefer description steps if they provide more detailed steps than the table
+    desc_steps = []
+    if description:
+        desc_steps = _parse_list_steps(description)
+    
+    # Use description steps if they are more numerous than table steps
+    # or if table steps are generic/low-quality (like single "Navigate and log in" step)
+    if desc_steps and (len(desc_steps) > len(steps) or len(steps) <= 1):
+        steps = desc_steps
+    elif not steps and desc_steps:
+        steps = desc_steps
+
     # Last resort: try extracting steps from description or acceptance criteria blocks
     if not steps:
-        for section_key in ("acceptance criteria", "criteria", "steps", "scenario"):
+        for section_key in ("acceptance criteria", "criteria", "steps", "scenario", "main flow", "test case flow", "flow", "mainflow"):
             alt_block = sections.get(section_key, "")
             if alt_block:
                 steps = _parse_list_steps(alt_block)

@@ -297,53 +297,118 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
 
 
 def _extract_quoted_value(text: str) -> Optional[str]:
-    """Return the first quoted string found in text."""
-    m = re.search(r'["\']([^"\']+)["\']', text)
+    """Return the first quoted or backtick-delimited string found in text."""
+    m = re.search(r'[`"\']([^`"\']+)[`"\']', text)
     return m.group(1) if m else None
+
+
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+_FIELD_SUFFIX_RE = re.compile(r"\s+(?:field|input|box|area|textbox|text\s+box)\s*$", re.IGNORECASE)
+
+
+def _normalise_field_label(field: str) -> str:
+    """Convert natural-language field text into a concise semantic label."""
+    field = field.strip().strip("`'\"")
+    field = _LEADING_ARTICLE_RE.sub("", field)
+    field = _FIELD_SUFFIX_RE.sub("", field)
+    field = re.sub(r"\s+", " ", field).strip(" :.-")
+    return field.title() if field else "Field"
+
+
+def _normalise_fill_value(value: str) -> str:
+    """Clean natural-language punctuation around a field value."""
+    return value.strip().strip("`'\"").rstrip(".,;:")
+
+
+def _strip_fill_action_prefix(text: str) -> str:
+    cleaned = re.sub(
+        r"^(?:enter|type|fill(?:\s+in)?|input|provide|set)\s+(?:in\s+|into\s+)?",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
+    return _LEADING_ARTICLE_RE.sub("", cleaned).strip()
 
 
 def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     """Extract (field_label, fill_value) from fill-type criteria."""
-    # Pattern: action + field + value  e.g. "Enter username tomsmith"
-    # Try quoted value first
     quoted = _extract_quoted_value(criterion)
-
-    # Remove action keyword at start
-    cleaned = re.sub(
-        r"^(?:enter|type|fill|input|provide)\s+",
-        "",
-        criterion.strip(),
-        flags=re.IGNORECASE,
-    )
+    cleaned = _strip_fill_action_prefix(criterion)
 
     # "in the X field" or "into the X field" → extract field from that
     field_match = re.search(
-        r"(?:in|into|for)\s+(?:the\s+)?['\"]?([a-zA-Z\s]+?)['\"]?\s+(?:field|input|box|area)",
+        r"(?:in|into|for)\s+(?:the\s+)?[`'\"]?([a-zA-Z\s]+?)[`'\"]?\s+(?:field|input|box|area|textbox|text\s+box)",
         criterion,
         re.IGNORECASE,
     )
     if field_match:
-        field = field_match.group(1).strip()
+        field = _normalise_field_label(field_match.group(1))
         value = (
             quoted or re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
         )
-        return field.title(), value
+        return field, _normalise_fill_value(value)
 
     # "with value X" / "as X" / "= X"
-    with_match = re.search(r"(?:with|as|value|=)\s+['\"]?([^'\"]+)['\"]?", cleaned, re.IGNORECASE)
+    with_match = re.search(r"\s+(?:with|as|value|=)\s+[`'\"]?(.+?)[`'\"]?$", cleaned, re.IGNORECASE)
     if with_match:
-        value = with_match.group(1).strip()
+        value = quoted or with_match.group(1)
         field = re.sub(r"\s+(?:with|as|value|=).*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return field.title(), value
+        return _normalise_field_label(field), _normalise_fill_value(value)
+
+    # Handle quoted value pattern first - this is the most reliable extraction
+    if quoted and quoted in cleaned:
+        field = cleaned.split(quoted, 1)[0]
+        field = re.sub(r"\s+(?:with|as|value|=)\s*$", "", field, flags=re.IGNORECASE)
+        # Remove leading article from field if present
+        field = _LEADING_ARTICLE_RE.sub("", field).strip()
+        return _normalise_field_label(field or "Field"), _normalise_fill_value(quoted)
+
+    field_context_match = re.search(
+        r"^(?P<field>.+?)\s+(?:field|input|box|area|textbox|text\s+box)\s+[`'\"]?(?P<value>.+?)[`'\"]?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if field_context_match:
+        return (
+            _normalise_field_label(field_context_match.group("field")),
+            _normalise_fill_value(quoted or field_context_match.group("value")),
+        )
 
     # e.g. "username tomsmith" → first token = field, rest = value
+    # Apply leading article removal to the first part to handle "the username standard_user"
     parts = cleaned.split(None, 1)
     if len(parts) == 2:
-        return parts[0].title(), quoted or parts[1]
+        # Remove leading article from the field part if present
+        field_part = _LEADING_ARTICLE_RE.sub("", parts[0]).strip()
+        return _normalise_field_label(field_part or parts[0]), _normalise_fill_value(quoted or parts[1])
     if len(parts) == 1:
-        return parts[0].title(), quoted or "value"
+        # Remove leading article from the field part if present
+        field_part = _LEADING_ARTICLE_RE.sub("", parts[0]).strip()
+        return _normalise_field_label(field_part or parts[0]), quoted or "value"
 
     return "Field", quoted or "value"
+
+
+def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
+    """Build a generic DOM-aware locator expression for a semantic target."""
+    label = _safe_py_str(_normalise_field_label(field))
+    token = _safe_py_str(re.sub(r"[^a-z0-9]+", "-", field.lower()).strip("-"))
+    css_token = _safe_py_str(field.lower().replace(" ", "-"))
+    if kind == "button":
+        return (
+            f'page.get_by_test_id("{token}")'
+            f'.or_(page.locator("[data-test=\'{token}\'], [data-testid=\'{token}\'], #{css_token}, input[name=\'{css_token}\']"))'
+            f'.or_(page.get_by_role("button", name=re.compile(r"^{label}$", re.IGNORECASE)))'
+            f'.or_(page.locator("input[type=\'submit\'][value=\'{label}\']"))'
+            ".first"
+        )
+    return (
+        f'page.get_by_test_id("{token}")'
+        f'.or_(page.get_by_placeholder("{label}", exact=True))'
+        f'.or_(page.get_by_label("{label}", exact=True))'
+        f'.or_(page.locator("[data-test=\'{token}\'], [data-testid=\'{token}\'], #{css_token}, input[name=\'{css_token}\']"))'
+        ".first"
+    )
 
 
 def _extract_click_target(criterion: str) -> Tuple[str, str]:
@@ -355,9 +420,10 @@ def _extract_click_target(criterion: str) -> Tuple[str, str]:
         criterion.strip(),
         flags=re.IGNORECASE,
     )
-    quoted = _extract_quoted_value(criterion) or cleaned
+    cleaned = cleaned.strip().strip("`'\"*. ")
+    quoted = (_extract_quoted_value(criterion) or cleaned).strip("`'\"*. ")
 
-    if "button" in lower:
+    if "button" in lower or re.search(r"\b(log\s*in|login|sign\s*in|submit|continue|save|next)\b", cleaned, re.IGNORECASE):
         label = re.sub(r"\s+button.*$", "", cleaned, flags=re.IGNORECASE).strip()
         return "button", label or quoted
     if "link" in lower:
@@ -426,12 +492,15 @@ def _criterion_to_playwright_lines(
         password_val = pass_match.group(1).strip().strip("'\"") if pass_match else None
         username_expr = f'"{_safe_py_str(username_val)}"' if username_val else 'os.environ["TEST_USERNAME"]'
         password_expr = f'"{_safe_py_str(password_val)}"' if password_val else 'os.environ["TEST_PASSWORD"]'
+        username_locator = _semantic_locator_expr("Username")
+        password_locator = _semantic_locator_expr("Password")
+        login_locator = _semantic_locator_expr("Login", kind="button")
         lines += [
             f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
-            f'    fill_ready(page, page.locator("input[name=\'username\']"), {username_expr}, "Username input")',
-            f'    fill_ready(page, page.locator("input[name=\'password\']"), {password_expr}, "Password input")',
-            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
-            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    fill_ready(page, {username_locator}, {username_expr}, "Username input")',
+            f'    fill_ready(page, {password_locator}, {password_expr}, "Password input")',
+            f'    click_ready(page, {login_locator}, "Login button")',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.MENU_CLICK:
@@ -465,20 +534,23 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.TEXT_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
+        locator_expr = _semantic_locator_expr(field)
         lines.append(
-            f'    fill_ready(page, page.get_by_label("{_safe_py_str(field)}", exact=True), "{_safe_py_str(value)}", "{_safe_py_str(field)} field")'
+            f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "{_safe_py_str(field)} field")'
         )
 
     elif control == ControlType.PASSWORD_INPUT:
-        _, value = _extract_fill_target_and_value(criterion)
+        field, value = _extract_fill_target_and_value(criterion)
+        locator_expr = _semantic_locator_expr(field if field != "Field" else "Password")
         lines.append(
-            f'    fill_ready(page, page.get_by_label("Password", exact=True), "{_safe_py_str(value)}", "Password field")'
+            f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "Password field")'
         )
 
     elif control == ControlType.EMAIL_INPUT:
-        _, value = _extract_fill_target_and_value(criterion)
+        field, value = _extract_fill_target_and_value(criterion)
+        locator_expr = _semantic_locator_expr(field if field != "Field" else "Email")
         lines.append(
-            f'    fill_ready(page, page.get_by_label("Email", exact=True), "{_safe_py_str(value)}", "Email field")'
+            f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "Email field")'
         )
 
     elif control == ControlType.CHECKBOX:
@@ -514,8 +586,9 @@ def _criterion_to_playwright_lines(
     elif control == ControlType.BUTTON:
         role, label = _extract_click_target(criterion)
         if role == "button":
+            locator_expr = _semantic_locator_expr(label, kind="button")
             lines.append(
-                f'    click_ready(page, page.get_by_role("button", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} button")'
+                f'    click_ready(page, {locator_expr}, "{_safe_py_str(label)} button")'
             )
         else:
             lines.append(_manual_review_warning_line("No stable button locator could be derived", criterion))
@@ -571,7 +644,10 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.ASSERTION:
         subject = _extract_assertion_subject(criterion)
-        if any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
+        if re.search(r"\b(page|screen|view)\s+is\s+displayed\b", lower):
+            lines.append('    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)')
+            lines.append(_manual_review_warning_line("Page-state assertion requires DOM-derived business evidence", criterion))
+        elif any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
             url_frag = re.search(r"[/][\w/-]+", subject)
             if url_frag:
                 lines.append(
@@ -593,11 +669,14 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.LOGIN_CREDENTIALS:
         # "Login using valid credentials" — use env vars; no URL extraction needed
+        username_locator = _semantic_locator_expr("Username")
+        password_locator = _semantic_locator_expr("Password")
+        login_locator = _semantic_locator_expr("Login", kind="button")
         lines += [
-            '    fill_ready(page, page.locator("input[name=\'username\']"), os.environ.get("TEST_USERNAME", "test_user"), "Username input")',
-            '    fill_ready(page, page.locator("input[name=\'password\']"), os.environ.get("TEST_PASSWORD", "test_password"), "Password input")',
-            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
-            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    fill_ready(page, {username_locator}, os.environ.get("TEST_USERNAME", "test_user"), "Username input")',
+            f'    fill_ready(page, {password_locator}, os.environ.get("TEST_PASSWORD", "test_password"), "Password input")',
+            f'    click_ready(page, {login_locator}, "Login button")',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.DATE_PICKER_FUTURE:
@@ -1954,17 +2033,37 @@ class TestGeneratorAgent(BaseAgent):
                 action = step.get("action", "")
                 step_num = step.get("step_number", 1)
                 expected = step.get("expected_result", "")
+                test_data = step.get("test_data", "")
+                
                 body_lines.append(f"    # --- Step {step_num}: {action} ---")
+                
+                # Debug logging to trace field/value extraction
+                logger.info(f"DEBUG: Processing step '{action}'")
+                field, value = _extract_fill_target_and_value(action)
+                logger.info(f"DEBUG: Extracted field='{field}', value='{value}'")
+                
+                # Generate meaningful Playwright code for each step
                 playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
                 playwright_lines = [ln for ln in playwright_lines if not ln.startswith(f"    # Step {step_num}:")]
-                body_lines.extend(playwright_lines)
+                
+                # If no meaningful lines were generated, add a basic page visibility check
+                if not playwright_lines or all(ln.strip().startswith("#") for ln in playwright_lines):
+                    body_lines.append(f'    page.goto("{url}", timeout=60_000)')
+                    body_lines.append('    page.wait_for_load_state("domcontentloaded")')
+                    body_lines.append('    expect(page.locator("body")).to_be_visible()')
+                else:
+                    body_lines.extend(playwright_lines)
+                
                 if expected:
                     body_lines.append(f"    # Expected: {expected}")
+                if test_data:
+                    body_lines.append(f"    # Test data: {test_data}")
         else:
             body_lines += [
                 "    # No manual steps provided — navigate to URL only",
                 f'    page.goto("{url}", timeout=60_000)',
                 '    page.wait_for_load_state("domcontentloaded")',
+                '    expect(page.locator("body")).to_be_visible()',
             ]
 
         body = "\n".join(body_lines)

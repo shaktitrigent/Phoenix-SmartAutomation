@@ -1548,21 +1548,6 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
         project_name=project_name
     )
 
-    # Initialize DOM evidence collector for intelligent healing
-    dom_evidence_collector = None
-    if heal:
-        try:
-            from phoenix.execution.dom_evidence_collector import DOMEvidenceCollector
-            dom_evidence_collector = DOMEvidenceCollector()
-            print_info("DOM Evidence Collector: ENABLED for intelligent healing")
-        except Exception as e:
-            print_warning(f"Could not initialize DOM Evidence Collector: {e}")
-
-    # Pass DOM evidence collector to healing system if available
-    if dom_evidence_collector and test_runner.intelligent_runtime:
-        test_runner.intelligent_runtime.dom_evidence_collector = dom_evidence_collector
-        print_info("DOM Evidence integration: ACTIVE")
-
     # Propagate headed/slow_mo to the subprocess environment
     import os as _os
     if headed:

@@ -34,7 +34,7 @@ from phoenix.execution.locator_repository import LocatorRepository
 from phoenix.execution.dom_diff import DOMDifferenceEngine
 from phoenix.execution.runtime_metrics import RuntimeMetricsCollector
 from phoenix.execution.runtime_timeline import RuntimeTimelineTracker
-from phoenix.healing.engine import HealingEngine
+from phoenix.execution.healing import HealingEngine
 
 # Conditional imports for semantic modules
 if SEMANTIC_AVAILABLE:
@@ -203,9 +203,7 @@ class IntelligentRuntime:
                 logger.warning(f"[INTELLIGENT RUNTIME] Could not initialize DOM Evidence Collector: {e}")
         
         self.healing_engine = HealingEngine(
-            artifacts_manager=self.artifacts_manager,
-            locator_repository=self.locator_repository,
-            flow_discovery=None,  # Will be set after flow_discovery is initialized
+            locator_registry=self.locator_repository,
             dom_evidence_collector=self.dom_evidence_collector
         ) if enable_healing else None
         

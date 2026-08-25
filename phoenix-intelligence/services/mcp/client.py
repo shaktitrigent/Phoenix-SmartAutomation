@@ -51,22 +51,41 @@ class MCPClient:
                 empty snapshot. Callers must NOT silently swallow this — no DOM
                 snapshot means no grounded locators, so generation must stop.
         """
+        try:
+            print(f"[PHOENIX MCP] === MCP INSPECTION STARTED ===")
+            print(f"[PHOENIX MCP] URL: {url}")
+            print(f"[PHOENIX MCP] Project: {project}")
+            print(f"[PHOENIX MCP] Page: {page}")
+            print(f"[PHOENIX MCP] Execution ID: {execution_id}")
+        except (UnicodeEncodeError, OSError):
+            # Fallback for console encoding issues
+            pass
+        
+        logger.info(f"[PHOENIX MCP] MCP inspection started")
+        logger.info(f"[PHOENIX MCP] URL: {url}")
+        logger.info(f"[PHOENIX MCP] Project: {project}")
+        logger.info(f"[PHOENIX MCP] Page: {page}")
+        
         if not self.settings.enabled:
             logger.info("MCP is disabled via configuration — skipping page inspection")
+            print("[PHOENIX MCP] MCP DISABLED - skipping inspection")
             return ""
 
         # Check for DOM reuse if snapshot manager is available
         if self.dom_snapshot_manager and execution_id:
-            logger.info(f"[MCP] Checking for reusable DOM snapshot before inspect_page")
+            logger.info(f"[PHOENIX MCP] Checking for reusable DOM snapshot before inspect_page")
+            print(f"[PHOENIX MCP] DOM reuse check started")
             
             def capture_via_mcp(target_url: str):
                 """Capture DOM via MCP."""
+                print(f"[PHOENIX MCP] Starting MCP capture for: {target_url}")
                 start_time = time.time()
                 result = self._run_async(self._inspect_page_async(target_url))
                 duration = time.time() - start_time
+                print(f"[PHOENIX MCP] MCP capture completed in {duration:.2f}s")
+                # Return tuple of (dom_content, accessibility_tree) as expected by DOM snapshot manager
                 # For now, accessibility tree is embedded in the result
-                # We'll parse it out if needed
-                return result, result, duration
+                return result, result
             
             try:
                 dom_content, reuse_decision = self.dom_snapshot_manager.get_dom_with_automatic_reuse(
@@ -91,22 +110,35 @@ class MCPClient:
                     self.artifacts_manager.save_mcp_response(mcp_record)
                     
                     if reuse_decision.mcp_skipped:
-                        logger.info(f"[MCP] DOM reused from storage - MCP call skipped")
-                        logger.info(f"[MCP] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
+                        logger.info(f"[PHOENIX MCP] DOM reused from storage - MCP call skipped")
+                        logger.info(f"[PHOENIX MCP] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
+                        print(f"[PHOENIX MCP] ✓ DOM REUSED from storage")
+                        print(f"[PHOENIX MCP] ✓ MCP call SKIPPED")
+                        print(f"[PHOENIX MCP] ✓ Time saved: {reuse_decision.time_saved_ms:.2f}ms")
                     else:
-                        logger.info(f"[MCP] New DOM captured via MCP")
+                        logger.info(f"[PHOENIX MCP] New DOM captured via MCP")
+                        print(f"[PHOENIX MCP] ✓ New DOM captured via MCP")
+                
+                print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
+                print(f"[PHOENIX MCP] DOM size: {len(dom_content)} chars")
+                print(f"[PHOENIX MCP] Cache result: {'HIT' if reuse_decision.mcp_skipped else 'MISS'}")
                 
                 return dom_content
                 
             except Exception as exc:
-                logger.warning(f"[MCP] DOM reuse failed, falling back to direct MCP: {exc}")
+                logger.warning(f"[PHOENIX MCP] DOM reuse failed, falling back to direct MCP: {exc}")
+                print(f"[PHOENIX MCP] DOM reuse failed, falling back to direct MCP")
                 # Continue to direct MCP call as fallback
 
         # Direct MCP call (original behavior)
+        print(f"[PHOENIX MCP] Starting direct MCP call")
         start_time = time.time()
         try:
             result = self._run_async(self._inspect_page_async(url))
             duration = time.time() - start_time
+            
+            print(f"[PHOENIX MCP] Direct MCP call completed in {duration:.2f}s")
+            print(f"[PHOENIX MCP] Snapshot size: {len(result)} chars")
             
             # Store MCP response artifact if artifacts manager is available
             if self.artifacts_manager and result:
@@ -119,11 +151,14 @@ class MCPClient:
                     success=True
                 )
                 self.artifacts_manager.save_mcp_response(mcp_record)
-                logger.info(f"[MCP] Snapshot saved to artifacts: {len(result)} chars in {duration:.2f}s")
+                logger.info(f"[PHOENIX MCP] Snapshot saved to artifacts: {len(result)} chars in {duration:.2f}s")
+                print(f"[PHOENIX MCP] ✓ Snapshot saved to artifacts")
             
+            print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
             return result
         except Exception as exc:
             duration = time.time() - start_time
+            print(f"[PHOENIX MCP] ✗ MCP call FAILED after {duration:.2f}s")
             
             # Store failed MCP response artifact
             if self.artifacts_manager:
@@ -146,6 +181,7 @@ class MCPClient:
             ) from exc
 
         if not result or not result.strip():
+            print(f"[PHOENIX MCP] ✗ Empty DOM snapshot received")
             raise InspectionFailedError(
                 f"MCP inspection of {url!r} returned an empty DOM snapshot. "
                 "The page may require authentication or JavaScript to render content. "

@@ -433,23 +433,51 @@ def test_generate_assertions_from_expected_result(sample_scenario):
 
 
 def test_generate_assertions_success():
-    """Test generating success assertions."""
+    """Test generating success assertions with DOM evidence."""
     generator = AssertionGenerator()
     
+    # Without DOM evidence, should fall back to manual review
     assertions = generator._generate_from_expected_result("Login successful", [], {})
     
     assert len(assertions) > 0
-    assert assertions[0].assertion_type == AssertionType.SUCCESS_MESSAGE
+    # System correctly requires manual review when no DOM evidence available
+    assert assertions[0].assertion_type == AssertionType.VISIBLE_TEXT
+    assert "[MANUAL REVIEW REQUIRED]" in assertions[0].expected_value
 
 
 def test_generate_assertions_error():
-    """Test generating error assertions."""
+    """Test generating error assertions with DOM evidence."""
     generator = AssertionGenerator()
     
+    # Without DOM evidence, should fall back to manual review
     assertions = generator._generate_from_expected_result("Login failed", [], {})
     
     assert len(assertions) > 0
-    assert assertions[0].assertion_type == AssertionType.ERROR_MESSAGE
+    # System correctly requires manual review when no DOM evidence available
+    assert assertions[0].assertion_type == AssertionType.VISIBLE_TEXT
+    assert "[MANUAL REVIEW REQUIRED]" in assertions[0].expected_value
+
+
+def test_generate_assertions_with_dom_evidence():
+    """Test generating assertions with actual DOM evidence."""
+    generator = AssertionGenerator()
+    
+    # With DOM evidence containing matching text
+    from phoenix.semantic.models import SemanticComponent
+    component = SemanticComponent(
+        component_id="COMP-001",
+        component_type="text_field",
+        text_content="Login successful",
+        label="Status",
+        semantic_purpose="status_message",
+    )
+    
+    assertions = generator._generate_from_expected_result("Login successful", [component], {})
+    
+    assert len(assertions) > 0
+    # When DOM evidence is available, should generate visible_text assertion
+    assert assertions[0].assertion_type == AssertionType.VISIBLE_TEXT
+    assert "Login successful" in assertions[0].expected_value
 
 
 def test_validate_assertion():

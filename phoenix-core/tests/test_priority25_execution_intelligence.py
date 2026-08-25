@@ -427,6 +427,9 @@ def test_state_machine_failure_path():
     """Test failure path detection."""
     machine = ExecutionStateMachine()
     
+    # Follow valid transition path to failure
+    machine.transition_to(ExecutionState.BROWSER_STARTED, reason="Browser started")
+    machine.transition_to(ExecutionState.PAGE_LOADING, reason="Page loading")
     machine.transition_to(ExecutionState.FAILURE, reason="Test failed")
     
     assert machine.is_in_failure_path() == True

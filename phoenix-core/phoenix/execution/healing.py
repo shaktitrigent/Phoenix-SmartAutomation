@@ -149,12 +149,13 @@ class HealingStrategy(ABC):
 
 
 class LocatorHealingStrategy(HealingStrategy):
-    """Swap the failing primary locator for its best alternate."""
+    """Swap the failing primary locator for its best alternate using DOM evidence."""
 
     error_class = ErrorClass.LOCATOR_NOT_FOUND
 
     def apply(self, script_path: Path, error_message: str, **context: Any) -> bool:
         registry = context.get("locator_registry")
+        dom_evidence = context.get("dom_evidence")
         if registry is None:
             return False
 
@@ -168,11 +169,25 @@ class LocatorHealingStrategy(HealingStrategy):
             primary_expr = bundle.primary.value
             if primary_expr not in code:
                 continue
-            # Find best alternate that differs from primary
+            
+            # Use DOM evidence to rank alternates by similarity to current page state
             alternates = [a for a in bundle.ordered() if a.value != primary_expr]
             if not alternates:
                 continue
-            best_alt = alternates[0]
+            
+            # If DOM evidence is available, use it to select the best alternate
+            if dom_evidence and hasattr(dom_evidence, 'current_dom_hash'):
+                # Rank alternates by confidence and DOM similarity
+                ranked_alternates = self._rank_alternates_by_dom_evidence(
+                    alternates, 
+                    dom_evidence, 
+                    bundle.element_name
+                )
+                best_alt = ranked_alternates[0] if ranked_alternates else alternates[0]
+            else:
+                # Fallback to confidence-based ranking
+                best_alt = alternates[0]
+            
             code = code.replace(primary_expr, best_alt.value, 1)
             changed = True
             # Record the swap so HealingEngine can commit it if the retry passes
@@ -186,11 +201,38 @@ class LocatorHealingStrategy(HealingStrategy):
                     "new_strategy": best_alt.strategy.value,
                     "confidence": best_alt.confidence,
                     "script": str(script_path),
+                    "healing_method": "dom_evidence" if dom_evidence else "confidence_based",
                 })
 
         if changed:
             script_path.write_text(code, encoding="utf-8")
         return changed
+    
+    def _rank_alternates_by_dom_evidence(self, alternates, dom_evidence, element_name):
+        """Rank alternates based on DOM evidence and current page state."""
+        ranked = []
+        
+        for alt in alternates:
+            # Base score from confidence
+            score = alt.confidence
+            
+            # Boost score if alternate strategy matches DOM evidence preferences
+            if hasattr(dom_evidence, 'preferred_strategies'):
+                if alt.strategy.value in dom_evidence.preferred_strategies:
+                    score += 0.15  # Boost for DOM-preferred strategies
+            
+            # Boost score if alternate has been successful in similar DOM contexts
+            if hasattr(dom_evidence, 'successful_locators'):
+                for successful in dom_evidence.successful_locators:
+                    if successful.get('element_name') == element_name:
+                        if successful.get('strategy') == alt.strategy.value:
+                            score += 0.10  # Boost for historically successful strategies
+            
+            ranked.append((score, alt))
+        
+        # Sort by score descending and return just the alternates
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        return [alt for score, alt in ranked]
 
 
 class TimeoutHealingStrategy(HealingStrategy):
@@ -350,6 +392,7 @@ class HealingEngine:
         auto_heal_threshold: float = 0.85,
         ask_threshold: float = 0.55,
         interactive: Optional[bool] = None,
+        dom_evidence_collector: Any = None,
     ) -> None:
         self._logger = logger
         self._max_attempts = max_attempts
@@ -358,6 +401,7 @@ class HealingEngine:
         self._auto_heal_threshold = auto_heal_threshold
         self._ask_threshold = ask_threshold
         self._interactive = interactive
+        self._dom_evidence_collector = dom_evidence_collector
 
     def run(
         self,
@@ -428,12 +472,23 @@ class HealingEngine:
                 # For locator failures, run plain-English confirmation first
                 if last_error_class == ErrorClass.LOCATOR_NOT_FOUND:
                     self._maybe_confirm_locator(error_msg, screenshot_path)
+                
+                # Collect DOM evidence for intelligent healing
+                dom_evidence = None
+                if self._dom_evidence_collector and last_error_class == ErrorClass.LOCATOR_NOT_FOUND:
+                    try:
+                        dom_evidence = self._dom_evidence_collector.collect_current_evidence()
+                        logger.info("DOM evidence collected for intelligent healing")
+                    except Exception as e:
+                        logger.warning(f"Failed to collect DOM evidence: {e}")
+                
                 pending_heals: list = []
                 strategy = _STRATEGIES.get(last_error_class, _STRATEGIES[ErrorClass.UNKNOWN])
                 strategy.apply(
                     script,
                     error_msg,
                     locator_registry=self._locator_registry,
+                    dom_evidence=dom_evidence,
                     _pending_heals=pending_heals,
                 )
                 # Store pending heals keyed by attempt so we can commit on success

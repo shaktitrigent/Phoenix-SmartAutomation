@@ -119,8 +119,15 @@ class AutomationGenerationCoordinator:
             
             # Step 2: Generate POM
             required_actions = [a.get("action_type", "click") for a in plan.actions]
+            # Convert page string to PageType enum
+            from phoenix.semantic.models import PageType
+            page_str = plan.required_pages[0] if plan.required_pages else "unknown"
+            try:
+                page_type = PageType(page_str)
+            except (ValueError, KeyError):
+                page_type = PageType.UNKNOWN
             pom_path = self.pom_manager.generate_pom(
-                plan.required_pages[0] if plan.required_pages else None,
+                page_type,
                 components,
                 required_actions,
             )
@@ -197,6 +204,30 @@ class AutomationGenerationCoordinator:
                 confidence=plan.confidence,
             )
             
+            # CRITICAL FIX: Validate that script is not empty or just placeholders
+            if not protected_script or len(protected_script.strip()) < 50:
+                logger.error(
+                    f"Automation {automation_id} generated empty or minimal script - rejecting"
+                )
+                self.metrics.rejected_automations += 1
+                automation.status = AutomationStatus.REJECTED
+                automation.validation_status = "failed"
+                automation.quality_issues = ["Generated script is empty or too minimal"]
+                return automation
+            
+            # Check for placeholder-only scripts
+            placeholder_indicators = ["TODO", "FIXME", "pass", "# Step", "# Expected"]
+            if all(line.strip().startswith("#") or "TODO" in line or "FIXME" in line or line.strip() == "pass" 
+                   for line in protected_script.split('\n') if line.strip()):
+                logger.error(
+                    f"Automation {automation_id} contains only placeholders - rejecting"
+                )
+                self.metrics.rejected_automations += 1
+                automation.status = AutomationStatus.REJECTED
+                automation.validation_status = "failed"
+                automation.quality_issues = ["Generated script contains only placeholders"]
+                return automation
+            
             quality_result = self.quality_gate.validate_automation(automation, protected_script)
             
             if not quality_result.passed:
@@ -206,6 +237,8 @@ class AutomationGenerationCoordinator:
                 )
                 self.metrics.rejected_automations += 1
                 automation.status = AutomationStatus.REJECTED
+                automation.validation_status = "failed"
+                automation.quality_issues = quality_result.issues
                 return automation
             
             # Step 9: Write automation to file
@@ -263,12 +296,25 @@ class AutomationGenerationCoordinator:
         # Add navigation if needed
         if plan.navigation_steps:
             for nav in plan.navigation_steps:
-                if nav.get("step") == "navigate_to_login":
-                    # CRITICAL FIX: Never infer URL from business intent
-                    # Use configured application start URL instead
-                    # The actual login component will be detected from DOM at runtime
+                nav_step = nav.get("step", "")
+                
+                # CRITICAL: Never infer URLs from business intent
+                # Always use configured application start URL (base_url)
+                # Let runtime DOM detection determine actual page structure
+                
+                if "navigate" in nav_step.lower() or "goto" in nav_step.lower() or "go to" in nav_step.lower():
+                    lines.append('    page.goto(base_url)  # Open configured application start URL')
+                    lines.append('    # Actual page structure will be detected from DOM at runtime')
+                    lines.append("")
+                elif "login" in nav_step.lower():
                     lines.append('    page.goto(base_url)  # Open application start URL')
                     lines.append('    # Login component will be detected from DOM at runtime')
+                    lines.append("")
+                else:
+                    # Generic navigation - always use base_url, never invent routes
+                    lines.append('    page.goto(base_url)  # Open configured application start URL')
+                    lines.append(f'    # Page navigation for: {nav_step}')
+                    lines.append('    # Actual routing will be determined by application state')
                     lines.append("")
         
         # Add actions

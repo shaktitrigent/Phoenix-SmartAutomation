@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from phoenix.storage.models import ExecutionStatus
+from phoenix.execution.logger import ExecutionLogger, AttemptRecord
 
 # Intelligent Runtime integration
 try:
@@ -58,6 +59,7 @@ class TestRunner:
         enable_healing: bool = False,
         enable_intelligent_runtime: bool = False,
         project_name: str = "default",
+        logs_dir: str = "logs",
     ):
         self.test_output_dir = Path(test_output_dir)
         self.test_output_dir.mkdir(parents=True, exist_ok=True)
@@ -68,6 +70,10 @@ class TestRunner:
         self.enable_healing = enable_healing
         self.enable_intelligent_runtime = enable_intelligent_runtime
         self.project_name = project_name
+        self.logs_dir = logs_dir
+        
+        # Initialize ExecutionLogger for failure tracking
+        self.execution_logger = ExecutionLogger(logs_dir=logs_dir)
         
         # Initialize IntelligentRuntime if enabled
         self.intelligent_runtime = None
@@ -114,6 +120,10 @@ class TestRunner:
             Test execution results dict.  If pytest itself fails (exit codes 2–4),
             ``status`` is set to ``error`` and ``error`` contains a clear message.
         """
+        # Track start time for duration calculation
+        import time as _time
+        start_time = _time.monotonic()
+        
         # Preflight: make sure required plugins are present
         missing_plugins = _preflight_check()
         if missing_plugins:
@@ -131,7 +141,12 @@ class TestRunner:
                 "skipped_tests": 0,
             }
         
+        # Start ExecutionLogger run for failure tracking
+        run_id = self.execution_logger.start_run(test_paths=test_paths)
+        print(f"[EXECUTION LOGGER] Started run: {run_id}")
+        
         # Start IntelligentRuntime execution if enabled
+        execution_id = None
         if self.intelligent_runtime:
             test_name = f"test_suite_{len(test_paths)}_tests"
             execution_id = self.intelligent_runtime.start_execution(test_name)
@@ -249,6 +264,22 @@ class TestRunner:
             # Finalize IntelligentRuntime on error
             if self.intelligent_runtime:
                 self.intelligent_runtime.end_execution(status="error")
+            
+            # Finish ExecutionLogger run on error
+            try:
+                import time as _time
+                self.execution_logger.finish_run(
+                    run_id=run_id,
+                    passed=0,
+                    failed=0,
+                    total=0,
+                    skipped=0,
+                    duration_seconds=_time.monotonic() - start_time
+                )
+                print(f"[EXECUTION LOGGER] Finished run (error): {run_id}")
+            except Exception:
+                pass
+                
             return {
                 "status": ExecutionStatus.ERROR.value,
                 "error": str(exc),
@@ -273,6 +304,22 @@ class TestRunner:
             print(f"ERROR: {msg}")
             if result.stderr:
                 print(f"pytest stderr:\n{result.stderr[:2000]}")
+            
+            # Finish ExecutionLogger run on fatal error
+            try:
+                import time as _time
+                self.execution_logger.finish_run(
+                    run_id=run_id,
+                    passed=0,
+                    failed=0,
+                    total=0,
+                    skipped=0,
+                    duration_seconds=_time.monotonic() - start_time
+                )
+                print(f"[EXECUTION LOGGER] Finished run (fatal error): {run_id}")
+            except Exception:
+                pass
+                
             return {
                 "status": ExecutionStatus.ERROR.value,
                 "error": msg,
@@ -337,13 +384,15 @@ class TestRunner:
             self.intelligent_runtime.end_execution(status=execution_status)
             print(f"[INTELLIGENT RUNTIME] Completed execution with status: {execution_status}")
         
-        return self._parse_results(result, json_report_path, html_report_path)
+        return self._parse_results(result, json_report_path, html_report_path, run_id, start_time)
 
     def _parse_results(
         self,
         result: subprocess.CompletedProcess,
         json_report_path: Path,
         html_report_path: Path,
+        run_id: str,
+        start_time: float,
     ) -> Dict[str, Any]:
         """Parse pytest execution results."""
         execution_result: Dict[str, Any] = {
@@ -382,8 +431,63 @@ class TestRunner:
                     "error", 0
                 )
                 execution_result["skipped_tests"] = summary.get("skipped", 0)
-            except Exception:
-                pass
+                
+                # Record test attempts in ExecutionLogger
+                tests = json_data.get("tests", [])
+                for test in tests:
+                    # Extract test name from nodeid (format: tests/path/test.py::test_name)
+                    nodeid = test.get("nodeid", "")
+                    if "::" in nodeid:
+                        test_path, test_name = nodeid.split("::", 1)
+                    else:
+                        test_path = test.get("location", {}).get("file", "unknown")
+                        test_name = test.get("name", "unknown")
+                    
+                    outcome = test.get("outcome", "unknown")
+                    duration = test.get("duration", 0.0)
+                    
+                    status = "passed" if outcome == "passed" else "failed" if outcome in ("failed", "error") else "skipped"
+                    error_type = None
+                    error_message = None
+                    
+                    if status == "failed":
+                        # Extract error information
+                        if "call" in test.get("setup", {}):
+                            error_info = test["setup"]["call"]
+                        elif "call" in test:
+                            error_info = test["call"]
+                        else:
+                            error_info = {}
+                        
+                        error_type = error_info.get("crash", {}).get("type")
+                        error_message = error_info.get("crash", {}).get("message")
+                        if not error_message and "longrepr" in error_info:
+                            error_message = str(error_info["longrepr"])[:500]
+                        
+                        # Classify error type based on error message content
+                        if error_message:
+                            error_message_lower = error_message.lower()
+                            if any(keyword in error_message_lower for keyword in ["locator", "count", "resolved to 0 elements", "to_have_count", "timeout", "not found"]):
+                                error_type = "locator_not_found"
+                            elif "assertion" in error_message_lower:
+                                error_type = "assertion_failure"
+                            elif "timeout" in error_message_lower:
+                                error_type = "timeout"
+                    
+                    attempt_record = AttemptRecord(
+                        run_id=run_id,
+                        test_path=test_path,
+                        test_name=test_name,
+                        attempt=1,
+                        status=status,
+                        error_type=error_type,
+                        error_message=error_message,
+                        duration_seconds=duration,
+                    )
+                    self.execution_logger.record_attempt(attempt_record)
+                    
+            except Exception as e:
+                print(f"[EXECUTION LOGGER] Failed to parse JSON report for execution logging: {e}")
 
         # Fallback: parse from stdout summary line
         if execution_result["total_tests"] == 0:
@@ -401,6 +505,24 @@ class TestRunner:
                     execution_result["skipped_tests"] = counts.get("skipped", 0)
                     execution_result["total_tests"] = sum(counts.values())
                     break
+
+        # Finish ExecutionLogger run
+        try:
+            import time as _time
+            duration = _time.monotonic() - start_time
+            self.execution_logger.finish_run(
+                run_id=run_id,
+                passed=execution_result["passed_tests"],
+                failed=execution_result["failed_tests"],
+                total=execution_result["total_tests"],
+                skipped=execution_result["skipped_tests"],
+                duration_seconds=duration
+            )
+            print(f"[EXECUTION LOGGER] Finished run: {run_id}")
+        except Exception as e:
+            print(f"[EXECUTION LOGGER] Failed to finish run: {e}")
+
+        return execution_result
 
         return execution_result
     

@@ -192,10 +192,21 @@ class IntelligentRuntime:
             artifacts_manager=self.artifacts_manager
         ) if enable_diff else None
         
+        # Initialize DOM evidence collector for intelligent healing
+        self.dom_evidence_collector = None
+        if enable_healing:
+            try:
+                from phoenix.execution.dom_evidence_collector import DOMEvidenceCollector
+                self.dom_evidence_collector = DOMEvidenceCollector()
+                logger.info("[INTELLIGENT RUNTIME] DOM Evidence Collector initialized for intelligent healing")
+            except ImportError as e:
+                logger.warning(f"[INTELLIGENT RUNTIME] Could not initialize DOM Evidence Collector: {e}")
+        
         self.healing_engine = HealingEngine(
             artifacts_manager=self.artifacts_manager,
             locator_repository=self.locator_repository,
-            flow_discovery=None  # Will be set after flow_discovery is initialized
+            flow_discovery=None,  # Will be set after flow_discovery is initialized
+            dom_evidence_collector=self.dom_evidence_collector
         ) if enable_healing else None
         
         self.metrics_collector = RuntimeMetricsCollector(
@@ -234,6 +245,11 @@ class IntelligentRuntime:
         if self.healing_engine and self.flow_discovery:
             self.healing_engine.flow_discovery = self.flow_discovery
         
+        # Link DOM evidence collector with page when available
+        if self.dom_evidence_collector:
+            # This will be set during execution when page is available
+            self._setup_dom_evidence_integration()
+        
         # Runtime state
         self.execution_id: Optional[str] = None
         self.test_name: Optional[str] = None
@@ -252,6 +268,22 @@ class IntelligentRuntime:
         logger.info(f"[INTELLIGENT RUNTIME] CREATED - Flow Discovery: {self.flow_discovery is not None}")
         logger.info(f"[INTELLIGENT RUNTIME] CREATED - Priority 22 Component Intelligence: {enable_semantic}")
         self.headed_mode = False  # Track headed mode for enhanced logging
+    
+    def _setup_dom_evidence_integration(self):
+        """Setup DOM evidence collector integration with page when available."""
+        # This will be called during execution when the page is available
+        # For now, we'll set up the infrastructure
+        logger.info("[INTELLIGENT RUNTIME] DOM evidence integration infrastructure set up")
+    
+    def set_page_for_dom_evidence(self, page):
+        """Set the Playwright page for DOM evidence collection.
+        
+        Args:
+            page: Playwright Page object
+        """
+        if self.dom_evidence_collector:
+            self.dom_evidence_collector.set_page(page)
+            logger.info("[INTELLIGENT RUNTIME] Page set for DOM evidence collection")
     
     def set_headed_mode(self, enabled: bool = True):
         """Enable or disable headed mode for enhanced logging.
@@ -354,12 +386,32 @@ class IntelligentRuntime:
             directory.mkdir(parents=True, exist_ok=True)
     
     def start_execution(self, test_name: str) -> str:
-        """Start a new intelligent execution with automatic artifact loading and DOM reuse."""
-        logger.info(f"[INTELLIGENT RUNTIME] START EXECUTION - Test name: {test_name}")
+        """Start a new intelligent execution with comprehensive pipeline logging."""
+        # Comprehensive pipeline logging
+        print(f"[PHOENIX] === EXECUTION PIPELINE STARTED ===")
+        print(f"[PHOENIX] Test: {test_name}")
+        print(f"[PHOENIX] Project: {self.project_name}")
+        print(f"[PHOENIX] Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        
+        logger.info(f"[PHOENIX PIPELINE] Execution started for test: {test_name}")
+        logger.info(f"[PHOENIX PIPELINE] Project: {self.project_name}")
+        
         # Start run
         self.execution_id = self.artifacts_manager.start_run()
         self.test_name = test_name
-        logger.info(f"[INTELLIGENT RUNTIME] START EXECUTION - Execution ID: {self.execution_id}")
+        
+        print(f"[PHOENIX] Execution ID: {self.execution_id}")
+        logger.info(f"[PHOENIX PIPELINE] Execution ID: {self.execution_id}")
+        
+        # Log component status
+        print(f"[PHOENIX] === INTELLIGENT COMPONENTS STATUS ===")
+        print(f"[PHOENIX] DOM Snapshot Manager: {'ENABLED' if self.dom_snapshot_manager else 'DISABLED'}")
+        print(f"[PHOENIX] DOM Cache: {'ENABLED' if self.dom_cache else 'DISABLED'}")
+        print(f"[PHOENIX] Locator Repository: {'ENABLED' if self.locator_repository else 'DISABLED'}")
+        print(f"[PHOENIX] DOM Difference Engine: {'ENABLED' if self.dom_diff_engine else 'DISABLED'}")
+        print(f"[PHOENIX] Healing Engine: {'ENABLED' if self.healing_engine else 'DISABLED'}")
+        print(f"[PHOENIX] Metrics Collector: {'ENABLED' if self.metrics_collector else 'DISABLED'}")
+        print(f"[PHOENIX] Timeline Tracker: {'ENABLED' if self.timeline_tracker else 'DISABLED'}")
         
         # Initialize runtime evidence
         self.runtime_evidence = RuntimeEvidence(
@@ -369,19 +421,24 @@ class IntelligentRuntime:
             timestamp=datetime.now(timezone.utc).isoformat()
         )
         
+        print(f"[PHOENIX] Runtime Evidence Tracking: ENABLED")
+        
         # Load previous execution data
         self._load_previous_execution()
         
         # Start tracking
         if self.timeline_tracker:
             self.timeline_tracker.start_timeline(self.execution_id, test_name)
+            print(f"[PHOENIX] Timeline Tracking: STARTED")
         
         if self.metrics_collector:
             self.metrics_collector.start_collection(self.execution_id, test_name)
+            print(f"[PHOENIX] Metrics Collection: STARTED")
         
         # Initialize DOM snapshot manager with execution ID for evidence tracking
         if self.dom_snapshot_manager:
-            logger.info(f"[INTELLIGENT RUNTIME] DOM Snapshot Manager ready for execution {self.execution_id}")
+            logger.info(f"[PHOENIX PIPELINE] DOM Snapshot Manager ready for execution {self.execution_id}")
+            print(f"[PHOENIX] DOM Snapshot Manager: READY")
         
         # Start flow discovery (Priority 21)
         if self.flow_discovery:
@@ -390,7 +447,8 @@ class IntelligentRuntime:
                 test_id=test_name,
                 project_name=self.project_name,
             )
-            logger.info(f"[INTELLIGENT RUNTIME] Flow Discovery started for execution {self.execution_id}")
+            logger.info(f"[PHOENIX PIPELINE] Flow Discovery started for execution {self.execution_id}")
+            print(f"[PHOENIX] Flow Discovery: STARTED")
         
         # Record decision
         self._record_decision(
@@ -399,6 +457,8 @@ class IntelligentRuntime:
             reason=DecisionReason.FIRST_EXECUTION if not self.previous_execution else DecisionReason.IMPROVEMENT_DETECTED,
             evidence={"previous_execution": self.previous_execution is not None}
         )
+        
+        print(f"[PHOENIX] === EXECUTION PIPELINE READY ===")
         
         return self.execution_id
     

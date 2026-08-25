@@ -169,20 +169,20 @@ class AutomationPlanner:
         if scenario.business_intent:
             intent_lower = scenario.business_intent.lower()
             if "authentication" in intent_lower or "login" in intent_lower:
-                pages.add("authentication_page")
+                pages.add("authentication_screen")
             if "dashboard" in intent_lower:
-                pages.add("dashboard_page")
+                pages.add("dashboard")
             if "search" in intent_lower:
-                pages.add("search_page")
+                pages.add("search_screen")
         
         # Extract from preconditions
         for precondition in scenario.preconditions:
             if "dashboard" in precondition.lower():
-                pages.add("dashboard_page")
+                pages.add("dashboard")
             if "logged in" in precondition.lower():
-                pages.add("authentication_page")
+                pages.add("authentication_screen")
         
-        return list(pages) if pages else ["base_page"]
+        return list(pages) if pages else ["unknown"]
     
     def _identify_required_components(self, scenario: TestScenario) -> List[str]:
         """Identify required component IDs from scenario."""
@@ -229,63 +229,63 @@ class AutomationPlanner:
         
         # Determine action type from step semantics
         if any(word in step_lower for word in ["navigate", "go to", "visit", "open"]):
-            action["action_type"] = ActionType.NAVIGATE.value
+            action["action_type"] = str(ActionType.NAVIGATE)
             action["confidence"] = 0.9
             action["evidence"].append("Navigation keywords detected")
         
         elif any(word in step_lower for word in ["click", "select", "choose", "press"]):
-            action["action_type"] = ActionType.CLICK.value
+            action["action_type"] = str(ActionType.CLICK)
             action["confidence"] = 0.85
             action["evidence"].append("Click action keywords detected")
         
         elif any(word in step_lower for word in ["enter", "type", "fill", "input"]):
-            action["action_type"] = ActionType.FILL.value
+            action["action_type"] = str(ActionType.FILL)
             action["confidence"] = 0.85
             action["evidence"].append("Fill action keywords detected")
         
         elif any(word in step_lower for word in ["select", "choose", "pick"]):
-            action["action_type"] = ActionType.SELECT.value
+            action["action_type"] = str(ActionType.SELECT)
             action["confidence"] = 0.8
             action["evidence"].append("Select action keywords detected")
         
         elif any(word in step_lower for word in ["check", "tick"]):
-            action["action_type"] = ActionType.CHECK.value
+            action["action_type"] = str(ActionType.CHECK)
             action["confidence"] = 0.9
             action["evidence"].append("Check action keywords detected")
         
         elif any(word in step_lower for word in ["uncheck", "untick"]):
-            action["action_type"] = ActionType.UNCHECK.value
+            action["action_type"] = str(ActionType.UNCHECK)
             action["confidence"] = 0.9
             action["evidence"].append("Uncheck action keywords detected")
         
         elif any(word in step_lower for word in ["upload", "attach"]):
-            action["action_type"] = ActionType.UPLOAD.value
+            action["action_type"] = str(ActionType.UPLOAD)
             action["confidence"] = 0.85
             action["evidence"].append("Upload action keywords detected")
         
         elif any(word in step_lower for word in ["submit", "save", "confirm"]):
-            action["action_type"] = ActionType.SUBMIT.value
+            action["action_type"] = str(ActionType.SUBMIT)
             action["confidence"] = 0.85
             action["evidence"].append("Submit action keywords detected")
         
         elif any(word in step_lower for word in ["wait", "pause"]):
-            action["action_type"] = ActionType.WAIT.value
+            action["action_type"] = str(ActionType.WAIT)
             action["confidence"] = 0.7
             action["evidence"].append("Wait action keywords detected")
         
         elif any(word in step_lower for word in ["search", "find"]):
-            action["action_type"] = ActionType.SEARCH.value
+            action["action_type"] = str(ActionType.SEARCH)
             action["confidence"] = 0.85
             action["evidence"].append("Search action keywords detected")
         
         elif any(word in step_lower for word in ["verify", "assert", "check", "ensure"]):
-            action["action_type"] = ActionType.ASSERT.value
+            action["action_type"] = str(ActionType.ASSERT)
             action["confidence"] = 0.8
             action["evidence"].append("Assertion keywords detected")
         
         else:
             # Default to click for interactive elements
-            action["action_type"] = ActionType.CLICK.value
+            action["action_type"] = str(ActionType.CLICK)
             action["confidence"] = 0.5
             action["evidence"].append("Default action type")
         
@@ -413,7 +413,7 @@ class AutomationPlanner:
         if scenario.expected_result:
             assertion = {
                 "assertion_id": f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
-                "assertion_type": AssertionType.VISIBLE_TEXT.value,
+                "assertion_type": str(AssertionType.VISIBLE_TEXT),
                 "expected_value": scenario.expected_result,
                 "comparison_type": "contains",
                 "confidence": 0.8,
@@ -425,7 +425,7 @@ class AutomationPlanner:
         for rule in scenario.validation_rules:
             assertion = {
                 "assertion_id": f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
-                "assertion_type": AssertionType.VALIDATION_MESSAGE.value,
+                "assertion_type": str(AssertionType.VALIDATION_MESSAGE),
                 "expected_value": rule,
                 "comparison_type": "equals",
                 "confidence": 0.75,
@@ -462,7 +462,9 @@ class AutomationPlanner:
     
     def _determine_recovery_strategy(self, scenario: TestScenario) -> str:
         """Determine recovery strategy based on scenario characteristics."""
-        if scenario.risk.value in ["critical", "high"]:
+        # Handle both enum and string values for risk
+        risk_value = scenario.risk.value if hasattr(scenario.risk, 'value') else scenario.risk
+        if risk_value in ["critical", "high"]:
             return "healing_with_manual_review"
         elif scenario.confidence < 0.7:
             return "conservative_retry"

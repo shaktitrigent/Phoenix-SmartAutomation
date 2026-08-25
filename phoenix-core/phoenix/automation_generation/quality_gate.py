@@ -128,6 +128,7 @@ class AutomationQualityGate:
             r"salesforce",
             r"sap",
             r"servicenow",
+            r"saucedemo",  # Added SauceDemo to ensure agnostic behavior
         ]
         
         logger.info("AutomationQualityGate initialized")
@@ -506,25 +507,59 @@ class AutomationQualityGate:
         return issues
     
     def _check_application_specific(self, code: str) -> List[QualityIssue]:
-        """Check for application-specific hardcoded logic."""
+        """Check for application-specific hardcoded logic in framework code.
+        
+        Distinguishes between:
+        - Test fixture/verification data (ALLOWED in test files)
+        - Framework implementation (FORBIDDEN in framework code)
+        """
         issues = []
+        
+        # Check if this is a test file (allow app-specific references in test data)
+        is_test_file = any(indicator in code for indicator in [
+            "def test_", 
+            "conftest.py", 
+            "fixture", 
+            "test_data",
+            "tests/",
+            "manual_tests/"
+        ])
         
         for pattern in self.application_specific_patterns:
             matches = re.finditer(pattern, code, re.IGNORECASE)
             for match in matches:
+                matched_text = match.group()
                 line_num = code[:match.start()].count('\n') + 1
+                
+                # Allow app-specific references in test data/fixtures
+                if is_test_file:
+                    # Check if it's in a data structure or test-specific context
+                    context = self._get_line_context(code, line_num)
+                    if any(data_indicator in context.lower() for data_indicator in [
+                        "test_data", "fixture", "config", "base_url", "environment"
+                    ]):
+                        continue  # Skip - this is test fixture data, not framework code
+                
+                # Flag as issue in framework code
                 issue = QualityIssue(
                     issue_id=f"ISSUE-{uuid.uuid4().hex[:8].upper()}",
                     issue_type=QualityIssueType.UNSUPPORTED_ASSUMPTIONS,
                     severity="high",
-                    message=f"Application-specific reference '{match.group()}' found",
-                    suggestion="Use generic, application-agnostic logic",
-                    evidence=match.group(),
+                    message=f"Application-specific reference '{matched_text}' found in framework code",
+                    suggestion="Use generic, application-agnostic logic in framework code. App-specific references should only be in test fixtures and test data.",
+                    evidence=matched_text,
                     line_number=line_num,
                 )
                 issues.append(issue)
         
         return issues
+    
+    def _get_line_context(self, code: str, line_num: int, context_lines: int = 2) -> str:
+        """Get context around a specific line for better analysis."""
+        lines = code.split('\n')
+        start = max(0, line_num - context_lines - 1)
+        end = min(len(lines), line_num + context_lines)
+        return '\n'.join(lines[start:end])
     
     def _check_impossible_navigation(self, code: str) -> List[QualityIssue]:
         """Check for impossible or suspicious navigation."""

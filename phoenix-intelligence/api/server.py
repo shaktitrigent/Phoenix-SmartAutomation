@@ -11,6 +11,68 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Configure logger with enhanced error handling
+logger = logging.getLogger(__name__)
+
+# CRITICAL FIX: Add detailed error logging for startup issues
+def _enhance_error_logging():
+    """Enhance error logging with detailed context."""
+    if not logger.handlers:
+        # Add console handler if none exists
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('[%(levelname)s] %(name)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+_enhance_error_logging()
+
+# Load environment variables from project directory if available
+def _load_project_env():
+    """Load .env files from project directory for API keys."""
+    try:
+        import dotenv
+        
+        # Try to find the project directory (look for .phoenixrc)
+        project_dir = None
+        current = Path.cwd()
+        
+        # Check current directory first
+        if (current / ".phoenixrc").exists():
+            project_dir = current
+        else:
+            # Check parent directories
+            for parent in current.parents:
+                if (parent / ".phoenixrc").exists():
+                    project_dir = parent
+                    break
+        
+        if project_dir:
+            env_files = [
+                project_dir / ".env.local",
+                project_dir / ".env",
+            ]
+            for env_file in env_files:
+                if env_file.exists():
+                    logger.info(f"Loading environment variables from {env_file}")
+                    dotenv.load_dotenv(env_file, override=True)
+                    
+                    # Log if ANTHROPIC_API_KEY was loaded
+                    if "ANTHROPIC_API_KEY" in os.environ:
+                        logger.info("✓ ANTHROPIC_API_KEY loaded from .env file")
+                    else:
+                        logger.warning("⚠ ANTHROPIC_API_KEY not found in .env file")
+        else:
+            logger.warning("No .phoenixrc found in current or parent directories")
+            logger.warning("Environment variables will be loaded from system environment only")
+    except ImportError:
+        logger.warning("python-dotenv not installed, .env files will not be loaded")
+    except Exception as e:
+        logger.warning(f"Failed to load .env files: {e}")
+
+_load_project_env()
+
 from fastapi import FastAPI
 from services.cache import Cache
 from services.config import IntelligenceSettings, LLMSettings, MCPSettings
@@ -31,8 +93,6 @@ from api.models import (
     ScriptFixResponse,
 )
 
-logger = logging.getLogger(__name__)
-
 app = FastAPI(title="Phoenix Intelligence API", version="2.0.0")
 
 # ---------------------------------------------------------------------------
@@ -43,46 +103,70 @@ _knowledge_base = KnowledgeBase()
 
 
 def _provider_key_name(provider: str) -> str:
-    provider = provider.lower()
-    if provider == "openai":
-        return "OPENAI_API_KEY"
-    if provider == "gemini":
-        return "GOOGLE_API_KEY"
-    if provider == "ollama":
-        return ""
+    """Only Anthropic is supported."""
     return "ANTHROPIC_API_KEY"
 
 
 _llm_settings = LLMSettings()
 _llm_client = None
-if _llm_settings.is_configured():
-    _llm_client = LLMClient(_llm_settings)
-    logger.info(
-        "LLM client initialised (provider=%s model=%s)",
-        _llm_settings.provider,
-        _llm_settings.model,
-    )
-else:
-    _provider_key = _provider_key_name(_llm_settings.provider)
+
+# Enhanced API key validation for Anthropic only
+def _check_llm_availability() -> tuple[bool, str, list[str]]:
+    """Check Anthropic API key availability."""
+    warnings = []
+
+    # Reinitialize settings to pick up any environment changes
+    _llm_settings.__post_init__()
+
+    # Check if Anthropic API key is configured
+    if _llm_settings.is_configured():
+        logger.info("Anthropic API key is configured and valid")
+        return True, "anthropic", []
+    else:
+        warnings.append("ANTHROPIC_API_KEY is not configured or invalid")
+        logger.warning("ANTHROPIC_API_KEY is not configured or invalid")
+        return False, "None", warnings
+
+_llm_available, _available_providers_list, _llm_warnings = _check_llm_availability()
+
+if _llm_available:
+    try:
+        _llm_client = LLMClient(_llm_settings)
+        logger.info(
+            "LLM client initialised (provider=%s model=%s available=%s)",
+            _llm_settings.provider,
+            _llm_settings.model,
+            _available_providers_list,
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM client: {e}")
+        _llm_client = None
+        _llm_available = False
+        _llm_warnings.append(f"LLM client initialization failed: {str(e)}")
+
+if not _llm_available:
     _banner = (
         "\n"
         "╔══════════════════════════════════════════════════════════╗\n"
-        "║  ⚠  LLM API KEY NOT CONFIGURED                          ║\n"
+        "║  ⚠  ANTHROPIC API KEY NOT CONFIGURED                    ║\n"
         "╠══════════════════════════════════════════════════════════╣\n"
-        f"║  Provider : {_llm_settings.provider:<46} ║\n"
-        f"║  Required : {(_provider_key or 'N/A'):<46} ║\n"
+        "║  Provider : Anthropic (Claude)                          ║\n"
+        "║  Required : ANTHROPIC_API_KEY                           ║\n"
         "╠══════════════════════════════════════════════════════════╣\n"
         "║  Without an API key:                                     ║\n"
         "║  • Automation scripts will be heuristic stubs only       ║\n"
         "║  • All generated output is fallback / placeholder        ║\n"
+        "║  • DOM-based healing will be limited                    ║\n"
         "╠══════════════════════════════════════════════════════════╣\n"
         "║  Fix:  export ANTHROPIC_API_KEY=sk-ant-...               ║\n"
-        "║        export OPENAI_API_KEY=sk-...                      ║\n"
-        "║        export GOOGLE_API_KEY=AIza...                     ║\n"
         "║  Then restart the phoenix-intelligence server.           ║\n"
         "╚══════════════════════════════════════════════════════════╝\n"
     )
     logger.warning(_banner)
+
+    # Log individual warnings
+    for warning in _llm_warnings:
+        logger.warning(f"LLM Configuration Warning: {warning}")
 
 _mcp_settings = MCPSettings()
 _mcp_client = None
@@ -176,6 +260,26 @@ def generate_tests(payload: TestGenerationRequest):
     test_type = options.test_type if options else "both"
     risk_level = options.risk_level if options else None
 
+    # Extract MCP configuration from payload if provided
+    mcp_config = getattr(payload, "mcp_config", None)
+    if mcp_config and mcp_config.get("enabled"):
+        # Temporarily update MCP settings for this request
+        from services.config import MCPSettings
+        original_enabled = _mcp_settings.enabled
+        original_command = _mcp_settings.command
+        original_args = _mcp_settings.args
+        original_timeout = _mcp_settings.timeout
+
+        _mcp_settings.enabled = mcp_config.get("enabled", True)
+        _mcp_settings.command = mcp_config.get("command", "npx")
+        _mcp_settings.args = mcp_config.get("args", "@playwright/mcp@latest")
+        _mcp_settings.timeout = mcp_config.get("timeout", 60)
+
+        # Reinitialize MCP client with new settings
+        if _mcp_settings.enabled:
+            from services.mcp.client import MCPClient
+            _mcp_client = MCPClient(settings=_mcp_settings)
+
     supporting_documents = [
         doc.model_dump() for doc in (payload.supporting_documents or [])
     ]
@@ -188,6 +292,18 @@ def generate_tests(payload: TestGenerationRequest):
         domain_knowledge=payload.domain_knowledge or "",
         supporting_documents=supporting_documents,
     )
+
+    # Restore original MCP settings
+    if mcp_config:
+        _mcp_settings.enabled = original_enabled
+        _mcp_settings.command = original_command
+        _mcp_settings.args = original_args
+        _mcp_settings.timeout = original_timeout
+
+        # Reinitialize MCP client with original settings
+        if _mcp_settings.enabled:
+            from services.mcp.client import MCPClient
+            _mcp_client = MCPClient(settings=_mcp_settings)
 
     return _decorate_metadata(result)
 
@@ -225,6 +341,35 @@ def analyze_failure(payload: FailureAnalysisRequest):
 @app.post("/api/v1/tests/automate", response_model=AutomateResponse)
 def automate_from_manual(payload: AutomateRequest):
     """Generate automation scripts from pre-written manual tests (1 script per test)."""
+    
+    # Extract MCP configuration from payload if provided
+    mcp_config = getattr(payload, "mcp_config", None)
+    if mcp_config and mcp_config.get("enabled"):
+        # Temporarily update MCP settings for this request
+        from services.config import MCPSettings
+        original_enabled = _mcp_settings.enabled
+        original_command = _mcp_settings.command
+        original_args = _mcp_settings.args
+        original_timeout = _mcp_settings.timeout
+        
+        _mcp_settings.enabled = mcp_config.get("enabled", True)
+        _mcp_settings.command = mcp_config.get("command", "npx")
+        _mcp_settings.args = mcp_config.get("args", "@playwright/mcp@latest")
+        _mcp_settings.timeout = mcp_config.get("timeout", 60)
+        
+        # Reinitialize MCP client with new settings
+        if _mcp_settings.enabled:
+            from services.mcp.client import MCPClient
+            _mcp_client = MCPClient(
+                settings=_mcp_settings,
+                artifacts_manager=_artifacts_manager,
+                dom_snapshot_manager=_dom_snapshot_manager
+            )
+            logger.info(f"MCP client reconfigured from request: command={_mcp_settings.command} args={_mcp_settings.args}")
+        
+        # Update agent registry with new MCP client
+        _agent_registry._mcp_client = _mcp_client
+    
     result = _agent_registry.automate_from_manual(
         manual_tests=payload.manual_tests,
         application_url=payload.application_url,
@@ -234,6 +379,14 @@ def automate_from_manual(payload: AutomateRequest):
         use_bdd=payload.use_bdd,
         keywords=payload.keywords or "",
     )
+    
+    # Restore original MCP settings
+    if mcp_config:
+        _mcp_settings.enabled = original_enabled
+        _mcp_settings.command = original_command
+        _mcp_settings.args = original_args
+        _mcp_settings.timeout = original_timeout
+    
     return _decorate_metadata(result)
 
 

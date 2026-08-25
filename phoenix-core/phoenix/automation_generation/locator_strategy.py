@@ -267,51 +267,81 @@ class LocatorStrategyManager:
         component: SemanticComponent,
         strategy: LocatorStrategy,
     ) -> Optional[str]:
-        """Generate a locator using a specific strategy."""
+        """Generate a locator using a specific strategy.
+        
+        CRITICAL FIX: Sanitize attribute values to prevent unrealistic test IDs
+        and ensure realistic locator generation.
+        """
+        # Helper function to sanitize attribute values
+        def sanitize_value(value: str) -> str:
+            """Sanitize attribute value to prevent unrealistic test IDs."""
+            if not value:
+                return ""
+            # Remove overly long descriptive text that's not a real attribute
+            if len(value) > 50 and " " in value:
+                # This is likely descriptive text, not a real attribute value
+                logger.warning(f"Skipping unrealistic attribute value: {value[:50]}...")
+                return ""
+            # Remove quotes and special characters that could break selectors
+            return value.replace('"', '').replace("'", "").strip()
+        
         if strategy == LocatorStrategy.TEST_ID:
-            if component.attributes.get("data-testid"):
-                return f'get_by_test_id("{component.attributes["data-testid"]}")'
+            test_id = component.attributes.get("data-testid", "")
+            sanitized_test_id = sanitize_value(test_id)
+            if sanitized_test_id and len(sanitized_test_id) < 50:
+                return f'get_by_test_id("{sanitized_test_id}")'
         
         elif strategy == LocatorStrategy.ROLE:
             if component.aria_role:
-                if component.aria_label:
-                    return f'get_by_role("{component.aria_role}", name="{component.aria_label}")'
-                elif component.label:
-                    return f'get_by_role("{component.aria_role}", name="{component.label}")'
+                aria_label = sanitize_value(component.aria_label or "")
+                label = sanitize_value(component.label or "")
+                
+                if aria_label and len(aria_label) < 50:
+                    return f'get_by_role("{component.aria_role}", name="{aria_label}")'
+                elif label and len(label) < 50:
+                    return f'get_by_role("{component.aria_role}", name="{label}")'
                 else:
                     return f'get_by_role("{component.aria_role}")'
         
         elif strategy == LocatorStrategy.ACCESSIBLE_NAME:
-            if component.aria_label:
-                return f'get_by_alt_text("{component.aria_label}")'
+            aria_label = sanitize_value(component.aria_label or "")
+            if aria_label and len(aria_label) < 50:
+                return f'get_by_alt_text("{aria_label}")'
         
         elif strategy == LocatorStrategy.LABEL:
-            if component.label:
-                return f'get_by_label("{component.label}")'
+            label = sanitize_value(component.label or "")
+            if label and len(label) < 50:
+                return f'get_by_label("{label}")'
         
         elif strategy == LocatorStrategy.PLACEHOLDER:
-            if component.placeholder:
-                return f'get_by_placeholder("{component.placeholder}")'
+            placeholder = sanitize_value(component.placeholder or "")
+            if placeholder and len(placeholder) < 50:
+                return f'get_by_placeholder("{placeholder}")'
         
         elif strategy == LocatorStrategy.NAME:
-            if component.name:
-                return f'get_by_name("{component.name}")'
+            name = sanitize_value(component.name or "")
+            if name and len(name) < 50:
+                return f'get_by_name("{name}")'
         
         elif strategy == LocatorStrategy.ID:
-            if component.element_id:
-                return f'get_by_id("{component.element_id}")'
+            element_id = sanitize_value(component.element_id or "")
+            if element_id and len(element_id) < 50:
+                return f'get_by_id("{element_id}")'
         
         elif strategy == LocatorStrategy.TEXT:
-            if component.text_content:
-                return f'get_by_text("{component.text_content}")'
+            text_content = sanitize_value(component.text_content or "")
+            if text_content and len(text_content) < 30:  # Text locators should be short
+                return f'get_by_text("{text_content}")'
         
         elif strategy == LocatorStrategy.STABLE_CSS:
-            if component.css_selector:
-                return f'locator("{component.css_selector}")'
+            css_selector = sanitize_value(component.css_selector or "")
+            if css_selector and len(css_selector) < 100:
+                return f'locator("{css_selector}")'
         
         elif strategy == LocatorStrategy.XPATH:
-            if component.xpath:
-                return f'locator("xpath={component.xpath}")'
+            xpath = sanitize_value(component.xpath or "")
+            if xpath and len(xpath) < 100:
+                return f'locator("xpath={xpath}")'
         
         return None
     
@@ -360,16 +390,48 @@ class LocatorStrategyManager:
         self,
         component: SemanticComponent,
     ) -> Optional[str]:
-        """Generate a healing candidate locator."""
+        """Generate a healing candidate locator.
+        
+        IMPORTANT: Do NOT use blind .first selection. Always use context-based
+        approaches that identify the intended element through semantic attributes,
+        parent context, or stable properties.
+        """
         # Use semantic information for healing
         if component.semantic_purpose:
-            # Try role + purpose combination
+            # Try role + purpose combination (context-based)
             if component.aria_role:
                 return f'get_by_role("{component.aria_role}").filter(has_text="{component.semantic_purpose}")'
         
-        # Fallback to text-based healing
+        # Try accessible name + role combination (context-based)
+        if component.aria_label and component.aria_role:
+            return f'get_by_role("{component.aria_role}", name="{component.aria_label}")'
+        
+        # Try label-based approach (context-based)
+        if component.label:
+            return f'get_by_label("{component.label}")'
+        
+        # Try placeholder + role combination (context-based)
+        if component.placeholder and component.aria_role:
+            return f'get_by_role("{component.aria_role}").filter(has_placeholder="{component.placeholder}")'
+        
+        # Try name + role combination (context-based)
+        if component.name and component.aria_role:
+            return f'get_by_role("{component.aria_role}").filter(has_name="{component.name}")'
+        
+        # If text-based healing is necessary, use with additional context
         if component.text_content:
-            return f'get_by_text("{component.text_content}").first'
+            # Use text with role or parent context, not blind .first
+            if component.aria_role:
+                return f'get_by_role("{component.aria_role}").filter(has_text="{component.text_content}")'
+            elif component.label:
+                return f'get_by_label("{component.label}").filter(has_text="{component.text_content}")'
+            else:
+                # Last resort: use text but warn about potential ambiguity
+                logger.warning(
+                    f"Using text-based locator without context for {component.semantic_purpose}. "
+                    "This may be ambiguous - consider adding role or parent context."
+                )
+                return f'get_by_text("{component.text_content}")'
         
         return None
     

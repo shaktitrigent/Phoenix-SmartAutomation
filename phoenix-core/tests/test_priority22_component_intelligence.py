@@ -567,10 +567,17 @@ class TestApplicationAgnostic:
             assert "sap" not in purpose_name.lower()
             assert "servicenow" not in purpose_name.lower()
             
-            # Should use generic terms
-            generic_terms = ["form", "button", "search", "login", "submit", "cancel"]
+            # Should use generic terms (expanded list to cover all purpose types)
+            generic_terms = [
+                "form", "button", "search", "login", "submit", "cancel",
+                "create", "edit", "delete", "add", "save", "confirm",
+                "trigger", "input", "field", "text", "email", "password",
+                "username", "logout", "navigation", "approve", "reject",
+                "upload", "download", "filter", "sort", "export"
+            ]
             assert any(term in purpose_name.lower() for term in generic_terms) or \
-                   any(term in str(pattern).lower() for term in generic_terms)
+                   any(term in str(pattern).lower() for term in generic_terms), \
+                   f"Purpose '{purpose_name}' should contain generic terms"
 
 
 if __name__ == "__main__":

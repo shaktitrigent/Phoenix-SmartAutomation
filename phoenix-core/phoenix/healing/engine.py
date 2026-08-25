@@ -614,7 +614,11 @@ class HealingEngine:
             logger.warning("Healing: Failed to refresh locator for %s: %s", element_name, str(e))
     
     def _requery_dom(self, url: str, mcp_client: Any) -> Optional[str]:
-        """Re-query DOM via MCP."""
+        """Re-query DOM via MCP for genuine locator failure healing.
+        
+        CRITICAL: Healing should only happen for genuine locator failures, not assertion failures.
+        This method ensures DOM is re-captured to find semantic equivalents for failed locators.
+        """
         if not self.enable_dom_cache:
             return None
         
@@ -624,26 +628,26 @@ class HealingEngine:
             age_ms = (time.time() - timestamp) * 1000
             if age_ms < self.dom_cache_ttl_ms:
                 self.metrics.cache_hits += 1
-                logger.info("Healing: DOM cache HIT for %s (age: %.0fms)", url, age_ms)
+                logger.info("[HEALING] DOM cache HIT for %s (age: %.0fms)", url, age_ms)
                 return snapshot
             else:
                 self.metrics.cache_misses += 1
-                logger.info("Healing: DOM cache STALE for %s (age: %.0fms)", url, age_ms)
+                logger.info("[HEALING] DOM cache STALE for %s (age: %.0fms)", url, age_ms)
                 del self.dom_cache[url]
         
-        # Fetch fresh DOM
+        # Fetch fresh DOM via MCP
         try:
-            logger.info("Healing: Re-querying DOM via MCP for %s", url)
+            logger.info("[HEALING] Re-querying DOM via MCP for %s (genuine locator failure)", url)
             snapshot = mcp_client.inspect_page(url)
             
             # Cache the snapshot
             self.dom_cache[url] = (snapshot, time.time())
             self.metrics.cache_misses += 1
             
-            logger.info("Healing: DOM re-query SUCCESS for %s (%d chars)", url, len(snapshot))
+            logger.info("[HEALING] DOM re-query SUCCESS for %s (%d chars)", url, len(snapshot))
             return snapshot
         except Exception as e:
-            logger.error("Healing: DOM re-query FAILED for %s: %s", url, str(e))
+            logger.error("[HEALING] DOM re-query FAILED for %s: %s", url, str(e))
             return None
     
     def _get_alternate_locators(self, element_name: str, context: Dict[str, Any]) -> List[str]:

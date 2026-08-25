@@ -71,7 +71,7 @@ def render_run_report(
     has_failures = any(t["status"] in ("failed", "error") for t in per_test)
 
     # -----------------------------------------------------------------------
-    # Build the JSON data blob
+    # Build the JSON data blob with enhanced evidence information
     # -----------------------------------------------------------------------
     phoenix_data = {
         "run_id": run_id,
@@ -101,6 +101,29 @@ def render_run_report(
         "trend_duration": trend_duration,
         "trend_healing": trend_healing,
         "flaky_tests": flaky_tests,
+        # Enhanced evidence information
+        "dom_evidence": {
+            "dom_snapshots_captured": agg.dom_snapshots_captured if hasattr(agg, 'dom_snapshots_captured') else 0,
+            "dom_cache_hits": agg.dom_cache_hits if hasattr(agg, 'dom_cache_hits') else 0,
+            "dom_cache_misses": agg.dom_cache_misses if hasattr(agg, 'dom_cache_misses') else 0,
+            "mcp_calls_saved": agg.mcp_calls_saved if hasattr(agg, 'mcp_calls_saved') else 0,
+        },
+        "locator_evidence": {
+            "total_locators": agg.total_locators if hasattr(agg, 'total_locators') else 0,
+            "high_confidence_locators": agg.high_confidence_locators if hasattr(agg, 'high_confidence_locators') else 0,
+            "low_confidence_locators": agg.low_confidence_locators if hasattr(agg, 'low_confidence_locators') else 0,
+            "average_confidence": agg.average_locator_confidence if hasattr(agg, 'average_locator_confidence') else 0.0,
+        },
+        "healing_evidence": {
+            "healing_attempts": agg.healing_attempts if hasattr(agg, 'healing_attempts') else 0,
+            "healing_successes": agg.healing_successes if hasattr(agg, 'healing_successes') else 0,
+            "healing_failures": agg.healing_failures if hasattr(agg, 'healing_failures') else 0,
+            "healing_strategies_used": agg.healing_strategies_used if hasattr(agg, 'healing_strategies_used') else [],
+        },
+        "runtime_learning": {
+            "runtime_decisions": agg.runtime_decisions if hasattr(agg, 'runtime_decisions') else [],
+            "learning_updates": agg.learning_updates if hasattr(agg, 'learning_updates') else 0,
+        },
     }
 
     data_json = json.dumps(phoenix_data, ensure_ascii=False, default=str)

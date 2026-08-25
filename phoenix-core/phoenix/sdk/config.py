@@ -74,7 +74,7 @@ class IntelligenceConfig(BaseModel):
     """Phoenix intelligence API configuration"""
 
     base_url: str = Field(
-        default="http://localhost:8001/api/v1", description="Intelligence API base URL"
+        default="http://localhost:8001", description="Intelligence API base URL (server root, not /api/v1)"
     )
     timeout: int = Field(default=300, description="Request timeout in seconds (LLM generation can take up to 5 min)")
     retry_count: int = Field(default=3, description="Number of retries on failure")
@@ -86,6 +86,11 @@ class IntelligenceConfig(BaseModel):
         default=True,
         description="Run 'pytest --collect-only' on each generated script to catch import/collection errors",
     )
+    # MCP configuration for DOM inspection
+    mcp_enabled: bool = Field(default=True, description="Enable MCP for DOM inspection during automation generation")
+    mcp_command: str = Field(default="npx", description="MCP command (e.g., npx)")
+    mcp_args: str = Field(default="@playwright/mcp@latest", description="MCP arguments (e.g., @playwright/mcp@latest)")
+    mcp_timeout: int = Field(default=60, description="MCP timeout in seconds")
 
 
 class CacheConfig(BaseModel):
@@ -156,13 +161,17 @@ class PhoenixConfig(BaseModel):
             intelligence=IntelligenceConfig(
                 base_url=os.environ.get(
                     "PHOENIX_INTELLIGENCE_URL",
-                    os.environ.get("PHOENIX_MCP_SERVER_URL", "http://localhost:8001/api/v1"),
+                    os.environ.get("PHOENIX_MCP_SERVER_URL", "http://localhost:8001"),
                 ),
                 timeout=int(os.environ.get("PHOENIX_INTELLIGENCE_TIMEOUT", "300")),
                 retry_count=int(os.environ.get("PHOENIX_INTELLIGENCE_RETRY_COUNT", "3")),
                 repair_attempts=int(os.environ.get("PHOENIX_REPAIR_ATTEMPTS", "1")),
                 collect_only_gate=os.environ.get("PHOENIX_COLLECT_ONLY_GATE", "true").lower()
                 not in {"0", "false", "no"},
+                mcp_enabled=os.environ.get("PHOENIX_MCP_ENABLED", "true").lower() not in {"0", "false", "no"},
+                mcp_command=os.environ.get("PHOENIX_MCP_COMMAND", "npx"),
+                mcp_args=os.environ.get("PHOENIX_MCP_ARGS", "@playwright/mcp@latest"),
+                mcp_timeout=int(os.environ.get("PHOENIX_MCP_TIMEOUT", "60")),
             ),
             cache=CacheConfig(
                 type=os.environ.get("PHOENIX_CACHE_TYPE", "memory"),

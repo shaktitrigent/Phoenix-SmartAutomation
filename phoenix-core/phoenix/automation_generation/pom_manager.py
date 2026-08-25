@@ -258,7 +258,7 @@ class POMManager:
         
         # Component type similarity
         if components:
-            component_types = set(c.component_type.value for c in components)
+            component_types = set(str(c.component_type) for c in components)
             existing_types = set(metadata.component_types)
             
             if component_types and existing_types:
@@ -346,7 +346,7 @@ class POMManager:
             page_type=page_type,
             file_path=str(pom_path),
             component_ids=[c.component_id for c in components],
-            component_types=[c.component_type.value for c in components],
+            component_types=[str(c.component_type) for c in components],
             method_names=required_actions,
             total_methods=len(required_actions),
             total_locators=len(components),
@@ -377,11 +377,11 @@ class POMManager:
         components: List[SemanticComponent],
         required_actions: List[str],
     ) -> str:
-        """Generate POM Python code."""
+        """Generate POM Python code with business-level methods and DOM-grounded locators."""
         class_name = f"{pom_name.replace('_', ' ').title().replace(' ', '')}Page"
         
         lines = [
-            f'"""Page Object for {page_type.value.replace("_", " ").title()}."""',
+            f'"""Page Object for {str(page_type).replace("_", " ").title()}."""',
             "",
             "from typing import Optional",
             "",
@@ -389,13 +389,35 @@ class POMManager:
             "",
             "",
             f"class {class_name}(BasePage):",
-            f'    """Page Object for {page_type.value.replace("_", " ").title()}."""',
+            f'    """Page Object for {str(page_type).replace("_", " ").title()} with business-level methods."""',
             "",
+            "    # Page URL and navigation",
+            f'    def __init__(self, page):',
+            f'        super().__init__(page)',
+            f'        self.page = page',
             "",
         ]
         
-        # Add locators
-        lines.append("    # Locators")
+        # Add business-level navigation method
+        lines.append("    # Business-level navigation")
+        if page_type == PageType.AUTHENTICATION_SCREEN:
+            lines.append("    def navigate_to_login(self):")
+            lines.append('        """Navigate to login page using configured base URL."""')
+            lines.append('        self.page.goto(self.base_url)')
+            lines.append("")
+        elif page_type == PageType.DASHBOARD:
+            lines.append("    def navigate_to_dashboard(self):")
+            lines.append('        """Navigate to dashboard page."""')
+            lines.append('        self.page.goto(f"{self.base_url}/dashboard")')
+            lines.append("")
+        else:
+            lines.append(f"    def navigate_to_{pom_name}(self):")
+            lines.append(f'        """Navigate to {pom_name} page."""')
+            lines.append('        self.page.goto(self.base_url)')
+            lines.append("")
+        
+        # Add DOM-grounded locators with evidence
+        lines.append("    # DOM-grounded locators (validated against actual DOM structure)")
         for component in components:
             if component.selected_locator:
                 locator_name = self._generate_locator_name(component)
@@ -403,13 +425,14 @@ class POMManager:
         
         lines.append("")
         
-        # Add methods
-        lines.append("    # Page Methods")
-        for action in required_actions:
-            method_name = self._generate_method_name(action)
-            lines.append(f"    def {method_name}(self):")
-            lines.append(f'        """{action.replace("_", " ").title()}."""')
-            lines.append("        pass")
+        # Add business-level reusable methods
+        lines.append("    # Business-level reusable methods")
+        business_methods = self._generate_business_methods(page_type, required_actions, components)
+        for method in business_methods:
+            lines.append(f"    def {method['name']}(self{method['params']}):")
+            lines.append(f'        """{method['description']}"""')
+            for code_line in method['code']:
+                lines.append(f"        {code_line}")
             lines.append("")
         
         return "\n".join(lines)
@@ -423,11 +446,130 @@ class POMManager:
         elif component.text_content:
             return f"{component.text_content.lower().replace(' ', '_')[:20]}_locator"
         else:
-            return f"{component.component_type.value}_locator"
+            return f"{str(component.component_type)}_locator"
     
     def _generate_method_name(self, action: str) -> str:
         """Generate a method name from action."""
         return action.lower().replace(" ", "_").replace("-", "_")
+    
+    def _generate_business_methods(
+        self,
+        page_type: PageType,
+        required_actions: List[str],
+        components: List[SemanticComponent]
+    ) -> List[Dict[str, Any]]:
+        """Generate business-level reusable methods based on page type and actions.
+        
+        These methods represent actual application behavior, not just individual interactions.
+        """
+        methods = []
+        
+        # Authentication page methods
+        if page_type == PageType.AUTHENTICATION_SCREEN:
+            if any("login" in action.lower() for action in required_actions):
+                methods.append({
+                    'name': 'login',
+                    'params': ', username: str, password: str',
+                    'description': 'Perform login with credentials using validated locators',
+                    'code': [
+                        '"""Login with username and password"""',
+                        'if self.username_locator:',
+                        '    self.page.locator(self.username_locator).fill(username)',
+                        'if self.password_locator:',
+                        '    self.page.locator(self.password_locator).fill(password)',
+                        'if self.login_button_locator:',
+                        '    self.page.locator(self.login_button_locator).click()',
+                    ]
+                })
+        
+        # Dashboard page methods
+        elif page_type == PageType.DASHBOARD:
+            if any("logout" in action.lower() for action in required_actions):
+                methods.append({
+                    'name': 'logout',
+                    'params': '',
+                    'description': 'Perform logout from dashboard',
+                    'code': [
+                        '"""Logout from the application"""',
+                        'if self.logout_button_locator:',
+                        '    self.page.locator(self.logout_button_locator).click()',
+                    ]
+                })
+        
+        # CRUD form methods
+        elif page_type == PageType.CRUD_FORM:
+            if any("submit" in action.lower() or "save" in action.lower() for action in required_actions):
+                methods.append({
+                    'name': 'submit_form',
+                    'params': '',
+                    'description': 'Submit the form using validated submit button',
+                    'code': [
+                        '"""Submit the form"""',
+                        'if self.submit_button_locator:',
+                        '    self.page.locator(self.submit_button_locator).click()',
+                    ]
+                })
+            
+            if any("cancel" in action.lower() for action in required_actions):
+                methods.append({
+                    'name': 'cancel_form',
+                    'params': '',
+                    'description': 'Cancel the form operation',
+                    'code': [
+                        '"""Cancel the form"""',
+                        'if self.cancel_button_locator:',
+                        '    self.page.locator(self.cancel_button_locator).click()',
+                    ]
+                })
+        
+        # Shopping/e-commerce methods
+        elif any("cart" in action.lower() or "product" in action.lower() for action in required_actions):
+            if any("add" in action.lower() and "cart" in action.lower() for action in required_actions):
+                methods.append({
+                    'name': 'add_to_cart',
+                    'params': '',
+                    'description': 'Add product to cart using validated add-to-cart button',
+                    'code': [
+                        '"""Add product to cart"""',
+                        'if self.add_to_cart_button_locator:',
+                        '    self.page.locator(self.add_to_cart_button_locator).click()',
+                    ]
+                })
+            
+            if any("view" in action.lower() and "cart" in action.lower() for action in required_actions):
+                methods.append({
+                    'name': 'view_cart',
+                    'params': '',
+                    'description': 'Navigate to cart page',
+                    'code': [
+                        '"""View shopping cart"""',
+                        'if self.cart_button_locator:',
+                        '    self.page.locator(self.cart_button_locator).click()',
+                    ]
+                })
+        
+        # Generate generic action methods for remaining actions
+        for action in required_actions:
+            action_lower = action.lower()
+            method_name = self._generate_method_name(action)
+            
+            # Skip if we already generated a business method for this action
+            if any(method['name'] == method_name for method in methods):
+                continue
+            
+            # Create a generic action method with clear manual review marker
+            methods.append({
+                'name': method_name,
+                'params': '',
+                'description': f'Perform action: {action}',
+                'code': [
+                    f'"""{action}"""',
+                    '# MANUAL IMPLEMENTATION REQUIRED - No DOM-grounded locator available',
+                    '# This action requires manual implementation with specific locators from actual application evidence',
+                ]
+            })
+        
+        return methods
     
     def extend_pom(
         self,
@@ -495,7 +637,7 @@ class POMManager:
             for metadata in self.pom_registry.values():
                 if metadata.file_path == pom_path:
                     metadata.component_ids.extend(c.component_id for c in new_components)
-                    metadata.component_types.extend(c.component_type.value for c in new_components)
+                    metadata.component_types.extend(str(c.component_type) for c in new_components)
                     metadata.method_names.extend(new_actions)
                     metadata.total_methods += len(new_actions)
                     metadata.total_locators += len(new_components)

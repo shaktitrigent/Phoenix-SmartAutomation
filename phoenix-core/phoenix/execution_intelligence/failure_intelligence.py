@@ -48,23 +48,27 @@ class EnhancedFailureClassifier:
     
     def __init__(self):
         # Failure patterns for classification
+        # Order matters: more specific patterns should be checked first
         self.failure_patterns = {
-            EnhancedFailureType.LOCATOR_FAILURE: [
-                "timeout",
-                "not found",
-                "locator",
-                "selector",
-                "element",
-                "detached",
-                "hidden",
-            ],
             EnhancedFailureType.NAVIGATION_FAILURE: [
+                "navigation timeout",
+                "page timeout",
+                "network timeout",
                 "navigation",
                 "redirect",
-                "timeout",
                 "network",
                 "url",
                 "blank",
+            ],
+            EnhancedFailureType.LOCATOR_FAILURE: [
+                "element not found",
+                "element timeout",
+                "locator",
+                "selector",
+                "detached",
+                "hidden",
+                "timeout",  # General timeout after navigation-specific patterns checked
+                "not found",
             ],
             EnhancedFailureType.APPLICATION_FAILURE: [
                 "http error",
@@ -186,8 +190,12 @@ class EnhancedFailureClassifier:
         return classification
     
     def _determine_failure_type(self, error_lower: str) -> EnhancedFailureType:
-        """Determine failure type from error message."""
-        # Check each failure type's patterns
+        """Determine failure type from error message.
+        
+        Checks patterns in order defined in self.failure_patterns.
+        More specific patterns should be defined first.
+        """
+        # Check each failure type's patterns in order
         for failure_type, patterns in self.failure_patterns.items():
             if any(pattern in error_lower for pattern in patterns):
                 return failure_type

@@ -1,3 +1,4 @@
+
 """Locator persistence - extracts and saves locators from generated scripts."""
 
 import json

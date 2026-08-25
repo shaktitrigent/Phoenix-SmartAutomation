@@ -112,6 +112,10 @@ class IntelligenceClient:
         domain_knowledge: str = "",
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
         use_pom: bool = True,  # Added for POM generation
+        mcp_enabled: bool = True,
+        mcp_command: str = "npx",
+        mcp_args: str = "@playwright/mcp@latest",
+        mcp_timeout: int = 60,
     ) -> Dict[str, Any]:
         payload = {
             "user_story": user_story,
@@ -124,6 +128,12 @@ class IntelligenceClient:
             },
             "domain_knowledge": domain_knowledge or None,
             "supporting_documents": supporting_documents or [],
+            "mcp_config": {
+                "enabled": mcp_enabled,
+                "command": mcp_command,
+                "args": mcp_args,
+                "timeout": mcp_timeout,
+            }
         }
         return self._post("/api/v1/tests/generate", payload)
 
@@ -160,6 +170,10 @@ class IntelligenceClient:
         use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
+        mcp_enabled: bool = True,
+        mcp_command: str = "npx",
+        mcp_args: str = "@playwright/mcp@latest",
+        mcp_timeout: int = 60,
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
@@ -169,6 +183,12 @@ class IntelligenceClient:
             "use_pom": use_pom,
             "use_bdd": use_bdd,
             "keywords": keywords or None,
+            "mcp_config": {
+                "enabled": mcp_enabled,
+                "command": mcp_command,
+                "args": mcp_args,
+                "timeout": mcp_timeout,
+            }
         }
         return self._post("/api/v1/tests/automate", payload)
 

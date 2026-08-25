@@ -61,28 +61,46 @@ class AnthropicProvider:
         return self._client
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        client = self._get_client()
-        logger.info(
-            "Calling Anthropic %s (max_tokens=%d, temperature=%.1f)",
-            self._settings.model,
-            self._settings.max_tokens,
-            self._settings.temperature,
-        )
-        message = client.messages.create(
-            model=self._settings.model,
-            max_tokens=self._settings.max_tokens,
-            temperature=self._settings.temperature,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        text = message.content[0].text
-        logger.info(
-            "Anthropic response: %d chars, input=%d tokens, output=%d tokens",
-            len(text),
-            message.usage.input_tokens,
-            message.usage.output_tokens,
-        )
-        return _strip_code_fences(text)
+        try:
+            client = self._get_client()
+            logger.info(
+                "Calling Anthropic %s (max_tokens=%d, temperature=%.1f)",
+                self._settings.model,
+                self._settings.max_tokens,
+                self._settings.temperature,
+            )
+            logger.debug("System prompt length: %d chars", len(system_prompt))
+            logger.debug("User prompt length: %d chars", len(user_prompt))
+            
+            message = client.messages.create(
+                model=self._settings.model,
+                max_tokens=self._settings.max_tokens,
+                temperature=self._settings.temperature,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            text = message.content[0].text
+            logger.info(
+                "Anthropic response: %d chars, input=%d tokens, output=%d tokens",
+                len(text),
+                message.usage.input_tokens,
+                message.usage.output_tokens,
+            )
+            return _strip_code_fences(text)
+        except Exception as e:
+            logger.error(
+                "Anthropic API call failed: %s (type: %s)",
+                str(e),
+                type(e).__name__
+            )
+            # Provide more specific error information
+            if "401" in str(e) or "authentication" in str(e).lower():
+                logger.error("Authentication failed - check ANTHROPIC_API_KEY")
+            elif "429" in str(e) or "rate limit" in str(e).lower():
+                logger.error("Rate limit exceeded - consider using fallback provider")
+            elif "timeout" in str(e).lower():
+                logger.error("Request timeout - check network connectivity")
+            raise
 
     @staticmethod
     def check_available() -> tuple[bool, str]:
@@ -242,7 +260,7 @@ _PROVIDERS: dict[str, type] = {
     "ollama": OllamaProvider,
 }
 
-_DEFAULT_FALLBACK_CHAIN = ["anthropic", "gemini", "openai", "ollama"]
+_DEFAULT_FALLBACK_CHAIN = ["anthropic"]
 
 
 class LLMRouter:
@@ -280,16 +298,6 @@ class LLMRouter:
             provider_cls = _PROVIDERS[provider_name]
             provider: LLMProvider = provider_cls(self.settings)
 
-            # Pre-flight check — skip unavailable providers immediately
-            if hasattr(provider_cls, "check_available"):
-                ok, reason = provider_cls.check_available()
-                if not ok:
-                    logger.warning(
-                        "Skipping provider '%s': %s", provider_name, reason
-                    )
-                    last_error = RuntimeError(f"{provider_name} unavailable: {reason}")
-                    continue
-
             try:
                 result = provider.generate(system_prompt, user_prompt)
                 if provider_name != self._chain[0]:
@@ -315,7 +323,9 @@ class LLMRouter:
 
         raise RuntimeError(
             f"All LLM providers failed. Last error: {last_error}\n"
-            "Check API keys and provider availability."
+            "Check API keys and provider availability.\n"
+            f"Attempted providers: {', '.join(self._chain)}\n"
+            f"Current provider setting: {self.settings.provider}"
         ) from last_error
 
 

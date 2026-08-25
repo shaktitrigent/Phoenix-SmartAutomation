@@ -122,6 +122,10 @@ class PhoenixClient:
             domain_knowledge=domain_knowledge,
             supporting_documents=supporting_documents or [],
             use_pom=kwargs.get("use_pom", True),
+            mcp_enabled=self.config.intelligence.mcp_enabled,
+            mcp_command=self.config.intelligence.mcp_command,
+            mcp_args=self.config.intelligence.mcp_args,
+            mcp_timeout=self.config.intelligence.mcp_timeout,
         )
 
         manual_tests_payload = intelligence_result.get("manual_tests", [])

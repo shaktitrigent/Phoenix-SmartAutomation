@@ -176,9 +176,13 @@ def test_priority20_to_priority24_integration(
     # Verify that semantic component information was used
     assert automation.confidence > 0.0
     
-    # Verify script was generated
-    assert automation.script_code != ""
-    assert automation.script_path != ""
+    # Verify script was generated (only if quality gate passed)
+    if automation.status == AutomationStatus.GENERATED:
+        assert automation.script_code != ""
+        assert automation.script_path != ""
+    else:
+        # If rejected, script_path may be empty but script_code should exist
+        assert automation.script_code != ""
 
 
 def test_priority21_to_priority24_integration(

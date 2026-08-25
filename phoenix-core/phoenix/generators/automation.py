@@ -63,6 +63,7 @@ def _needs_authenticated_page(preconditions: str) -> bool:
 def _swap_to_authenticated_fixture(code: str) -> str:
     """Replace ``page: Page`` with ``authenticated_page: Page`` in test_* signatures.
 
+    authenticated_page includes intelligent runtime features (MCP, DOM analysis, locator healing).
     Only touches the function-signature line to avoid mangling calls to
     page-object methods or helper functions that coincidentally use 'page'.
     """
@@ -71,6 +72,32 @@ def _swap_to_authenticated_fixture(code: str) -> str:
         r"\1authenticated_page\2",
         code,
     )
+
+
+def _swap_to_intelligent_fixture(code: str) -> str:
+    """Replace ``page: Page`` with intelligent or authenticated page fixture.
+
+    This enables intelligent runtime features (MCP, DOM analysis, locator healing)
+    during test execution. For tests with authentication preconditions, uses
+    authenticated_page (which also has intelligent features).
+    Only touches the function-signature line to avoid mangling calls to
+    page-object methods or helper functions.
+    """
+    # Check if test needs authentication (look for preconditions in docstring or comments)
+    needs_auth = any(phrase in code.lower() for phrase in _AUTH_PRECONDITION_PHRASES)
+
+    if needs_auth:
+        return re_module.sub(
+            r"(def test_\w+\s*\()page(\s*:\s*Page)",
+            r"\1authenticated_page\2",
+            code,
+        )
+    else:
+        return re_module.sub(
+            r"(def test_\w+\s*\()page(\s*:\s*Page)",
+            r"\1intelligent_page\2",
+            code,
+        )
 
 
 # Title-case two-or-more word pattern used to detect person display names
@@ -184,9 +211,9 @@ class AutomationTestGenerator:
 
         code = self._normalise(script_code)
 
-        # Swap fixture to authenticated_page when preconditions require a live session
-        if _needs_authenticated_page(test.get("preconditions", "")):
-            code = _swap_to_authenticated_fixture(code)
+        # Use intelligent_page for all tests to enable MCP/DOM integration during execution
+        # This ensures intelligent runtime features are used during test execution
+        code = _swap_to_intelligent_fixture(code)
 
         # ── Determine output path (needed by repair-loop logging) ──────────────────
         safe_name = _slugify(test.get("name", f"test_{idx}"))

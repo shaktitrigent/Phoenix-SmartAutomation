@@ -124,55 +124,97 @@ class AssertionGenerator:
         components: List[SemanticComponent],
         page_evidence: Dict[str, Any],
     ) -> List[Assertion]:
-        """Generate assertions from expected result text."""
+        """Generate evidence-based assertions from expected result text.
+        
+        CRITICAL: Assertions must verify actual business outcomes, not invent fictional messages.
+        Only generate assertions that can be verified from real DOM evidence or application state.
+        """
         assertions = []
         result_lower = expected_result.lower()
         
-        # Success indicators
+        # URL/Navigation assertions (verifiable from page state)
+        if any(word in result_lower for word in ["navigate", "redirect", "go to", "page", "dashboard", "home"]):
+            url_pattern = self._extract_url_pattern(expected_result)
+            if url_pattern:
+                assertion = Assertion(
+                    assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
+                    assertion_type=AssertionType.NAVIGATION_RESULT,
+                    expected_value=url_pattern,
+                    comparison_type="matches",
+                    page_context=page_evidence.get("page_type", ""),
+                    evidence=["Navigation verification from expected result"],
+                )
+                assertions.append(assertion)
+        
+        # Success state assertions (verify actual state changes, not fictional messages)
         if any(word in result_lower for word in ["success", "successful", "completed", "saved"]):
-            assertion = Assertion(
-                assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
-                assertion_type=AssertionType.SUCCESS_MESSAGE,
-                expected_value=expected_result,
-                comparison_type="contains",
-                page_context=page_evidence.get("page_type", ""),
-                evidence=["Expected result indicates success"],
-            )
-            assertions.append(assertion)
+            # Generate URL-based success assertion if available
+            if page_evidence.get("url"):
+                assertion = Assertion(
+                    assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
+                    assertion_type=AssertionType.NAVIGATION_RESULT,
+                    expected_value=page_evidence.get("url"),
+                    comparison_type="contains",
+                    page_context=page_evidence.get("page_type", ""),
+                    evidence=["Success state verified via URL change"],
+                )
+                assertions.append(assertion)
+            
+            # Verify page title if available
+            if page_evidence.get("title"):
+                assertion = Assertion(
+                    assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
+                    assertion_type=AssertionType.PAGE_TITLE,
+                    expected_value=page_evidence.get("title"),
+                    comparison_type="contains",
+                    page_context=page_evidence.get("page_type", ""),
+                    evidence=["Success state verified via page title"],
+                )
+                assertions.append(assertion)
         
-        # Error indicators
-        elif any(word in result_lower for word in ["error", "failed", "invalid", "rejected"]):
-            assertion = Assertion(
-                assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
-                assertion_type=AssertionType.ERROR_MESSAGE,
-                expected_value=expected_result,
-                comparison_type="contains",
-                page_context=page_evidence.get("page_type", ""),
-                evidence=["Expected result indicates error"],
-            )
-            assertions.append(assertion)
+        # Element visibility assertions (only if element exists in components)
+        for component in components:
+            if component.semantic_purpose and component.semantic_purpose.lower() in result_lower:
+                if component.selected_locator:
+                    assertion = Assertion(
+                        assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
+                        assertion_type=AssertionType.ELEMENT_VISIBILITY,
+                        expected_value=component.selected_locator,
+                        comparison_type="visible",
+                        page_context=page_evidence.get("page_type", ""),
+                        evidence=[f"Element {component.semantic_purpose} found in DOM components"],
+                    )
+                    assertions.append(assertion)
         
-        # Navigation indicators
-        elif any(word in result_lower for word in ["navigate", "redirect", "go to", "page"]):
-            assertion = Assertion(
-                assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
-                assertion_type=AssertionType.NAVIGATION_RESULT,
-                expected_value=self._extract_url_pattern(expected_result),
-                comparison_type="matches",
-                page_context=page_evidence.get("page_type", ""),
-                evidence=["Expected result indicates navigation"],
-            )
-            assertions.append(assertion)
+        # Only generate text assertions if the text is from actual DOM evidence
+        if components and any(c.text_content for c in components if c.text_content):
+            # Use actual text content from components, not invented messages
+            for component in components:
+                if component.text_content and component.text_content.lower() in result_lower:
+                    assertion = Assertion(
+                        assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
+                        assertion_type=AssertionType.VISIBLE_TEXT,
+                        expected_value=component.text_content,
+                        comparison_type="contains",
+                        page_context=page_evidence.get("page_type", ""),
+                        evidence=[f"Text '{component.text_content}' found in DOM component"],
+                    )
+                    assertions.append(assertion)
         
-        # Default to visible text assertion
-        else:
+        # If no evidence-based assertions can be generated, mark as requiring manual review
+        if not assertions:
+            logger.warning(
+                f"No evidence-based assertions could be generated for: {expected_result}. "
+                "This assertion requires manual review to ensure it matches actual application behavior."
+            )
+            # Add a placeholder assertion that must be manually reviewed
             assertion = Assertion(
                 assertion_id=f"ASSERT-{uuid.uuid4().hex[:8].upper()}",
                 assertion_type=AssertionType.VISIBLE_TEXT,
-                expected_value=expected_result,
+                expected_value="[MANUAL REVIEW REQUIRED]",
                 comparison_type="contains",
                 page_context=page_evidence.get("page_type", ""),
-                evidence=["Default visible text assertion"],
+                evidence=["Manual review required - no DOM evidence found for this assertion"],
             )
             assertions.append(assertion)
         
@@ -385,7 +427,7 @@ class AssertionGenerator:
             target_locator=component.selected_locator,
             expected_value=expected_value,
             page_context=component.page_type,
-            evidence=[f"Component: {component.component_type.value}"],
+            evidence=[f"Component: {str(component.component_type)}"],
         )
         
         assertion.confidence = self._calculate_assertion_confidence(assertion)

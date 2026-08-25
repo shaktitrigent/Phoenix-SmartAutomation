@@ -80,7 +80,7 @@ class ActionGenerator:
             action.fallback_locators = self._generate_fallback_locators(component)
         
         logger.debug(
-            f"Generated action {action.action_id} of type {action_type.value} "
+            f"Generated action {action.action_id} of type {str(action_type)} "
             f"with confidence {action.confidence:.2f}"
         )
         
@@ -236,7 +236,8 @@ class ActionGenerator:
         
         # Boost confidence if component supports the action
         if component:
-            if action.action_type.value in component.supported_actions:
+            action_type_value = action.action_type.value if hasattr(action.action_type, 'value') else str(action.action_type)
+            if action_type_value in component.supported_actions:
                 base_confidence += 0.2
             
             # Boost based on component interaction confidence
@@ -261,10 +262,12 @@ class ActionGenerator:
         evidence = []
         
         if component:
-            evidence.append(f"Component type: {component.component_type.value}")
+            component_type_value = component.component_type.value if hasattr(component.component_type, 'value') else str(component.component_type)
+            evidence.append(f"Component type: {component_type_value}")
             evidence.append(f"Component purpose: {component.semantic_purpose}")
             
-            if action.action_type.value in component.supported_actions:
+            action_type_value = action.action_type.value if hasattr(action.action_type, 'value') else str(action.action_type)
+            if action_type_value in component.supported_actions:
                 evidence.append("Action supported by component")
             
             if component.interaction_confidence > 0.8:

@@ -46,7 +46,7 @@ class ValidationDetector:
         
         # Required field patterns
         patterns["required"] = {
-            "attributes": ["required", "aria-required", "data-required"],
+            "attributes": {"required": "true", "aria-required": "true", "data-required": "true"},
             "class_patterns": ["required", "mandatory", "obligatory"],
             "error_indicators": ["required", "mandatory", "must be filled", "cannot be empty"],
             "confidence": 0.9,
@@ -54,7 +54,7 @@ class ValidationDetector:
         
         # Email format patterns
         patterns["email_format"] = {
-            "attributes": ["type=email"],
+            "attributes": {"type": "email"},
             "class_patterns": ["email", "email-field"],
             "error_indicators": ["valid email", "email format", "invalid email"],
             "confidence": 0.95,
@@ -62,7 +62,7 @@ class ValidationDetector:
         
         # Phone format patterns
         patterns["phone_format"] = {
-            "attributes": ["type=tel", "type=phone"],
+            "attributes": {"type": "tel"},
             "class_patterns": ["phone", "telephone", "mobile"],
             "error_indicators": ["valid phone", "phone format", "invalid phone"],
             "confidence": 0.9,
@@ -70,7 +70,7 @@ class ValidationDetector:
         
         # URL format patterns
         patterns["url_format"] = {
-            "attributes": ["type=url"],
+            "attributes": {"type": "url"},
             "class_patterns": ["url", "website", "link"],
             "error_indicators": ["valid url", "url format", "invalid url"],
             "confidence": 0.9,
@@ -78,7 +78,7 @@ class ValidationDetector:
         
         # Number format patterns
         patterns["number_format"] = {
-            "attributes": ["type=number", "type=numeric"],
+            "attributes": {"type": "number"},
             "class_patterns": ["number", "numeric", "quantity"],
             "error_indicators": ["valid number", "numeric", "must be a number"],
             "confidence": 0.95,
@@ -86,37 +86,30 @@ class ValidationDetector:
         
         # Min length patterns
         patterns["min_length"] = {
-            "attributes": ["minlength", "data-minlength", "min-length"],
+            "attributes": {"minlength": None, "data-minlength": None, "min-length": None},
             "error_indicators": ["at least", "minimum", "too short"],
             "confidence": 0.85,
         }
         
         # Max length patterns
         patterns["max_length"] = {
-            "attributes": ["maxlength", "data-maxlength", "max-length"],
+            "attributes": {"maxlength": None, "data-maxlength": None, "max-length": None},
             "error_indicators": ["at most", "maximum", "too long", "exceeds"],
             "confidence": 0.85,
         }
         
         # Min value patterns
         patterns["min_value"] = {
-            "attributes": ["min", "data-min", "min-value"],
+            "attributes": {"min": None, "data-min": None, "min-value": None},
             "error_indicators": ["must be at least", "minimum value", "too low"],
             "confidence": 0.85,
         }
         
         # Max value patterns
         patterns["max_value"] = {
-            "attributes": ["max", "data-max", "max-value"],
+            "attributes": {"max": None, "data-max": None, "max-value": None},
             "error_indicators": ["must be at most", "maximum value", "too high"],
             "confidence": 0.85,
-        }
-        
-        # Pattern validation (regex)
-        patterns["pattern"] = {
-            "attributes": ["pattern", "data-pattern"],
-            "error_indicators": ["invalid format", "must match", "pattern"],
-            "confidence": 0.8,
         }
         
         return patterns
@@ -187,14 +180,22 @@ class ValidationDetector:
         confidence = pattern["confidence"]
         
         # Check attributes
-        for attr in pattern.get("attributes", []):
-            if attr in component.attributes:
-                evidence.append(f"Attribute found: {attr}")
+        for attr_name, expected_value in pattern.get("attributes", {}).items():
+            if attr_name in component.attributes:
+                # Check if value matches (if specified)
+                actual_value = component.attributes[attr_name]
+                
+                if expected_value is not None and actual_value:
+                    if expected_value == actual_value:
+                        evidence.append(f"Attribute found: {attr_name}={expected_value}")
+                    else:
+                        continue  # Value doesn't match
+                else:
+                    evidence.append(f"Attribute found: {attr_name}")
                 
                 # Extract value if present
-                attr_value = component.attributes[attr]
-                if attr_value and attr_value != "true":
-                    rule_value = attr_value
+                if actual_value and actual_value != "true":
+                    rule_value = actual_value
         
         # Check class patterns
         component_class = component.element_class.lower()

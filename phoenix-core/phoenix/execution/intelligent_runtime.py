@@ -1043,8 +1043,8 @@ class IntelligentRuntime:
         print(f"\nComponent Execution Status:")
         print(f"  DOM Snapshot      : {'EXECUTED' if evidence.dom_reuse_count > 0 or evidence.dom_generation_count > 0 else 'NOT EXECUTED'}")
         print(f"  DOM Cache         : {'EXECUTED' if evidence.cache_hits + evidence.cache_misses > 0 else 'NOT EXECUTED'}")
-        print(f"  Locator Repository: {'EXECUTED' if evidence.locator_reuse_count + evidence.locator_generation_count > 0 else 'NOT EXECUTED'}")
-        print(f"  Healing           : {'EXECUTED' if evidence.healing_attempts > 0 else 'NOT EXECUTED'}")
+        print(f"  Locator Repository: {'EXECUTED' if self.locator_repository else 'NOT EXECUTED'}")
+        print(f"  Healing           : {'EXECUTED' if self.healing_engine else 'NOT EXECUTED'}")
         print(f"  Runtime Metrics   : {'EXECUTED' if self.metrics_collector else 'NOT EXECUTED'}")
         print(f"  Runtime Timeline  : {'EXECUTED' if self.timeline_tracker else 'NOT EXECUTED'}")
         

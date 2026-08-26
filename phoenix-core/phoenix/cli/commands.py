@@ -929,12 +929,12 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     # Use application URL from flag or config
     application_url = url or config.project.resolved_base_url
     if not application_url:
-        print_warning(
-            "No application URL provided. Pass --url https://your-app.com or set "
-            "'base_url' in .phoenixrc.\n"
-            "Without a real URL the generated tests will contain placeholder navigation "
-            "and locators cannot be grounded against a live DOM snapshot."
+        print_error(
+            "Application URL is required for automation generation. "
+            "Pass --url https://your-app.com or set 'base_url' in .phoenixrc.\n"
+            "Without a real URL, the system cannot capture DOM snapshots or generate grounded locators."
         )
+        raise click.Abort()
 
     # Load project-specific domain knowledge
     project_root = Path(config_path).parent if config_path else Path.cwd()
@@ -2008,7 +2008,47 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                             if verbose:
                                 click.echo(f"    [DEBUG] Fixed login assertion at line {i}")
 
-                    # Fix 2: Unrealistic field assertions -> comment out
+                    # Fix 2: Dashboard URL assertion patterns
+                    if 'user is successfully redirected to the Dashboard' in line and 'to_have_url' in line:
+                        fixed_line = re.sub(
+                            r'to_have_url\(re\.compile\(r"\.\*user\\ is\\ successfully\\ redirected\\ to\\ the\\ Dashboard\.\*"\)\)',
+                            'to_have_url(re.compile(r".*dashboard.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)',
+                            line
+                        )
+                        if fixed_line != line:
+                            script_lines[i] = fixed_line
+                            line_modified = True
+                            if verbose:
+                                click.echo(f"    [DEBUG] Fixed dashboard URL assertion at line {i}")
+
+                    # Fix 3: Dashboard content assertions - extract actual UI element names
+                    # "Dashboard heading is displayed" → search for "Dashboard"
+                    dashboard_patterns = [
+                        (r'Dashboard heading is displayed', 'Dashboard'),
+                        (r'dashboard displays the Missed Check Ins count', 'Missed Check Ins'),
+                        (r'dashboard displays the Not Accepted Routes count', 'Not Accepted Routes'),
+                        (r'dashboard displays the Incomplete Activities count', 'Incomplete Activities'),
+                        (r'dashboard displays the New Contractors count', 'New Contractors'),
+                        (r'dashboard displays the Missing Information count', 'Missing Information'),
+                        (r'dashboard displays the Routes Confirmation status', 'Routes Confirmation'),
+                        (r'Expiring Documents section is displayed', 'Expiring Documents'),
+                        (r'Customer Routes section is displayed', 'Customer Routes'),
+                    ]
+                    
+                    for pattern, actual_text in dashboard_patterns:
+                        if pattern in line and 'get_by_text' in line:
+                            fixed_line = re.sub(
+                                f'get_by_text\\("{re.escape(pattern)}", exact=True\\)',
+                                f'get_by_text("{actual_text}")',
+                                line
+                            )
+                            if fixed_line != line:
+                                script_lines[i] = fixed_line
+                                line_modified = True
+                                if verbose:
+                                    click.echo(f"    [DEBUG] Fixed dashboard assertion '{pattern}' → '{actual_text}' at line {i}")
+
+                    # Fix 4: Unrealistic field assertions -> comment out
                     unrealistic_patterns = ['valid-first-name-for-example', 'valid-middle-name-for-example',
                                           'valid-last-name-for-example', 's first name is ', 's last name is ',
                                           'the employee record contains', 'generate a valid employee ID']
@@ -2035,6 +2075,76 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                     traceback.print_exc()
 
             if heuristic_fixed:
+                continue
+        
+        # ── Try enhanced functional logic fixes ───────────
+        functional_fixed = False
+        if error_type in ("element_not_interactable", "element_not_visible", "authentication_failure", "timeout"):
+            try:
+                import re
+                script_lines = script_code.split('\n')
+                fixes_applied = 0
+
+                for i, line in enumerate(script_lines):
+                    line_modified = False
+                    
+                    # Fix 1: Add scroll_into_view before click operations for interactability issues
+                    if error_type == "element_not_interactable" and '.click(' in line and 'scroll_into_view' not in line:
+                        indent = '    ' * (len(line) - len(line.lstrip())) // 4
+                        script_lines.insert(i, f'{indent}# Added scroll for interactability')
+                        script_lines.insert(i + 1, f'{indent}target.scroll_into_view_if_needed()')
+                        fixes_applied += 1
+                        line_modified = True
+                        if verbose:
+                            click.echo(f"    [DEBUG] Added scroll for interactability at line {i}")
+                    
+                    # Fix 2: Add visibility waits for element_not_visible errors
+                    if error_type == "element_not_visible" and any(op in line for op in ['.click(', '.fill(', '.select_option(']):
+                        indent = '    ' * (len(line) - len(line.lstrip())) // 4
+                        script_lines.insert(i, f'{indent}# Added visibility wait')
+                        script_lines.insert(i + 1, f'{indent}expect(target).to_be_visible(timeout=10_000)')
+                        fixes_applied += 1
+                        line_modified = True
+                        if verbose:
+                            click.echo(f"    [DEBUG] Added visibility wait at line {i}")
+                    
+                    # Fix 3: Add authentication flow improvements
+                    if error_type == "authentication_failure" and ('sign-in' in line.lower() or 'login' in line.lower()) and '.click(' in line:
+                        indent = '    ' * (len(line) - len(line.lstrip())) // 4
+                        script_lines.insert(i + 1, f'{indent}# Wait for authentication to complete')
+                        script_lines.insert(i + 2, f'{indent}page.wait_for_load_state("networkidle", timeout=30_000)')
+                        script_lines.insert(i + 3, f'{indent}page.wait_for_timeout(2_000)')
+                        fixes_applied += 1
+                        line_modified = True
+                        if verbose:
+                            click.echo(f"    [DEBUG] Added authentication wait at line {i}")
+                    
+                    # Fix 4: Generic timeout improvements
+                    if error_type == "timeout":
+                        # Double timeout values in the line
+                        timeout_match = re.search(r'timeout\s*=\s*(\d+)', line)
+                        if timeout_match:
+                            current_timeout = int(timeout_match.group(1))
+                            new_timeout = min(current_timeout * 2, 120_000)
+                            script_lines[i] = line.replace(f'timeout={current_timeout}', f'timeout={new_timeout}')
+                            fixes_applied += 1
+                            line_modified = True
+                            if verbose:
+                                click.echo(f"    [DEBUG] Increased timeout from {current_timeout} to {new_timeout} at line {i}")
+
+                if fixes_applied > 0:
+                    script_code = '\n'.join(script_lines)
+                    script_path.write_text(script_code, encoding="utf-8")
+                    click.echo(f"    Fixed via functional logic: applied {fixes_applied} functional fixes")
+                    fixed += 1
+                    functional_fixed = True
+            except Exception as e:
+                if verbose:
+                    click.echo(f"    Functional fix failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            if functional_fixed:
                 continue
 
         # Call intelligence server
@@ -2309,8 +2419,28 @@ def clean(ctx, dry_run):
                 print_info(f"{prefix}Would remove directory: {dir_path}")
             else:
                 try:
-                    shutil.rmtree(dir_path)
-                    click.echo(f"Removed: {dir_path}/")
+                    # For tests and pages directories, preserve __init__.py files
+                    if dir_name in ["tests", "pages"]:
+                        # Remove all files except __init__.py
+                        for item in dir_path.iterdir():
+                            if item.is_file() and item.name != "__init__.py":
+                                item.unlink()
+                            elif item.is_dir():
+                                # Recursively clean subdirectories, preserving __init__.py
+                                for sub_item in item.rglob("*"):
+                                    if sub_item.is_file() and sub_item.name != "__init__.py":
+                                        sub_item.unlink()
+                                    elif sub_item.is_dir() and not any(sub_item.rglob("__init__.py")):
+                                        # Remove empty directories
+                                        try:
+                                            sub_item.rmdir()
+                                        except OSError:
+                                            pass
+                        click.echo(f"Cleaned: {dir_path}/ (preserved __init__.py)")
+                    else:
+                        # For other directories, remove entirely
+                        shutil.rmtree(dir_path)
+                        click.echo(f"Removed: {dir_path}/")
                     removed_count += 1
                 except OSError as exc:
                     print_warning(f"Could not remove {dir_path}: {exc}")

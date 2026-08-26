@@ -262,11 +262,33 @@ class MCPClient:
                 len(text),
             )
             
+            # If accessibility tree is too small, capture full HTML as fallback
+            if len(text) < 2000:
+                logger.warning(f"MCP: Accessibility tree too small ({len(text)} chars), capturing full HTML as fallback")
+                try:
+                    html_result = await session.call_tool("browser_evaluate", {
+                        "expression": "() => document.documentElement.outerHTML"
+                    })
+                    
+                    if html_result and html_result.content:
+                        html_text = ""
+                        for block in html_result.content:
+                            if hasattr(block, "text"):
+                                html_text += block.text
+                            elif isinstance(block, dict):
+                                html_text += block.get("text", "")
+                        
+                        if len(html_text) > len(text):
+                            logger.info(f"MCP: Using full HTML instead ({len(html_text)} chars vs {len(text)} chars)")
+                            text = html_text
+                except Exception as e:
+                    logger.debug(f"MCP: HTML fallback failed: {e}")
+            
             # Log accessibility tree size for debugging
             if text:
-                logger.info(f"MCP: Accessibility tree captured successfully")
+                logger.info(f"MCP: DOM captured successfully")
             else:
-                logger.warning(f"MCP: Accessibility tree is empty")
+                logger.warning(f"MCP: DOM is empty")
 
             await session.call_tool("browser_close", {})
 

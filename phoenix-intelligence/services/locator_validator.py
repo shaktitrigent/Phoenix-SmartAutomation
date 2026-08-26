@@ -32,6 +32,7 @@ class LocatorValidator:
     PRIORITY_RANKINGS = {
         'data-testid': 10,      # Highest: stable, testing-specific, verifiable in DOM
         'data-test': 10,        # Equivalent to data-testid
+        'id': 9,                # Stable ID (not auto-generated)
         'stable_id': 9,         # Stable ID (not auto-generated)
         'name': 8,              # Form field names - stable and semantic
         'placeholder': 7,        # Placeholder text - user-visible but may change
@@ -200,6 +201,10 @@ class LocatorValidator:
             return self._validate_data_testid(selector_info['value'])
         elif selector_info['type'] == 'name':
             return self._validate_name_attribute(selector_info['value'])
+        elif selector_info['type'] == 'id':
+            return self._validate_id_selector(selector_info['value'])
+        elif selector_info['type'] == 'class':
+            return self._validate_class_selector(selector_info['value'])
         elif selector_info['type'] == 'placeholder':
             return self._validate_placeholder_attribute(selector_info['value'])
         elif selector_info['type'] == 'role':
@@ -224,6 +229,12 @@ class LocatorValidator:
         Returns dict with 'type' and 'value' keys, or None if parsing fails.
         """
         selector = selector.strip()
+        
+        # Handle simple CSS selectors like #id, .class
+        if selector.startswith('#'):
+            return {'type': 'id', 'value': selector[1:]}
+        if selector.startswith('.'):
+            return {'type': 'class', 'value': selector[1:]}
         
         # Handle page.locator("[data-testid='...']")
         if '[data-testid=' in selector or '[data-test=' in selector:
@@ -313,6 +324,37 @@ class LocatorValidator:
             return True
         
         logger.warning(f"✗ name={name_value} NOT found in DOM")
+        return False
+    
+    def _validate_id_selector(self, id_value: str) -> bool:
+        """Validate that id attribute exists in DOM."""
+        dom_lower = self.dom_snapshot.lower()
+        id_lower = id_value.lower()
+        
+        # Look for id="value" in HTML
+        if re.search(rf'id\s*=\s*["\']?{re.escape(id_lower)}["\']?', dom_lower, re.IGNORECASE):
+            logger.info(f"✓ Found id={id_value} in DOM")
+            return True
+        
+        logger.warning(f"✗ id={id_value} NOT found in DOM")
+        return False
+    
+    def _validate_class_selector(self, class_value: str) -> bool:
+        """Validate that class attribute exists in DOM."""
+        dom_lower = self.dom_snapshot.lower()
+        class_lower = class_value.lower()
+        
+        # Look for class="value" in HTML (more permissive since classes can be combined)
+        if re.search(rf'class\s*=\s*["\'][^"\']*{re.escape(class_lower)}[^"\']*["\']', dom_lower, re.IGNORECASE):
+            logger.info(f"✓ Found class={class_value} in DOM")
+            return True
+        
+        # Also check for standalone class occurrence
+        if class_lower in dom_lower:
+            logger.info(f"✓ Found class pattern {class_value} in DOM")
+            return True
+        
+        logger.warning(f"✗ class={class_value} NOT found in DOM")
         return False
     
     def _validate_placeholder_attribute(self, placeholder_value: str) -> bool:
@@ -478,7 +520,7 @@ class LocatorValidator:
     def _check_priority_rules(self, selector: str) -> bool:
         """Check if selector follows the priority rules."""
         # Check if it uses a high-priority locator type
-        high_priority = ['data-testid', 'stable_id', 'name', 'placeholder']
+        high_priority = ['data-testid', 'id', 'stable_id', 'name', 'placeholder']
         for pattern in high_priority:
             if pattern in selector.lower():
                 return True

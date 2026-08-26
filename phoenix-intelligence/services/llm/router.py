@@ -78,6 +78,7 @@ class AnthropicProvider:
                 temperature=self._settings.temperature,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
+                timeout=180.0,  # 3 minute timeout for LLM generation
             )
             text = message.content[0].text
             logger.info(
@@ -148,6 +149,7 @@ class OpenAIProvider:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            timeout=180.0,  # 3 minute timeout for LLM generation
         )
         text = response.choices[0].message.content or ""
         logger.info("OpenAI response: %d chars", len(text))

@@ -110,3 +110,7 @@ build/
 test_hardcoded_login_verification.py
 test_locator_repository_verification.py
 test_healing_*.py
+
+# Track Phoenix source locator persistence implementation
+!phoenix-core/phoenix/locators/
+!phoenix-core/phoenix/locators/persist.py

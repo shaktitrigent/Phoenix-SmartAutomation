@@ -60,6 +60,11 @@ tests/
 !phoenix-core/tests/**
 reports/
 locators/
+# Phoenix core source locator package
+!phoenix-core/
+!phoenix-core/phoenix/
+!phoenix-core/phoenix/locators/
+!phoenix-core/phoenix/locators/persist.py
 user_stories/
 fixtures/
 config/
@@ -123,3 +128,9 @@ dashboard_verification.png
 login_page_verification.png
 test_dom_snapshot.png
 test_healing_local.html
+
+# Phoenix core source locator package
+!phoenix-core/
+!phoenix-core/phoenix/
+!phoenix-core/phoenix/locators/
+!phoenix-core/phoenix/locators/persist.py

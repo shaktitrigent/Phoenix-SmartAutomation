@@ -2,6 +2,7 @@
 
 import json
 import os
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,80 @@ except ImportError:
 # Global variable to store intelligent_runtime instance for session finish hook
 _intelligent_runtime_instance = None
 
+
+# ---------------------------------------------------------------------------
+# Base URL fixture for root tests
+# ---------------------------------------------------------------------------
+
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
+
+
+@pytest.fixture(scope="session")
+def base_url(request) -> str:
+    return request.config.getoption("--base-url", default=None) or BASE_URL
+
+
+# ---------------------------------------------------------------------------
+# Page fixture override for automatic intelligent integration
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def page(context, intelligent_runtime, request):
+    """Playwright Page fixture with automatic Phoenix Intelligent Runtime integration.
+
+    This fixture overrides pytest-playwright's page fixture to automatically wrap
+    with Phoenix intelligence when IntelligentRuntime is available.
+
+    Note: This requires pytest-playwright to provide the 'context' fixture.
+    """
+    print("[PHOENIX] Page fixture: Starting creation")
+    p = context.new_page()
+    p.set_default_timeout(30000)
+    p.set_default_navigation_timeout(60000)
+    p.on("dialog", lambda dialog: dialog.dismiss())
+
+    print(f"[PHOENIX] Page fixture type: {type(p).__name__}")
+    print(f"[PHOENIX] IntelligentRuntime available: {intelligent_runtime is not None}")
+    print(f"[PHOENIX] INTELLIGENT_RUNTIME_AVAILABLE: {INTELLIGENT_RUNTIME_AVAILABLE}")
+
+    # Wrap with Phoenix intelligence if available
+    if intelligent_runtime and INTELLIGENT_RUNTIME_AVAILABLE:
+        try:
+            test_name = request.node.name if hasattr(request, 'node') else "unknown"
+            project_name = intelligent_runtime.project_name
+            execution_id = intelligent_runtime.execution_id or "unknown"
+
+            print(f"[PHOENIX] Creating IntelligentPage for test: {test_name}")
+            print(f"[PHOENIX] Project: {project_name}")
+            print(f"[PHOENIX] Execution ID: {execution_id}")
+
+            wrapped_page = create_intelligent_page(
+                page=p,
+                intelligent_runtime=intelligent_runtime,
+                project_name=project_name,
+                test_name=test_name,
+                execution_id=execution_id
+            )
+
+            print(f"[PHOENIX] Intelligent Page: ENABLED (automatic integration)")
+            print(f"[PHOENIX] Wrapped page type: {type(wrapped_page).__name__}")
+            yield wrapped_page
+        except Exception as e:
+            print(f"[PHOENIX] Failed to create intelligent page, using standard page: {e}")
+            import traceback
+            traceback.print_exc()
+            yield p
+    else:
+        print("[PHOENIX] Using standard Playwright page (no intelligent runtime)")
+        yield p
+
+    with suppress(Exception):
+        p.close()
+
+
+# ---------------------------------------------------------------------------
+# Phoenix Runtime fixtures
+# ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
 def phoenix_runtime():
@@ -143,6 +218,9 @@ def intelligent_runtime():
                 enable_timeline=True
             )
             
+            # Start execution tracking
+            intelligent_runtime.start_execution("default")
+            
             # Store globally for session finish hook
             _intelligent_runtime_instance = intelligent_runtime
             
@@ -204,17 +282,110 @@ def intelligent_page(page, intelligent_runtime, request):
     return wrapped_page
 
 
+# Note: The standard 'page' fixture is provided by pytest-playwright
+# We override it here to provide automatic intelligent integration for all tests
+# Projects can still provide their own page fixture in project-specific conftest.py
+
+
+@pytest.fixture
+def page(context, intelligent_runtime, request):
+    """Playwright Page fixture with automatic Phoenix Intelligent Runtime integration.
+
+    This fixture automatically wraps the standard Playwright page with Phoenix intelligence
+    when IntelligentRuntime is available, ensuring DOM reuse, locator healing, and
+    runtime evidence collection happen automatically for all tests.
+
+    When IntelligentRuntime is not available, returns a standard Playwright page for
+    backward compatibility.
+    """
+    print("[PHOENIX] Page fixture: Starting creation")
+    p = context.new_page()
+    p.set_default_timeout(30000)
+    p.set_default_navigation_timeout(60000)
+    p.on("dialog", lambda dialog: dialog.dismiss())
+
+    print(f"[PHOENIX] Page fixture type: {type(p).__name__}")
+    print(f"[PHOENIX] IntelligentRuntime available: {intelligent_runtime is not None}")
+    print(f"[PHOENIX] INTELLIGENT_RUNTIME_AVAILABLE: {INTELLIGENT_RUNTIME_AVAILABLE}")
+
+    # Wrap with Phoenix intelligence if available
+    if intelligent_runtime and INTELLIGENT_RUNTIME_AVAILABLE:
+        try:
+            test_name = request.node.name if hasattr(request, 'node') else "unknown"
+            project_name = intelligent_runtime.project_name
+            execution_id = intelligent_runtime.execution_id or "unknown"
+
+            print(f"[PHOENIX] Creating IntelligentPage for test: {test_name}")
+            print(f"[PHOENIX] Project: {project_name}")
+            print(f"[PHOENIX] Execution ID: {execution_id}")
+
+            wrapped_page = create_intelligent_page(
+                page=p,
+                intelligent_runtime=intelligent_runtime,
+                project_name=project_name,
+                test_name=test_name,
+                execution_id=execution_id
+            )
+
+            print(f"[PHOENIX] Intelligent Page: ENABLED (automatic integration)")
+            print(f"[PHOENIX] Wrapped page type: {type(wrapped_page).__name__}")
+            yield wrapped_page
+        except Exception as e:
+            print(f"[PHOENIX] Failed to create intelligent page, using standard page: {e}")
+            import traceback
+            traceback.print_exc()
+            yield p
+    else:
+        print("[PHOENIX] Using standard Playwright page (no intelligent runtime)")
+        yield p
+
+    with suppress(Exception):
+        p.close()
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Print Phoenix runtime summary at the end of test session."""
+    print("[PHOENIX] pytest_sessionfinish invoked")
+    print("[PHOENIX] Ending intelligent runtime")
+    
     # Call IntelligentRuntime end_execution to save evidence
     global _intelligent_runtime_instance
     if _intelligent_runtime_instance:
         try:
             status = "passed" if exitstatus == 0 else "failed"
+            print(f"[PHOENIX] Session status: {status}")
             _intelligent_runtime_instance.end_execution(status=status)
             print(f"[INTELLIGENT RUNTIME] Saved execution evidence with status: {status}")
+            
+            # Print final summary
+            print("\n========== PHOENIX DOM INTELLIGENCE SUMMARY ==========")
+            print(f"Session Status: {status}")
+            print(f"Execution ID: {_intelligent_runtime_instance.execution_id}")
+            print(f"Project: {_intelligent_runtime_instance.project_name}")
+            print(f"Test: {_intelligent_runtime_instance.test_name}")
+            
+            if _intelligent_runtime_instance.runtime_evidence:
+                print(f"\nDOM Snapshot: EXECUTED")
+                print(f"DOM Cache: EXECUTED")
+                print(f"DOM Generated: {_intelligent_runtime_instance.runtime_evidence.dom_generation_count}")
+                print(f"DOM Reused: {_intelligent_runtime_instance.runtime_evidence.dom_reuse_count}")
+                print(f"Cache Hits: {_intelligent_runtime_instance.runtime_evidence.cache_hits}")
+                print(f"Cache Misses: {_intelligent_runtime_instance.runtime_evidence.cache_misses}")
+                print(f"Cache Hit Ratio: {_intelligent_runtime_instance.runtime_evidence.cache_hit_ratio:.2f}")
+                print(f"Time Saved: {_intelligent_runtime_instance.runtime_evidence.time_saved_ms:.2f}ms")
+                print(f"MCP Calls Saved: {_intelligent_runtime_instance.runtime_evidence.mcp_calls_saved}")
+            else:
+                print(f"\nDOM Snapshot: NOT EXECUTED")
+                print(f"DOM Cache: NOT EXECUTED")
+            
+            print("===================================================\n")
+            
         except Exception as e:
             print(f"[INTELLIGENT RUNTIME] Failed to end execution: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("[PHOENIX] No intelligent runtime instance to end")
     
     if PHOENIX_RUNTIME_AVAILABLE:
         print_runtime_summary()

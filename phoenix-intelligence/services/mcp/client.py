@@ -4,9 +4,10 @@ import asyncio
 import logging
 import shutil
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from services.config import MCPSettings
+from services.dom_grounding import combine_inspection_for_prompt, strip_noise_from_html
 
 logger = logging.getLogger(__name__)
 
@@ -32,24 +33,21 @@ class MCPClient:
         self._write = None
         self.artifacts_manager = artifacts_manager
         self.dom_snapshot_manager = dom_snapshot_manager
+        # Last inspection pair (html, accessibility_tree) for callers that need both.
+        self.last_html: str = ""
+        self.last_accessibility_tree: str = ""
 
     def inspect_page(self, url: str, project: str = "default", page: str = "default", execution_id: str = "") -> str:
-        """Navigate to *url* and return an accessibility snapshot with automatic DOM reuse.
+        """Navigate to *url* and return an LLM-ready DOM grounding snapshot.
 
-        This is the **synchronous** public API consumed by the agents.
-        Internally it runs the async MCP protocol in a private event loop.
-        
-        Now includes automatic DOM reuse from permanent storage to skip MCP calls
-        when DOM is unchanged.
-
-        Returns:
-            The accessibility-tree text returned by the Playwright MCP
-            ``browser_snapshot`` tool.
+        Captures **both** full HTML and an accessibility tree when possible.
+        Stored snapshots keep HTML in ``dom_content`` and a11y separately.
+        The returned string prefers an interactive-element map + HTML + a11y
+        for locator grounding (application-agnostic).
 
         Raises:
             InspectionFailedError: When the MCP connection fails or returns an
-                empty snapshot. Callers must NOT silently swallow this — no DOM
-                snapshot means no grounded locators, so generation must stop.
+                empty snapshot.
         """
         try:
             print(f"[PHOENIX MCP] === MCP INSPECTION STARTED ===")
@@ -58,35 +56,29 @@ class MCPClient:
             print(f"[PHOENIX MCP] Page: {page}")
             print(f"[PHOENIX MCP] Execution ID: {execution_id}")
         except (UnicodeEncodeError, OSError):
-            # Fallback for console encoding issues
             pass
-        
-        logger.info(f"[PHOENIX MCP] MCP inspection started")
-        logger.info(f"[PHOENIX MCP] URL: {url}")
-        logger.info(f"[PHOENIX MCP] Project: {project}")
-        logger.info(f"[PHOENIX MCP] Page: {page}")
-        
+
+        logger.info("[PHOENIX MCP] MCP inspection started for %s", url)
+
         if not self.settings.enabled:
             logger.info("MCP is disabled via configuration — skipping page inspection")
             print("[PHOENIX MCP] MCP DISABLED - skipping inspection")
             return ""
 
-        # Check for DOM reuse if snapshot manager is available
         if self.dom_snapshot_manager and execution_id:
-            logger.info(f"[PHOENIX MCP] Checking for reusable DOM snapshot before inspect_page")
-            print(f"[PHOENIX MCP] DOM reuse check started")
-            
+            logger.info("[PHOENIX MCP] Checking for reusable DOM snapshot before inspect_page")
+
             def capture_via_mcp(target_url: str):
-                """Capture DOM via MCP."""
                 print(f"[PHOENIX MCP] Starting MCP capture for: {target_url}")
                 start_time = time.time()
-                result = self._run_async(self._inspect_page_async(target_url))
+                html, a11y = self._run_async(self._inspect_page_async(target_url))
                 duration = time.time() - start_time
                 print(f"[PHOENIX MCP] MCP capture completed in {duration:.2f}s")
-                # Return tuple of (dom_content, accessibility_tree) as expected by DOM snapshot manager
-                # For now, accessibility tree is embedded in the result
-                return result, result
-            
+                print(
+                    f"[PHOENIX MCP] HTML={len(html)} chars, a11y={len(a11y)} chars"
+                )
+                return html, a11y
+
             try:
                 dom_content, reuse_decision = self.dom_snapshot_manager.get_dom_with_automatic_reuse(
                     url=url,
@@ -94,85 +86,94 @@ class MCPClient:
                     page=page,
                     execution_id=execution_id,
                     capture_func=capture_via_mcp,
-                    current_dom=None
+                    current_dom=None,
                 )
-                
-                # Store MCP response artifact if artifacts manager is available
-                if self.artifacts_manager and dom_content:
+
+                a11y = ""
+                try:
+                    snap = self.dom_snapshot_manager.load_latest_dom_snapshot(project, page)
+                    if snap:
+                        a11y = snap.accessibility_tree or ""
+                        if not dom_content:
+                            dom_content = snap.dom_content or ""
+                except Exception:
+                    pass
+
+                self.last_html = dom_content or ""
+                self.last_accessibility_tree = a11y or ""
+                prompt_snapshot = combine_inspection_for_prompt(self.last_html, self.last_accessibility_tree)
+
+                if self.artifacts_manager and prompt_snapshot:
                     from phoenix.execution.artifacts import MCPResponseRecord
+
                     mcp_record = MCPResponseRecord(
                         url=url,
-                        snapshot_text=dom_content,
-                        snapshot_size_bytes=len(dom_content.encode('utf-8')),
+                        snapshot_text=prompt_snapshot,
+                        snapshot_size_bytes=len(prompt_snapshot.encode("utf-8")),
                         duration_seconds=reuse_decision.time_saved_ms / 1000 if reuse_decision.mcp_skipped else 0.0,
-                        success=True
+                        success=True,
                     )
                     self.artifacts_manager.save_mcp_response(mcp_record)
-                    
-                    if reuse_decision.mcp_skipped:
-                        logger.info(f"[PHOENIX MCP] DOM reused from storage - MCP call skipped")
-                        logger.info(f"[PHOENIX MCP] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
-                        print(f"[PHOENIX MCP] ✓ DOM REUSED from storage")
-                        print(f"[PHOENIX MCP] ✓ MCP call SKIPPED")
-                        print(f"[PHOENIX MCP] ✓ Time saved: {reuse_decision.time_saved_ms:.2f}ms")
-                    else:
-                        logger.info(f"[PHOENIX MCP] New DOM captured via MCP")
-                        print(f"[PHOENIX MCP] ✓ New DOM captured via MCP")
-                
-                print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
-                print(f"[PHOENIX MCP] DOM size: {len(dom_content)} chars")
-                print(f"[PHOENIX MCP] Cache result: {'HIT' if reuse_decision.mcp_skipped else 'MISS'}")
-                
-                return dom_content
-                
-            except Exception as exc:
-                logger.warning(f"[PHOENIX MCP] DOM reuse failed, falling back to direct MCP: {exc}")
-                print(f"[PHOENIX MCP] DOM reuse failed, falling back to direct MCP")
-                # Continue to direct MCP call as fallback
 
-        # Direct MCP call (original behavior)
-        print(f"[PHOENIX MCP] Starting direct MCP call")
+                print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
+                print(f"[PHOENIX MCP] Prompt snapshot size: {len(prompt_snapshot)} chars")
+                print(f"[PHOENIX MCP] Cache result: {'HIT' if reuse_decision.mcp_skipped else 'MISS'}")
+                return prompt_snapshot
+
+            except Exception as exc:
+                logger.warning("[PHOENIX MCP] DOM reuse failed, falling back to direct MCP: %s", exc)
+                print("[PHOENIX MCP] DOM reuse failed, falling back to direct MCP")
+
+        print("[PHOENIX MCP] Starting direct MCP call")
         start_time = time.time()
         try:
-            result = self._run_async(self._inspect_page_async(url))
+            html, a11y = self._run_async(self._inspect_page_async(url))
             duration = time.time() - start_time
-            
+            self.last_html = html or ""
+            self.last_accessibility_tree = a11y or ""
+            prompt_snapshot = combine_inspection_for_prompt(self.last_html, self.last_accessibility_tree)
+
             print(f"[PHOENIX MCP] Direct MCP call completed in {duration:.2f}s")
-            print(f"[PHOENIX MCP] Snapshot size: {len(result)} chars")
-            
-            # Store MCP response artifact if artifacts manager is available
-            if self.artifacts_manager and result:
+            print(f"[PHOENIX MCP] Prompt snapshot size: {len(prompt_snapshot)} chars")
+
+            if self.artifacts_manager and prompt_snapshot:
                 from phoenix.execution.artifacts import MCPResponseRecord
+
                 mcp_record = MCPResponseRecord(
                     url=url,
-                    snapshot_text=result,
-                    snapshot_size_bytes=len(result.encode('utf-8')),
+                    snapshot_text=prompt_snapshot,
+                    snapshot_size_bytes=len(prompt_snapshot.encode("utf-8")),
                     duration_seconds=duration,
-                    success=True
+                    success=True,
                 )
                 self.artifacts_manager.save_mcp_response(mcp_record)
-                logger.info(f"[PHOENIX MCP] Snapshot saved to artifacts: {len(result)} chars in {duration:.2f}s")
-                print(f"[PHOENIX MCP] ✓ Snapshot saved to artifacts")
-            
-            print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
-            return result
+
+            print("[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
+            if not prompt_snapshot.strip():
+                raise InspectionFailedError(
+                    f"MCP inspection of {url!r} returned an empty DOM snapshot. "
+                    "The page may require authentication or JavaScript to render content."
+                )
+            return prompt_snapshot
+        except InspectionFailedError:
+            raise
         except Exception as exc:
             duration = time.time() - start_time
             print(f"[PHOENIX MCP] ✗ MCP call FAILED after {duration:.2f}s")
-            
-            # Store failed MCP response artifact
+
             if self.artifacts_manager:
                 from phoenix.execution.artifacts import MCPResponseRecord
+
                 mcp_record = MCPResponseRecord(
                     url=url,
                     snapshot_text="",
                     snapshot_size_bytes=0,
                     duration_seconds=duration,
                     success=False,
-                    error_message=str(exc)
+                    error_message=str(exc),
                 )
                 self.artifacts_manager.save_mcp_response(mcp_record)
-            
+
             raise InspectionFailedError(
                 f"MCP browser connection failed while inspecting {url!r}. "
                 "Cannot generate automation without a DOM snapshot. "
@@ -180,16 +181,12 @@ class MCPClient:
                 "the initial load, (3) the @playwright/mcp server is running."
             ) from exc
 
-        if not result or not result.strip():
-            print(f"[PHOENIX MCP] ✗ Empty DOM snapshot received")
-            raise InspectionFailedError(
-                f"MCP inspection of {url!r} returned an empty DOM snapshot. "
-                "The page may require authentication or JavaScript to render content. "
-                "Verify the URL is correct and the page loads without login."
-            )
+    async def _inspect_page_async(self, url: str) -> Tuple[str, str]:
+        """Connect, navigate, capture HTML + accessibility tree, disconnect.
 
-    async def _inspect_page_async(self, url: str) -> str:
-        """Async implementation: connect, navigate, snapshot, disconnect."""
+        Returns:
+            ``(html, accessibility_tree)`` — either may be empty on partial failure.
+        """
         from mcp import ClientSession
         from mcp.client.stdio import stdio_client, StdioServerParameters
 
@@ -211,88 +208,159 @@ class MCPClient:
             logger.info("MCP: navigating to %s", url)
             await session.call_tool("browser_navigate", {"url": url})
 
-            # Wait for page to fully load before taking snapshot
-            # Use intelligent waiting instead of fixed sleep for SPA support
             logger.info("MCP: waiting for page load and SPA rendering")
-            await asyncio.sleep(2)  # Initial wait for navigation
-            
-            # Additional intelligent wait for SPA rendering
+            await asyncio.sleep(2)
+
+            html_text = ""
             max_wait_attempts = 5
             for attempt in range(max_wait_attempts):
-                await asyncio.sleep(0.5)  # Wait between checks
-                logger.info(f"MCP: checking if page has rendered (attempt {attempt + 1}/{max_wait_attempts})")
-                
-                # Check if page has meaningful content by checking the DOM
+                await asyncio.sleep(0.5)
+                logger.info(
+                    "MCP: checking if page has rendered (attempt %d/%d)",
+                    attempt + 1,
+                    max_wait_attempts,
+                )
                 try:
-                    # Try to get page content to check if rendered
-                    dom_check_result = await session.call_tool("browser_evaluate", {
-                        "expression": "() => document.documentElement.outerHTML"
-                    })
-                    
-                    if dom_check_result and dom_check_result.content:
-                        dom_text = ""
-                        for block in dom_check_result.content:
-                            if hasattr(block, "text"):
-                                dom_text += block.text
-                            elif isinstance(block, dict):
-                                dom_text += block.get("text", "")
-                        
-                        # Check for meaningful elements
-                        meaningful_elements = dom_text.count('<input') + dom_text.count('<button') + dom_text.count('<form') + dom_text.count('<a ')
-                        
-                        if len(dom_text) > 100 and meaningful_elements > 0:
-                            logger.info(f"MCP: Page has rendered content ({len(dom_text)} bytes, {meaningful_elements} elements)")
-                            break
-                except Exception as e:
-                    logger.debug(f"MCP: DOM check failed: {e}")
-            
-            logger.info("MCP: taking accessibility snapshot")
-            snapshot_result = await session.call_tool("browser_snapshot", {})
+                    html_text = await self._evaluate_outer_html(session)
+                    meaningful = (
+                        html_text.count("<input")
+                        + html_text.count("<button")
+                        + html_text.count("<form")
+                        + html_text.count("<a ")
+                    )
+                    if len(html_text) > 100 and meaningful > 0:
+                        logger.info(
+                            "MCP: Page has rendered content (%d bytes, %d interactive tags)",
+                            len(html_text),
+                            meaningful,
+                        )
+                        break
+                except Exception as exc:
+                    logger.debug("MCP: DOM check failed: %s", exc)
 
-            text = ""
-            if snapshot_result and snapshot_result.content:
-                for block in snapshot_result.content:
-                    if hasattr(block, "text"):
-                        text += block.text
-                    elif isinstance(block, dict):
-                        text += block.get("text", "")
+            # Always capture a fresh HTML snapshot for attribute-accurate locators.
+            try:
+                fresh_html = await self._evaluate_outer_html(session)
+                if len(fresh_html) >= len(html_text):
+                    html_text = fresh_html
+            except Exception as exc:
+                logger.warning("MCP: final HTML capture failed: %s", exc)
+
+            logger.info("MCP: taking accessibility snapshot")
+            a11y_text = ""
+            try:
+                snapshot_result = await session.call_tool("browser_snapshot", {})
+                a11y_text = self._tool_result_text(snapshot_result)
+            except Exception as exc:
+                logger.warning("MCP: accessibility snapshot failed: %s", exc)
 
             logger.info(
-                "MCP: snapshot received (%d chars)",
-                len(text),
+                "MCP: capture complete html=%d chars a11y=%d chars",
+                len(html_text),
+                len(a11y_text),
             )
-            
-            # If accessibility tree is too small, capture full HTML as fallback
-            if len(text) < 2000:
-                logger.warning(f"MCP: Accessibility tree too small ({len(text)} chars), capturing full HTML as fallback")
-                try:
-                    html_result = await session.call_tool("browser_evaluate", {
-                        "expression": "() => document.documentElement.outerHTML"
-                    })
-                    
-                    if html_result and html_result.content:
-                        html_text = ""
-                        for block in html_result.content:
-                            if hasattr(block, "text"):
-                                html_text += block.text
-                            elif isinstance(block, dict):
-                                html_text += block.get("text", "")
-                        
-                        if len(html_text) > len(text):
-                            logger.info(f"MCP: Using full HTML instead ({len(html_text)} chars vs {len(text)} chars)")
-                            text = html_text
-                except Exception as e:
-                    logger.debug(f"MCP: HTML fallback failed: {e}")
-            
-            # Log accessibility tree size for debugging
-            if text:
-                logger.info(f"MCP: DOM captured successfully")
-            else:
-                logger.warning(f"MCP: DOM is empty")
+
+            # Prefer storing cleaned HTML (scripts/styles removed) to keep artifacts smaller
+            # while preserving ids/names/placeholders needed for locators.
+            if html_text:
+                html_text = strip_noise_from_html(html_text, max_chars=500_000)
 
             await session.call_tool("browser_close", {})
+            return html_text, a11y_text
 
-            return text
+    @staticmethod
+    def _tool_result_text(result) -> str:
+        """Flatten MCP tool content blocks into a single string."""
+        text = ""
+        if result and getattr(result, "content", None):
+            for block in result.content:
+                if hasattr(block, "text"):
+                    text += block.text or ""
+                elif isinstance(block, dict):
+                    text += block.get("text", "") or ""
+        return text
+
+    @staticmethod
+    def _normalize_evaluate_html(raw: str) -> str:
+        """Normalize browser_evaluate output; drop MCP error payloads."""
+        import json
+        import re
+
+        text = (raw or "").strip()
+        if not text:
+            return ""
+        # Never treat tool schema/runtime errors as HTML DOM.
+        if text.startswith("### Error") or "Invalid arguments for tool" in text:
+            return ""
+
+        # @playwright/mcp wraps successful evaluates as: ### Result "<html...>"
+        if text.startswith("### Result"):
+            text = text[len("### Result") :].strip()
+
+        if text.startswith('"'):
+            # Prefer strict JSON; fall back to first..last quote slice (large HTML
+            # may contain characters that break a naive loads of the full blob).
+            decoded: Optional[str] = None
+            try:
+                value = json.loads(text)
+                if isinstance(value, str):
+                    decoded = value
+            except Exception:
+                end = text.rfind('"')
+                if end > 0:
+                    try:
+                        value = json.loads(text[: end + 1])
+                        if isinstance(value, str):
+                            decoded = value
+                    except Exception:
+                        inner = text[1:end]
+                        decoded = (
+                            inner.replace("\\\\", "\0")
+                            .replace('\\"', '"')
+                            .replace("\\n", "\n")
+                            .replace("\\r", "\r")
+                            .replace("\\t", "\t")
+                            .replace("\0", "\\")
+                        )
+            if decoded is not None:
+                text = decoded
+
+        # Drop any non-HTML prefix; keep from the document root tag.
+        match = re.search(r"(?is)<(!DOCTYPE\s+html|html)\b", text)
+        if match:
+            text = text[match.start() :]
+        if "<" not in text:
+            return ""
+        return text.strip()
+
+    @classmethod
+    async def _evaluate_outer_html(cls, session) -> str:
+        """Return documentElement.outerHTML via MCP browser_evaluate.
+
+        Current ``@playwright/mcp`` expects ``function`` (not ``expression``).
+        Older builds used ``expression`` — try both for compatibility.
+        """
+        js = "() => document.documentElement.outerHTML"
+        last_error = ""
+        for args in ({"function": js}, {"expression": js}):
+            try:
+                result = await session.call_tool("browser_evaluate", args)
+                html = cls._normalize_evaluate_html(cls._tool_result_text(result))
+                if html:
+                    return html
+                # Keep raw text for diagnostics when both shapes fail
+                raw = cls._tool_result_text(result)
+                if raw:
+                    last_error = raw[:300]
+            except Exception as exc:
+                last_error = str(exc)
+                logger.debug("MCP browser_evaluate with %s failed: %s", list(args), exc)
+        if last_error:
+            logger.warning(
+                "MCP browser_evaluate returned no usable HTML (%s)",
+                last_error[:200],
+            )
+        return ""
 
     @staticmethod
     def _run_async(coro):

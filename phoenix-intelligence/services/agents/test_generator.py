@@ -332,26 +332,9 @@ def _strip_fill_action_prefix(text: str) -> str:
 
 
 def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
-    """Extract (field_label, fill_value) from fill-type criteria.
-    
-    CRITICAL FIX: Respect explicit locators like id='user-name', name='password', etc.
-    These have highest priority over any LLM-generated or heuristic extraction.
-    """
+    """Extract (field_label, fill_value) from fill-type criteria."""
     quoted = _extract_quoted_value(criterion)
     cleaned = _strip_fill_action_prefix(criterion)
-    
-    # CRITICAL FIX: Extract explicit locators first (highest priority)
-    # Pattern: id='user-name', id="user-name", name='password', data-testid='login-btn', etc.
-    explicit_locator_match = re.search(
-        r"(?:id|name|data-testid|class|placeholder|aria-label)\s*=\s*['\"]([^'\"]+)['\"]",
-        criterion,
-        re.IGNORECASE
-    )
-    if explicit_locator_match:
-        explicit_locator = explicit_locator_match.group(1)
-        # Use the explicit locator as the field label
-        logger.info(f"EXPLICIT LOCATOR FOUND: {explicit_locator} from criterion: {criterion}")
-        return explicit_locator, _normalise_fill_value(quoted or cleaned)
 
     # "in the X field" or "into the X field" → extract field from that
     field_match = re.search(
@@ -407,81 +390,186 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     return "Field", quoted or "value"
 
 
+_FILL_PAIR_RE = re.compile(
+    r"[`'\"]([^`'\"]*)[`'\"]\s+(?:in|into)\s+(?:the\s+)?(.+?)\s+field",
+    re.IGNORECASE,
+)
+_EMPTY_FIELD_RE = re.compile(
+    r"(?:leave|keep)\s+(?:the\s+)?(.+?)\s+field\s+(?:completely\s+)?empty",
+    re.IGNORECASE,
+)
+_CLEAR_FIELDS_RE = re.compile(
+    r"clear\s+(?:both\s+)?(?:the\s+)?(.+?)\s+fields?(?:\s+so\s+they\s+are\s+empty)?",
+    re.IGNORECASE,
+)
+_QUOTED_BUTTON_RE = re.compile(r'[`"\']([^`"\']+)[`"\']\s+button', re.IGNORECASE)
+_QUOTED_LINK_RE = re.compile(r'[`"\']([^`"\']+)[`"\']\s+link', re.IGNORECASE)
+_ASSERTION_TEXT_RE = re.compile(
+    r"(?:e\.g\.,?\s*|such as\s*|text[:\s]+|contains?\s+|shows?\s+|displays?\s+)[`'\"]([^`'\"]+)[`'\"]",
+    re.IGNORECASE,
+)
+
+
+def _extract_all_fill_pairs(criterion: str) -> List[Tuple[str, str]]:
+    """Extract every quoted ``'value' in the Field field`` pair from a step."""
+    return [
+        (_normalise_field_label(field), _normalise_fill_value(value))
+        for value, field in _FILL_PAIR_RE.findall(criterion)
+    ]
+
+
+def _extract_empty_or_clear_fields(criterion: str) -> List[str]:
+    """Return field labels that should be cleared / left empty in *criterion*."""
+    fields: List[str] = []
+    for match in _EMPTY_FIELD_RE.finditer(criterion):
+        fields.append(_normalise_field_label(match.group(1)))
+    clear_match = _CLEAR_FIELDS_RE.search(criterion)
+    if clear_match:
+        raw = clear_match.group(1)
+        parts = re.split(r"\s*(?:,|/|and|&)\s*", raw, flags=re.IGNORECASE)
+        for part in parts:
+            label = _normalise_field_label(part)
+            if label and label.lower() not in {f.lower() for f in fields}:
+                fields.append(label)
+    return fields
+
+
+def _extract_assertion_visible_text(
+    criterion: str, expected_result: Optional[str] = None
+) -> Optional[str]:
+    """Prefer a short quoted UI string from expected result / criterion for assertions."""
+    for blob in (expected_result or "", criterion):
+        for match in _ASSERTION_TEXT_RE.finditer(blob):
+            text = match.group(1).strip()
+            if text and len(text) <= 80:
+                return text
+        quoted = _extract_quoted_value(blob)
+        if quoted and len(quoted) <= 80 and not quoted.lower().startswith("http"):
+            if re.search(
+                r"required|invalid|error|success|dashboard|welcome|denied|empty",
+                quoted,
+                re.IGNORECASE,
+            ):
+                return quoted
+    return None
+
+
+# Live HTML captured during automate/generate — used to ground heuristic locators.
+_DOM_HTML_CONTEXT: str = ""
+
+
+def set_dom_html_context(html: str = "") -> None:
+    """Set the HTML snapshot used by heuristic locator resolution (any app)."""
+    global _DOM_HTML_CONTEXT
+    _DOM_HTML_CONTEXT = html or ""
+
+
+def _extract_priority_labels_from_manual_tests(
+    manual_tests: List[Dict[str, Any]],
+) -> List[str]:
+    """Collect field/button labels from manual steps for DOM relevance ranking."""
+    labels: List[str] = []
+    seen = set()
+
+    def _add(label: str) -> None:
+        cleaned = _normalise_field_label(label)
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            labels.append(cleaned)
+
+    for test in manual_tests or []:
+        for step in test.get("steps") or []:
+            action = step.get("action") or step.get("description") or ""
+            if not action:
+                continue
+            for field, _value in _extract_all_fill_pairs(action):
+                _add(field)
+            for field in _extract_empty_or_clear_fields(action):
+                _add(field)
+            # Single-field fills
+            if re.search(r"\b(enter|type|fill|input|provide)\b", action, re.IGNORECASE):
+                field, _value = _extract_fill_target_and_value(action)
+                if field and field != "Field":
+                    _add(field)
+            if re.search(r"\b(click|press|tap|submit)\b", action, re.IGNORECASE) or re.search(
+                r"\bbutton\b", action, re.IGNORECASE
+            ):
+                _role, btn = _extract_click_target(action)
+                if btn:
+                    _add(btn)
+            quoted = _extract_quoted_value(action)
+            # Menu / link targets like 'Leave'
+            if quoted and re.search(r"\b(menu|nav|link|click)\b", action, re.IGNORECASE):
+                _add(quoted)
+        # Also scan overall expected result for short UI strings
+        expected = test.get("expected_result") or ""
+        for match in re.finditer(r"[`'\"]([^`'\"]{1,40})[`'\"]", expected):
+            token = match.group(1).strip()
+            if token and not token.lower().startswith("http"):
+                _add(token)
+    return labels
+
+
+def _rebuild_dom_prompt_snapshot(
+    *,
+    html: str = "",
+    a11y: str = "",
+    priority_labels: Optional[List[str]] = None,
+    fallback: str = "",
+) -> str:
+    """Build a relevance-ranked LLM DOM snapshot from captured HTML/a11y."""
+    if not html and not a11y:
+        return fallback or ""
+    try:
+        from services.dom_grounding import build_llm_dom_context
+
+        return (
+            build_llm_dom_context(
+                html=html,
+                accessibility_tree=a11y,
+                priority_labels=priority_labels or (),
+            )
+            or fallback
+            or ""
+        )
+    except Exception:
+        logger.debug("Failed to rebuild DOM prompt snapshot", exc_info=True)
+        return fallback or ""
+
+
+def _locator_slug(field: str) -> str:
+    """CSS/test-id token with quotes and punctuation stripped."""
+    normalised = _normalise_field_label(field)
+    slug = re.sub(r"[^a-z0-9]+", "-", normalised.lower()).strip("-")
+    return slug or "element"
+
+
 def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
-    """Build a generic DOM-aware locator expression for a semantic target.
-    
-    CRITICAL FIX: If field is an explicit locator (e.g., 'user-name' from id='user-name'),
-    use it directly as a CSS selector with highest priority.
+    """Build a DOM-aware locator expression for a semantic target.
+
+    Prefer attributes discovered in the live HTML snapshot when available
+    (works for any application). Fall back to safe heuristic chains.
     """
+    try:
+        from services.dom_grounding import resolve_locator_from_dom
+
+        grounded = resolve_locator_from_dom(field, kind=kind, html=_DOM_HTML_CONTEXT)
+        if grounded:
+            return grounded
+    except Exception:
+        logger.debug("DOM-grounded locator resolution failed for %r", field, exc_info=True)
+
     label = _safe_py_str(_normalise_field_label(field))
-    token = _safe_py_str(re.sub(r"[^a-z0-9]+", "-", field.lower()).strip("-"))
-    css_token = _safe_py_str(field.lower().replace(" ", "-"))
-    
-    # CRITICAL FIX: Check if field is an explicit locator (looks like CSS selector)
-    # Patterns: 'user-name', 'login-btn', 'password' (single words or hyphenated without spaces)
-    if re.match(r'^[a-z][a-z0-9\-_]*$', field.lower()):
-        # This looks like an explicit locator (CSS class or ID without # prefix)
-        # Add # prefix for ID selectors, . for class selectors
-        if field.lower().startswith('btn-') or field.lower().endswith('-btn'):
-            # Likely a button class
-            return f'page.locator(".{field}")'
-        else:
-            # Use as ID selector (most common for explicit locators like 'user-name')
-            return f'page.locator("#{field}")'
-    
-    # Enhanced patterns for common field types
-    field_lower = field.lower()
-    
+    token = _safe_py_str(_locator_slug(field))
+    css_token = token
     if kind == "button":
-        # For buttons, try multiple strategies
         return (
             f'page.get_by_test_id("{token}")'
             f'.or_(page.locator("[data-test=\'{token}\'], [data-testid=\'{token}\'], #{css_token}, input[name=\'{css_token}\']"))'
             f'.or_(page.get_by_role("button", name=re.compile(r"^{label}$", re.IGNORECASE)))'
-            f'.or_(page.get_by_role("button", name=re.compile(r"{label}", re.IGNORECASE)))'  # Partial match
             f'.or_(page.locator("input[type=\'submit\'][value=\'{label}\']"))'
-            f'.or_(page.locator("button[type=\'submit\']"))'  # Generic submit button
         )
-    
-    # Enhanced input field locators with type-specific fallbacks
-    if "username" in field_lower or "email" in field_lower or "user" in field_lower:
-        return (
-            f'page.get_by_test_id("username")'
-            f'.or_(page.get_by_test_id("email"))'
-            f'.or_(page.get_by_placeholder("{label}", exact=True))'
-            f'.or_(page.get_by_placeholder("Username", exact=True))'
-            f'.or_(page.get_by_placeholder("Email", exact=True))'
-            f'.or_(page.get_by_label("{label}", exact=True))'
-            f'.or_(page.get_by_label("Username", exact=True))'
-            f'.or_(page.get_by_label("Email", exact=True))'
-            f'.or_(page.locator("[data-test=\'username\'], [data-testid=\'username\'], [data-test=\'email\'], [data-testid=\'email\']"))'
-            f'.or_(page.locator("input[name=\'username\'], input[name=\'email\'], input[type=\'email\']"))'
-        )
-    
-    if "password" in field_lower:
-        return (
-            f'page.get_by_test_id("password")'
-            f'.or_(page.get_by_placeholder("{label}", exact=True))'
-            f'.or_(page.get_by_placeholder("Password", exact=True))'
-            f'.or_(page.get_by_label("{label}", exact=True))'
-            f'.or_(page.get_by_label("Password", exact=True))'
-            f'.or_(page.locator("[data-test=\'password\'], [data-testid=\'password\']"))'
-            f'.or_(page.locator("input[name=\'password\'], input[type=\'password\']"))'
-        )
-    
-    if "sign in" in field_lower or "login" in field_lower or "submit" in field_lower:
-        return (
-            f'page.get_by_test_id("sign-in")'
-            f'.or_(page.get_by_test_id("login")'
-            f'.or_(page.get_by_test_id("submit"))'
-            f'.or_(page.get_by_role("button", name=re.compile(r"Sign In", re.IGNORECASE)))'
-            f'.or_(page.get_by_role("button", name=re.compile(r"Login", re.IGNORECASE)))'
-            f'.or_(page.get_by_role("button", name=re.compile(r"Submit", re.IGNORECASE)))'
-            f'.or_(page.locator("input[type=\'submit\']"))'
-            f'.or_(page.locator("button[type=\'submit\']"))'
-        )
-    
-    # Generic fallback for other fields
     return (
         f'page.get_by_test_id("{token}")'
         f'.or_(page.get_by_placeholder("{label}", exact=True))'
@@ -490,9 +578,38 @@ def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
     )
 
 
+def _extract_url_fragment(*texts: Optional[str]) -> Optional[str]:
+    """Return a URL path fragment from step text or expected result, if present."""
+    blob = " ".join(t for t in texts if t)
+    match = re.search(r"/[\w/-]+", blob)
+    if match:
+        return match.group(0).rstrip("/")
+    if re.search(r"\bdashboard\b", blob, re.IGNORECASE):
+        return "dashboard"
+    return None
+
+
+def _fill_ready_line(field: str, value: str) -> str:
+    locator_expr = _semantic_locator_expr(field)
+    desc = "Password field" if "password" in field.lower() else f"{_safe_py_str(field)} field"
+    return f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "{desc}")'
+
+
+def _click_ready_button_line(label: str) -> str:
+    locator_expr = _semantic_locator_expr(label, kind="button")
+    return f'    click_ready(page, {locator_expr}, "{_safe_py_str(label)} button")'
+
+
 def _extract_click_target(criterion: str) -> Tuple[str, str]:
     """Return (role_hint, label) for click-type criteria.  role_hint ∈ {'button','link','text'}"""
     lower = criterion.lower()
+    quoted_button = _QUOTED_BUTTON_RE.search(criterion)
+    if quoted_button:
+        return "button", _normalise_field_label(quoted_button.group(1))
+    quoted_link = _QUOTED_LINK_RE.search(criterion)
+    if quoted_link:
+        return "link", _normalise_field_label(quoted_link.group(1))
+
     cleaned = re.sub(
         r"^(?:click|press|tap|submit)\s+(?:the\s+|on\s+(?:the\s+)?)?",
         "",
@@ -503,11 +620,11 @@ def _extract_click_target(criterion: str) -> Tuple[str, str]:
     quoted = (_extract_quoted_value(criterion) or cleaned).strip("`'\"*. ")
 
     if "button" in lower or re.search(r"\b(log\s*in|login|sign\s*in|submit|continue|save|next)\b", cleaned, re.IGNORECASE):
-        label = re.sub(r"\s+button.*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return "button", label or quoted
+        label = re.sub(r"\s+button.*$", "", cleaned, flags=re.IGNORECASE).strip().strip("`'\"*. ")
+        return "button", _normalise_field_label(label or quoted)
     if "link" in lower:
-        label = re.sub(r"\s+link.*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return "link", label or quoted
+        label = re.sub(r"\s+link.*$", "", cleaned, flags=re.IGNORECASE).strip().strip("`'\"*. ")
+        return "link", _normalise_field_label(label or quoted)
     return "text", quoted
 
 
@@ -528,11 +645,7 @@ def _extract_select_option(criterion: str) -> Tuple[str, str]:
 
 
 def _extract_assertion_subject(criterion: str) -> str:
-    """Extract what should be visible/true from assertion criteria.
-    
-    Enhanced to handle dashboard verification assertions by extracting the actual
-    UI element name rather than the full descriptive text.
-    """
+    """Extract what should be visible/true from assertion criteria."""
     lower = criterion.lower()
     # Remove assertion keyword
     cleaned = re.sub(
@@ -544,39 +657,14 @@ def _extract_assertion_subject(criterion: str) -> str:
     quoted = _extract_quoted_value(criterion)
     if quoted:
         return quoted
-    
-    # Enhanced patterns for dashboard/content verification
-    # "Verify the Dashboard heading is displayed" → "Dashboard"
-    # "Verify the dashboard displays the Missed Check Ins count" → "Missed Check Ins"
-    heading_match = re.search(r"(?:the\s+)?(.+?)\s+(?:heading|title|section)\s+is\s+displayed", cleaned, re.IGNORECASE)
-    if heading_match:
-        return heading_match.group(1).strip()
-    
-    # "Verify the dashboard displays the X count" → "X"
-    count_match = re.search(r"the\s+dashboard\s+displays\s+the\s+(.+?)\s+count", cleaned, re.IGNORECASE)
-    if count_match:
-        return count_match.group(1).strip()
-    
-    # "Verify the X section is displayed" → "X"
-    section_match = re.search(r"the\s+(.+?)\s+section\s+is\s+displayed", cleaned, re.IGNORECASE)
-    if section_match:
-        return section_match.group(1).strip()
-    
-    # "Verify the X status is displayed" → "X"
-    status_match = re.search(r"the\s+(.+?)\s+status\s+is\s+displayed", cleaned, re.IGNORECASE)
-    if status_match:
-        return status_match.group(1).strip()
-    
     # "the Secure Area page is shown" → "Secure Area"
     title_match = re.search(r"the\s+(.+?)\s+(?:page|section|area|screen)", cleaned, re.IGNORECASE)
     if title_match:
         return title_match.group(1).strip()
-    
     # "URL contains /secure" → /secure
     url_match = re.search(r"url\s+(?:contains|includes|is|=)\s+['\"]?([^\s'\"]+)", lower)
     if url_match:
         return url_match.group(1).strip()
-    
     return cleaned[:60]
 
 
@@ -584,6 +672,7 @@ def _criterion_to_playwright_lines(
     criterion: str,
     step_num: int,
     application_url: Optional[str] = None,
+    expected_result: Optional[str] = None,
 ) -> List[str]:
     """Map a single acceptance criterion → list of indented Playwright code lines."""
     control = _classify_control(criterion, application_url)
@@ -593,9 +682,7 @@ def _criterion_to_playwright_lines(
     if control == ControlType.LOGIN:
         # Extract URL, username, password from step text
         url_match = _LOGIN_URL_RE.search(criterion)
-        url = url_match.group(0).rstrip(".,)") if url_match else application_url
-        if not url:
-            raise ValueError("Login step requires URL either in step text or via --url parameter")
+        url = url_match.group(0).rstrip(".,)") if url_match else (application_url or "https://example.com")
         user_match = _LOGIN_USER_RE.search(criterion)
         username_val = user_match.group(1).strip().strip("'\"") if user_match else None
         pass_match = _LOGIN_PASS_RE.search(criterion)
@@ -612,6 +699,36 @@ def _criterion_to_playwright_lines(
             f'    click_ready(page, {login_locator}, "Login button")',
             '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
+
+    elif (
+        (
+            _extract_all_fill_pairs(criterion)
+            or _extract_empty_or_clear_fields(criterion)
+        )
+        and control
+        in {
+            ControlType.TEXT_INPUT,
+            ControlType.PASSWORD_INPUT,
+            ControlType.EMAIL_INPUT,
+            ControlType.BUTTON,
+            ControlType.FORM_SUBMIT,
+            ControlType.UNKNOWN,
+        }
+    ):
+        filled_fields = {field.lower() for field, _ in _extract_all_fill_pairs(criterion)}
+        for field in _extract_empty_or_clear_fields(criterion):
+            if field.lower() not in filled_fields:
+                lines.append(_fill_ready_line(field, ""))
+        for field, value in _extract_all_fill_pairs(criterion):
+            lines.append(_fill_ready_line(field, value))
+        if control in {ControlType.BUTTON, ControlType.FORM_SUBMIT} or re.search(
+            r"\b(?:click|press|tap)\b.*\bbutton\b", lower
+        ):
+            _, label = _extract_click_target(criterion)
+            # Guard against treating the whole compound sentence as the button label.
+            if len(label) > 40 or "field" in label.lower() or "clear" in label.lower():
+                label = "Login"
+            lines.append(_click_ready_button_line(label))
 
     elif control == ControlType.MENU_CLICK:
         # Extract the menu item label — strip "Click [the] X in/from the [navigation] menu/nav/sidebar/submenu"
@@ -630,15 +747,23 @@ def _criterion_to_playwright_lines(
         ).strip().strip("'\"")
         # Prefer quoted value if present
         label = _extract_quoted_value(criterion) or label
+        label = _normalise_field_label(label)
         lines += [
-            f'    click_ready(page, page.get_by_role("link", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} navigation link")',
-            f'    expect(page.get_by_role("link", name="{_safe_py_str(label)}", exact=True)).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
+            f'    click_ready(page, page.get_by_role("link", name=re.compile(r"^{re.escape(label)}$", re.IGNORECASE)), "{_safe_py_str(label)} navigation link")',
         ]
+        url_frag = _extract_url_fragment(expected_result, criterion)
+        if url_frag:
+            lines.append(
+                f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag)}.*"), timeout=NAVIGATION_TIMEOUT_MS)'
+            )
+        else:
+            lines.append(
+                f'    expect(page.get_by_role("link", name=re.compile(r"^{re.escape(label)}$", re.IGNORECASE)).first)'
+                f".to_be_visible(timeout=ASSERTION_TIMEOUT_MS)"
+            )
 
     elif control == ControlType.NAVIGATE:
-        url = _extract_quoted_value(criterion) or application_url
-        if not url:
-            raise ValueError("Navigate step requires URL either in step text or via --url parameter")
+        url = _extract_quoted_value(criterion) or application_url or "https://example.com"
         lines += [
             f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
             '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
@@ -756,39 +881,66 @@ def _criterion_to_playwright_lines(
 
     elif control == ControlType.ASSERTION:
         subject = _extract_assertion_subject(criterion)
-        if re.search(r"\b(page|screen|view)\s+is\s+displayed\b", lower):
+        visible_text = _extract_assertion_visible_text(criterion, expected_result)
+        # "Verify the 'Apply' button ... is enabled and clickable" → click then assert validation.
+        if re.search(r"\b(enabled|clickable)\b", lower) and re.search(r"\bbutton\b", lower):
+            quoted_btn = _QUOTED_BUTTON_RE.search(criterion) or _QUOTED_BUTTON_RE.search(expected_result or "")
+            btn_label = _normalise_field_label(quoted_btn.group(1) if quoted_btn else "Apply")
+            lines.append(_click_ready_button_line(btn_label))
+            text = visible_text or "Required"
+            lines.append(
+                f'    expect(page.get_by_text(re.compile(r"{re.escape(text)}", re.IGNORECASE)).first)'
+                f".to_be_visible(timeout=ASSERTION_TIMEOUT_MS)"
+            )
+        elif re.search(r"\b(page|screen|view)\s+is\s+displayed\b", lower):
             lines.append('    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)')
             lines.append(_manual_review_warning_line("Page-state assertion requires DOM-derived business evidence", criterion))
         elif any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
-            # Enhanced URL assertion handling for dashboard redirection
-            # "user is successfully redirected to the Dashboard" → match dashboard in URL
-            if "dashboard" in lower and "redirect" in lower:
+            url_frag = _extract_url_fragment(subject, expected_result, criterion)
+            if visible_text:
                 lines.append(
-                    f'    expect(page).to_have_url(re.compile(r".*dashboard.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)'
+                    f'    expect(page.get_by_text(re.compile(r"{re.escape(visible_text)}", re.IGNORECASE)).first)'
+                    f".to_be_visible(timeout=ASSERTION_TIMEOUT_MS)"
                 )
-            elif "login" in lower and "redirect" in lower:
+            if url_frag:
                 lines.append(
-                    f'    expect(page).to_have_url(re.compile(r".*login.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)'
+                    f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag)}.*"))'
                 )
-            else:
-                url_frag = re.search(r"[/][\w/-]+", subject)
-                if url_frag:
-                    lines.append(
-                        f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"))'
+            elif not visible_text:
+                lines.append(
+                    _manual_review_warning_line(
+                        "URL assertion has no path fragment in the step or expected result",
+                        criterion,
                     )
-                else:
-                    lines.append(
-                        f'    expect(page).to_have_url(re.compile(r".*{re.escape(subject)}.*"))'
-                    )
+                )
+                lines.append('    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)')
         elif "title" in lower:
             lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
         else:
-            if _looks_like_placeholder_assertion(subject):
-                lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
-            else:
+            text = visible_text
+            if not text and not _looks_like_placeholder_assertion(subject):
+                # Avoid asserting the full verification sentence as on-page text.
+                if len(subject) <= 40:
+                    text = subject
+            if text:
                 lines.append(
-                    f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=True), "{_safe_py_str(subject)} assertion target")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)'
+                    f'    expect(page.get_by_text(re.compile(r"{re.escape(text)}", re.IGNORECASE)).first)'
+                    f".to_be_visible(timeout=ASSERTION_TIMEOUT_MS)"
                 )
+                url_frag = _extract_url_fragment(expected_result, criterion)
+                if url_frag:
+                    lines.append(
+                        f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag)}.*"))'
+                    )
+            else:
+                lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
+                url_frag = _extract_url_fragment(expected_result, criterion)
+                if url_frag:
+                    lines.append(
+                        f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag)}.*"))'
+                    )
+                else:
+                    lines.append('    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)')
 
     elif control == ControlType.LOGIN_CREDENTIALS:
         # "Login using valid credentials" — use env vars; no URL extraction needed
@@ -1392,6 +1544,21 @@ def _needs_authenticated_page(preconditions: str) -> bool:
     return any(phrase in low for phrase in _AUTH_PRECONDITION_PHRASES)
 
 
+def _adapt_flat_line_to_pom(ln: str) -> str:
+    """Rewrite identifier uses of ``page`` for a page-object method body.
+
+    Leaves the word ``page`` inside string/regex literals unchanged so that
+    generated assertions like ``r".*current page URL.*"`` are not mangled.
+    """
+    if ln.lstrip().startswith("#"):
+        return ln
+    ln = re.sub(r"(?<![\w.])page\.", "self._page.", ln)
+    ln = re.sub(r"(?<=[(, ])page(?=\s*[,)])", "self._page", ln)
+    if "fill_ready(" in ln or "click_ready(" in ln:
+        ln = re.sub(r"\.first\s*(?=[,\)])", "", ln)
+    return ln
+
+
 def _extract_test_body_lines(script_code: str) -> List[str]:
     """Extract the body lines of the first ``test_*`` function in *script_code*.
 
@@ -1434,100 +1601,6 @@ def _extract_test_body_lines(script_code: str) -> List[str]:
         return result
 
     return []
-
-
-def _apply_explicit_locator_fixes(script_code: str, manual_test: Dict[str, Any]) -> str:
-    """Post-process generated script to respect explicit locators from manual test criteria.
-    
-    CRITICAL FIX: Replace fabricated locators with user-specified ones like id='user-name'
-    """
-    logger.info(f"DEBUG: _apply_explicit_locator_fixes called. manual_test keys: {manual_test.keys()}")
-    logger.info(f"DEBUG: manual_test structure: {manual_test}")
-    
-    steps = manual_test.get("steps", [])
-    logger.info(f"DEBUG: Steps found: {len(steps)}")
-    if not steps:
-        logger.info(f"DEBUG: No steps found, returning original script")
-        return script_code
-    
-    # Build a mapping of explicit locators from manual test criteria
-    explicit_locators = {}
-    for step in steps:
-        action = step.get("action", "")
-        logger.info(f"DEBUG: Processing step action: {action}")
-        # Extract explicit locators: id='user-name', name='password', etc.
-        # Match: id='user-name' or id="user-name" or id=user-name
-        for match in re.finditer(r"(?:id|name|data-testid|class|placeholder|aria-label)\s*=\s*['\"]?([^'\"]+)['\"]?", action, re.IGNORECASE):
-            locator_value = match.group(1)
-            logger.info(f"DEBUG: Found explicit locator: {locator_value} in action: {action}")
-            # Map common field names to their explicit locators
-            if 'user-name' in action.lower() or 'username' in action.lower():
-                explicit_locators['username'] = locator_value
-            elif 'password' in action.lower():
-                explicit_locators['password'] = locator_value
-            elif 'login' in action.lower() or 'login-button' in action.lower():
-                explicit_locators['login'] = locator_value
-    
-    logger.info(f"DEBUG: Explicit locators mapping: {explicit_locators}")
-    
-    # Apply fixes to the script
-    if explicit_locators:
-        logger.info(f"DEBUG: Applying locator fixes to script. Found {len(explicit_locators)} explicit locators")
-        lines = script_code.split('\n')
-        fixed_lines = []
-        
-        for line in lines:
-            fixed_line = line
-            # Replace fabricated username locators with explicit id='user-name'
-            if 'username' in explicit_locators and 'username' in line.lower():
-                # Replace with the explicit locator
-                explicit_id = explicit_locators['username']
-                # Replace fabricated testid calls with the explicit ID selector (handles both page. and self._page.)
-                fixed_line = re.sub(
-                    r'(?:page|self\._page)\.get_by_test_id\(["\'].*?["\']\)',
-                    f'self._page.locator("#{explicit_id}")',
-                    fixed_line
-                )
-                # Replace entire chain of .or_() calls with just the explicit locator
-                fixed_line = re.sub(
-                    r'self\._page\.locator\("#[^"]+"\)\.or_\(.*?\)',
-                    f'self._page.locator("#{explicit_id}")',
-                    fixed_line
-                )
-            
-            # Replace fabricated password locators with explicit id='password'
-            elif 'password' in explicit_locators and 'password' in line.lower():
-                explicit_id = explicit_locators['password']
-                fixed_line = re.sub(
-                    r'(?:page|self\._page)\.get_by_test_id\(["\'].*?["\']\)',
-                    f'self._page.locator("#{explicit_id}")',
-                    fixed_line
-                )
-                fixed_line = re.sub(
-                    r'self\._page\.locator\("#[^"]+"\)\.or_\(.*?\)',
-                    f'self._page.locator("#{explicit_id}")',
-                    fixed_line
-                )
-            
-            # Replace fabricated login button locators
-            elif 'login' in explicit_locators and 'login' in line.lower():
-                explicit_id = explicit_locators['login']
-                fixed_line = re.sub(
-                    r'(?:page|self\._page)\.get_by_test_id\(["\'].*?["\']\)',
-                    f'self._page.locator("#{explicit_id}")',
-                    fixed_line
-                )
-                fixed_line = re.sub(
-                    r'self\._page\.locator\("#[^"]+"\)\.or_\(.*?\)',
-                    f'self._page.locator("#{explicit_id}")',
-                    fixed_line
-                )
-            
-            fixed_lines.append(fixed_line)
-        
-        return '\n'.join(fixed_lines)
-    
-    return script_code
 
 
 def _synthesize_pom_bundle(
@@ -1583,19 +1656,7 @@ def _synthesize_pom_bundle(
     # Remove .first from locator chains in test method body (not in helper functions)
     processed_lines = []
     for ln in interaction_lines:
-        if ln.lstrip().startswith("#"):
-            processed_lines.append(ln)
-        else:
-            # First replace page references
-            ln = re.sub(r"\bpage\b", "self._page", re.sub(r"(?<!\.)page\.", "self._page.", ln))
-            # Remove .first from locator chains in test method body
-            # Only remove if it's part of a fill_ready or click_ready call (test actions)
-            # Keep .first in helper function definitions
-            if "fill_ready(" in ln or "click_ready(" in ln:
-                # Remove .first before comma or closing parenthesis
-                # Handle both with and without spaces
-                ln = re.sub(r'\.first\s*(?=[,\)])', '', ln)
-            processed_lines.append(ln)
+        processed_lines.append(_adapt_flat_line_to_pom(ln))
     interaction_lines = processed_lines
     
     # CORE FIX: If no interaction lines after removing navigation, add basic interaction
@@ -1938,7 +1999,6 @@ class TestGeneratorAgent(BaseAgent):
         # Fetch the page snapshot once for all tests.
         # Phase D: best-effort grounding — never block generation on MCP failure.
         page_snapshot = ""
-        mcp_success = False
         if self.mcp_client and application_url:
             logger.info("=== DOM SNAPSHOT CAPTURE ===")
             logger.info("Inspecting page via MCP: %s", application_url)
@@ -1961,38 +2021,33 @@ class TestGeneratorAgent(BaseAgent):
                     execution_id
                 )
                 try:
-                    page_snapshot = _mcp_fut.result(timeout=300) or ""  # Increased timeout to 300s for slow applications
-                    if page_snapshot:
-                        mcp_success = True
-                        logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
-                        logger.info("DOM snapshot preview (first 500 chars): %s", page_snapshot[:500])
-                        
-                        # Extract and log key DOM statistics
-                        element_count = page_snapshot.count("element") or page_snapshot.count("role")
-                        logger.info("Estimated DOM elements: %d", element_count)
-                        
-                        # Validate DOM contains expected login elements
-                        expected_login_elements = ["button", "input", "textbox", "form"]
-                        found_login_elements = [elem for elem in expected_login_elements if elem.lower() in page_snapshot.lower()]
-                        if found_login_elements:
-                            logger.info(f"✓ DOM contains expected login elements: {found_login_elements}")
-                        else:
-                            logger.warning(f"⚠ DOM snapshot missing expected login elements")
-                            
-                        # Check for specific attribute patterns
-                        if any(attr in page_snapshot.lower() for attr in ["name=", "data-testid=", "placeholder=", "id="]):
-                            logger.info("✓ DOM contains searchable attributes")
-                        else:
-                            logger.warning("⚠ DOM snapshot may lack searchable attributes")
-                    else:
-                        logger.warning("MCP snapshot returned empty")
-                    
+                    page_snapshot = _mcp_fut.result(timeout=60) or ""
+                    html = getattr(self.mcp_client, "last_html", "") or ""
+                    a11y = getattr(self.mcp_client, "last_accessibility_tree", "") or ""
+                    set_dom_html_context(html)
+                    priority_labels = _extract_priority_labels_from_manual_tests(manual_tests)
+                    if html or a11y:
+                        page_snapshot = _rebuild_dom_prompt_snapshot(
+                            html=html,
+                            a11y=a11y,
+                            priority_labels=priority_labels,
+                            fallback=page_snapshot,
+                        )
+                    logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                    logger.info("DOM snapshot preview (first 500 chars): %s", page_snapshot[:500])
+                    logger.info(
+                        "Grounding sources: html=%d chars a11y=%d chars priority_labels=%s",
+                        len(html),
+                        len(a11y),
+                        priority_labels[:12],
+                    )
                 except _cf.TimeoutError:
                     logger.warning(
-                        "MCP inspect_page timed out after 300s for %s — proceeding without snapshot",
+                        "MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
                         application_url,
                     )
                     page_snapshot = ""
+                    set_dom_html_context("")
                 finally:
                     _mcp_pool.shutdown(wait=False)  # don't block; hung thread runs in background
             except Exception as _mcp_exc:
@@ -2003,12 +2058,7 @@ class TestGeneratorAgent(BaseAgent):
                     application_url, _mcp_exc,
                 )
                 page_snapshot = ""
-        
-        # Log MCP success status for debugging
-        if mcp_success:
-            logger.info("✓ MCP DOM capture successful - locators will be grounded in real DOM")
-        else:
-            logger.warning("⚠ MCP DOM capture failed - locators will use heuristic patterns")
+                set_dom_html_context("")
 
         results = []
         for manual_test in manual_tests:
@@ -2070,12 +2120,27 @@ class TestGeneratorAgent(BaseAgent):
             }
 
         try:
+            # Re-rank DOM context for this specific manual test's labels when HTML is available.
+            test_labels = _extract_priority_labels_from_manual_tests([manual_test])
+            html = _DOM_HTML_CONTEXT
+            a11y = ""
+            if self.mcp_client:
+                a11y = getattr(self.mcp_client, "last_accessibility_tree", "") or ""
+            effective_snapshot = page_snapshot
+            if html or a11y:
+                effective_snapshot = _rebuild_dom_prompt_snapshot(
+                    html=html,
+                    a11y=a11y,
+                    priority_labels=test_labels,
+                    fallback=page_snapshot,
+                )
+
             system_prompt_template = _prompt_loader.get("automation_from_manual")
             system_prompt = _safe_substitute(
                 system_prompt_template,
                 knowledge_context=knowledge_context or "(no additional context)",
                 manifest=manifest or "(no manifest available)",
-                dom_snapshot=page_snapshot or "(no snapshot available)",
+                dom_snapshot=effective_snapshot or "(no snapshot available)",
             )
 
             steps_text = self._format_manual_steps_for_prompt(manual_test)
@@ -2099,20 +2164,20 @@ class TestGeneratorAgent(BaseAgent):
                 f"## Application URL\n{application_url or 'N/A'}",
             ]
 
-            if page_snapshot:
+            if effective_snapshot:
                 user_parts += [
                     "",
-                    "## Live DOM Snapshot (ground EVERY locator in this snapshot - MANDATORY)",
-                    page_snapshot[:15000],  # Increased to 15000 for better locator context
+                    "## Live DOM Snapshot (ground every locator in this snapshot)",
+                    effective_snapshot,
                     "",
-                    "## CRITICAL DOM PARSING REQUIREMENTS",
-                    "You MUST extract locators from the DOM snapshot above. Do NOT use heuristic patterns.",
-                    "1. Search the DOM snapshot for EXACT attribute matches for each step",
-                    "2. Extract role and name from accessibility tree lines: element 'button' name='Log in' role='button'",
-                    "3. Copy attribute values VERBATIM - do not modify or guess",
-                    "4. If an attribute doesn't exist in DOM, mark as verified_in_snapshot: false",
-                    "5. Priority: data-testid > id > name > placeholder > aria-label > role",
-                    "6. Create OR-chained locators when multiple valid attributes exist",
+                    "## DOM Parsing Instructions",
+                    "The snapshot includes a relevance-ranked interactive-element map (preferred_locator included).",
+                    "1. Prefer preferred_locator from the map when present — it is chosen for uniqueness (strict-mode safe)",
+                    "2. Otherwise use REAL attributes: id, name, data-testid, placeholder, aria-label, type, value",
+                    "3. Copy attribute values VERBATIM - do not invent ids like #username when the DOM shows a different id",
+                    "4. Use accessibility roles/names only when HTML attributes are missing",
+                    "5. If an attribute doesn't exist in the snapshot, do NOT invent it - mark as UNGROUNDABLE",
+                    "6. Avoid page-wide get_by_text / bare role clicks that can match multiple nodes",
                 ]
             else:
                 user_parts += [
@@ -2155,38 +2220,20 @@ class TestGeneratorAgent(BaseAgent):
             )
             logger.info("System prompt length: %d chars", len(system_prompt))
             logger.info("User prompt length: %d chars", len(user_prompt))
-            logger.info("DOM snapshot included: %s (%d chars)", "Yes" if page_snapshot else "No", len(page_snapshot) if page_snapshot else 0)
+            logger.info("DOM snapshot included: %s (%d chars)", "Yes" if effective_snapshot else "No", len(effective_snapshot) if effective_snapshot else 0)
             
-            try:
-                raw = self.llm_client.generate(system_prompt, user_prompt)
-                logger.info("LLM response received (%d chars)", len(raw))
-                
-                script, locators, recommendations = _parse_structured_v2_output(raw)
-            except Exception as llm_exc:
-                # CRITICAL FIX: Fall back to heuristic generation when LLM fails (e.g., credit issues)
-                logger.error(
-                    "LLM generation failed (%s: %s) — falling back to heuristic generation",
-                    type(llm_exc).__name__,
-                    str(llm_exc)
-                )
-                # Use heuristic fallback which now respects explicit locators
-                script = self._build_fallback_script_from_manual_test(
-                    manual_test=manual_test,
-                    application_url=application_url,
-                )
-                locators = []
-                recommendations = [
-                    f"LLM generation failed ({type(llm_exc).__name__}: {str(llm_exc)}) — "
-                    f"Used heuristic fallback which respects explicit locators from manual test criteria."
-                ]
+            raw = self.llm_client.generate(system_prompt, user_prompt)
+            logger.info("LLM response received (%d chars)", len(raw))
+            
+            script, locators, recommendations = _parse_structured_v2_output(raw)
             logger.info("Parsed LLM output: script (%d chars), locators (%d items), recommendations (%d items)", 
                        len(script), len(locators), len(recommendations))
             
             # Validate locators if DOM snapshot is available
-            if page_snapshot and locators:
+            if effective_snapshot and locators:
                 logger.info("=== LOCATOR VALIDATION ===")
                 logger.info("Validating %d generated locators against DOM snapshot", len(locators))
-                validator = LocatorValidator(dom_snapshot=page_snapshot)
+                validator = LocatorValidator(dom_snapshot=effective_snapshot)
                 valid_locators, invalid_locators = validator.validate_locators_batch(locators)
                 
                 # Log validation results
@@ -2233,9 +2280,9 @@ class TestGeneratorAgent(BaseAgent):
             normalised = _normalise_generated_script(script)
             
             # Apply post-LLM locator correction for field mapping errors
-            if page_snapshot:
+            if effective_snapshot:
                 logger.info("=== POST-LLM LOCATOR CORRECTION ===")
-                corrector = LocatorCorrector(dom_snapshot=page_snapshot)
+                corrector = LocatorCorrector(dom_snapshot=effective_snapshot)
                 
                 # Extract step descriptions from manual test for context
                 step_descriptions = [
@@ -2382,14 +2429,12 @@ class TestGeneratorAgent(BaseAgent):
             manual_test.get("name", ""),
         )
         steps: List[Dict[str, Any]] = manual_test.get("steps", [])
-        url = application_url
-        if not url:
-            raise ValueError("Manual test requires application URL via --url parameter for heuristic fallback")
+        url = application_url or "https://example.com"
 
         body_lines: List[str] = []
 
         # Always start with navigation (this will be preserved in POM mode)
-        body_lines.append(f'    page.goto("{url}", timeout=300_000)')  # Increased timeout to 300s
+        body_lines.append(f'    page.goto("{url}", timeout=60_000)')
         body_lines.append('    page.wait_for_load_state("domcontentloaded")')
         body_lines.append('    expect(page.locator("body")).to_be_visible()')
         body_lines.append("")  # Empty line for readability
@@ -2409,7 +2454,9 @@ class TestGeneratorAgent(BaseAgent):
                 logger.info(f"DEBUG: Extracted field='{field}', value='{value}'")
                 
                 # Generate meaningful Playwright code for each step
-                playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
+                playwright_lines = _criterion_to_playwright_lines(
+                    action, step_num, url, expected_result=expected
+                )
                 playwright_lines = [ln for ln in playwright_lines if not ln.startswith(f"    # Step {step_num}:")]
                 
                 # CRITICAL FIX: If no meaningful lines were generated, create basic functional code
@@ -2474,12 +2521,10 @@ class TestGeneratorAgent(BaseAgent):
         risk_level: Optional[str],
     ) -> List[Dict[str, Any]]:
         """Legacy single-script fallback used only when no manual tests exist."""
-        url = application_url
-        if not url:
-            raise ValueError("Single automation fallback requires application URL via --url parameter")
+        url = application_url or "https://example.com"
         body_lines: List[str] = [
             "    # Navigate to target URL",
-            f'    page.goto("{url}", timeout=300_000)',  # Increased timeout to 300s
+            f'    page.goto("{url}", timeout=60_000)',
             '    page.wait_for_load_state("domcontentloaded")',
             "",
         ]
@@ -2662,30 +2707,36 @@ class TestGeneratorAgent(BaseAgent):
                     execution_id
                 )
                 try:
-                    page_snapshot = _mcp_fut.result(timeout=300) or ""  # Increased timeout to 300s for slow applications
+                    page_snapshot = _mcp_fut.result(timeout=60) or ""
+                    html = getattr(self.mcp_client, "last_html", "") or ""
+                    a11y = getattr(self.mcp_client, "last_accessibility_tree", "") or ""
+                    set_dom_html_context(html)
+                    priority_labels = _extract_priority_labels_from_manual_tests(manual_tests)
+                    if html or a11y:
+                        page_snapshot = _rebuild_dom_prompt_snapshot(
+                            html=html,
+                            a11y=a11y,
+                            priority_labels=priority_labels,
+                            fallback=page_snapshot,
+                        )
                     if page_snapshot:
-                        logger.info(f"[PHOENIX AUTOMATE] ✓ MCP DOM capture SUCCESS - {len(page_snapshot)} chars")
-                        # Verify DOM snapshot contains expected elements
-                        expected_elements = ["button", "input", "textbox", "form"]
-                        found_elements = [elem for elem in expected_elements if elem.lower() in page_snapshot.lower()]
-                        if found_elements:
-                            logger.info(f"[PHOENIX AUTOMATE] ✓ DOM contains expected elements: {found_elements}")
-                        else:
-                            logger.warning(f"[PHOENIX AUTOMATE] ⚠ DOM snapshot missing expected elements")
-                        
-                        # Check for specific attribute patterns
-                        if any(attr in page_snapshot.lower() for attr in ["name=", "data-testid=", "placeholder=", "id="]):
-                            logger.info("[PHOENIX AUTOMATE] ✓ DOM contains searchable attributes")
-                        else:
-                            logger.warning("[PHOENIX AUTOMATE] ⚠ DOM snapshot may lack searchable attributes")
+                        logger.info(
+                            "[PHOENIX AUTOMATE] MCP DOM capture SUCCESS - %d chars "
+                            "(html=%d a11y=%d labels=%d)",
+                            len(page_snapshot),
+                            len(html),
+                            len(a11y),
+                            len(priority_labels),
+                        )
                     else:
-                        logger.warning(f"[PHOENIX AUTOMATE] ⚠ MCP DOM capture returned empty")
+                        logger.warning("[PHOENIX AUTOMATE] MCP DOM capture returned empty")
                 except _cf.TimeoutError:
                     logger.warning(
-                        "[PHOENIX AUTOMATE] MCP inspect_page timed out after 300s for %s — proceeding without snapshot",
+                        "[PHOENIX AUTOMATE] MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
                         application_url,
                     )
                     page_snapshot = ""
+                    set_dom_html_context("")
                 finally:
                     _mcp_pool.shutdown(wait=False)  # don't block; hung thread runs in background
             except Exception as _mcp_exc:
@@ -2696,6 +2747,7 @@ class TestGeneratorAgent(BaseAgent):
                     application_url, _mcp_exc,
                 )
                 page_snapshot = ""
+                set_dom_html_context("")
         else:
             if not self.mcp_client:
                 logger.warning("[PHOENIX AUTOMATE] MCP client not available - proceeding without DOM inspection")
@@ -2764,10 +2816,6 @@ class TestGeneratorAgent(BaseAgent):
                     manifest=manifest,
                 )
                 script_code = gen["script_code"]
-                
-                # CRITICAL FIX: Post-process script to respect explicit locators from manual test criteria
-                script_code = _apply_explicit_locator_fixes(script_code, manual_test)
-                
                 pom_bundle = _synthesize_pom_bundle(
                     script_code,
                     module_name,
@@ -2857,13 +2905,27 @@ class TestGeneratorAgent(BaseAgent):
             return {"bdd_bundle": {}, "locators_raw": [], "recommendations": []}
 
         try:
+            test_labels = _extract_priority_labels_from_manual_tests([manual_test])
+            html = _DOM_HTML_CONTEXT
+            a11y = ""
+            if self.mcp_client:
+                a11y = getattr(self.mcp_client, "last_accessibility_tree", "") or ""
+            effective_snapshot = page_snapshot
+            if html or a11y:
+                effective_snapshot = _rebuild_dom_prompt_snapshot(
+                    html=html,
+                    a11y=a11y,
+                    priority_labels=test_labels,
+                    fallback=page_snapshot,
+                )
+
             system_prompt_template = _prompt_loader.get("automation_from_manual", "3.0_bdd")
             system_prompt = _safe_substitute(
                 system_prompt_template,
                 knowledge_context=knowledge_context or "(no additional context)",
                 manifest=manifest or "(no manifest available)",
                 keywords=keywords or "(no existing keywords)",
-                dom_snapshot=page_snapshot or "(no live snapshot available)",
+                dom_snapshot=effective_snapshot or "(no live snapshot available)",
             )
 
             steps_text = self._format_manual_steps_for_prompt(manual_test)
@@ -2887,11 +2949,17 @@ class TestGeneratorAgent(BaseAgent):
                 f"## Application URL\n{application_url or 'N/A'}",
             ]
 
-            if page_snapshot:
+            if effective_snapshot:
+                logger.info("DOM snapshot length: %d", len(effective_snapshot))
                 user_parts += [
                     "",
                     "## Live DOM Snapshot (ground every locator in this snapshot)",
-                    page_snapshot[:10000],  # Increased from 3000 to 10000 for better locator context
+                    effective_snapshot,
+                    "",
+                    "## DOM Parsing Instructions",
+                    "Use preferred_locator from the interactive-element map when present (unique / strict-mode safe).",
+                    "Otherwise use REAL attributes from the map / HTML. Do not invent attribute values.",
+                    "Prefer data-testid > id/name > placeholder/aria-label > role+name.",
                 ]
             else:
                 user_parts += [

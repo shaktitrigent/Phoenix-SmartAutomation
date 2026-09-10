@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -38,6 +38,8 @@ class Locator(BaseModel):
     # False → best-guess locator; may need healing on first run.
     # None  → not checked (legacy entries or MCP not available).
     verified_in_snapshot: Optional[bool] = None
+    # Additional metadata from SmartLocatorAI or other sources
+    metadata: Optional[Dict[str, Any]] = None
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -102,6 +104,8 @@ class LocatorBundle(BaseModel):
     primary: Locator
     alternates: List[Locator] = Field(default_factory=list)
     notes: Optional[str] = None
+    # Additional metadata from SmartLocatorAI or other sources
+    metadata: Optional[Dict[str, Any]] = None
 
     @field_validator("alternates", mode="before")
     @classmethod

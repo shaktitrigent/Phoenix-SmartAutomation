@@ -29,8 +29,11 @@ Example usage::
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from phoenix_shared.models.locator import LocatorBundle
@@ -44,6 +47,8 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
     The LLM prompts emit ``element_id``, ``selector``, and ``interaction_type``
     whereas the Pydantic model uses ``element_name``, ``value``, and (ignores
     interaction_type).  ``verified_in_snapshot`` is passed through directly.
+    
+    Also preserves SmartLocatorAI metadata fields.
     """
     item = dict(item)
 
@@ -51,17 +56,26 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
     if "element_name" not in item and "element_id" in item:
         item["element_name"] = item.pop("element_id")
 
+    # Get the element_name for propagation to sub-dicts
+    element_name = item.get("element_name")
+
     # ``primary`` locator sub-dict normalisation
     if "primary" in item and isinstance(item["primary"], dict):
         p = dict(item["primary"])
         if "element_name" not in p and "element_id" in p:
             p["element_name"] = p.pop("element_id")
+        # Ensure element_name is present (required by Pydantic Locator model)
+        if "element_name" not in p and element_name:
+            p["element_name"] = element_name
         # LLM emits "selector" for the raw CSS/XPath/attribute string
         if "value" not in p and "selector" in p:
             p["value"] = p.pop("selector")
         # Pass through verified_in_snapshot (prompt may omit it)
         if "verified_in_snapshot" in item and "verified_in_snapshot" not in p:
             p["verified_in_snapshot"] = item["verified_in_snapshot"]
+        # Preserve metadata field
+        if "metadata" in item and "metadata" not in p:
+            p["metadata"] = item["metadata"]
         # interaction_type is not a model field — remove to avoid validation noise
         p.pop("interaction_type", None)
         p.pop("label", None)
@@ -75,8 +89,15 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
                 alt = dict(alt)
                 if "element_name" not in alt and "element_id" in alt:
                     alt["element_name"] = alt.pop("element_id")
+                # Ensure element_name is present (required by Pydantic Locator model)
+                if "element_name" not in alt and element_name:
+                    alt["element_name"] = element_name
                 if "value" not in alt and "selector" in alt:
                     alt["value"] = alt.pop("selector")
+                # Preserve metadata field
+                if "metadata" in alt:
+                    # Keep metadata as-is
+                    pass
                 alt.pop("interaction_type", None)
                 alt.pop("label", None)
             normed.append(alt)
@@ -123,10 +144,11 @@ class LocatorRegistry:
                     item = _normalise_raw_bundle(item)
                     bundle = LocatorBundle.from_dict(item)
                     self._bundles[bundle.element_name] = bundle
-                except Exception:
-                    pass
-        except (json.JSONDecodeError, OSError):
-            pass
+                except Exception as e:
+                    logger.warning(f"Failed to load locator bundle from {path}: {e}")
+                    logger.debug(f"Failed item data: {item}")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to read or parse locator file {path}: {e}")
 
     # ------------------------------------------------------------------
     # Querying

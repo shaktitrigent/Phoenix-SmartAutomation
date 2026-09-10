@@ -17,11 +17,33 @@ class LocatorStrategy(str, Enum):
     XPATH = "xpath"
     ALT_TEXT = "alt-text"
     TITLE = "title"
+    CONTEXT = "context"
 
 
 import re as _re
 
 _ROLE_WITH_NAME_RE = _re.compile(r'^(\w[\w-]*)(?:\[name=(.+)\])?$')
+
+
+def _context_to_playwright_python(value: str) -> str:
+    """Translate a SmartLocatorAI JavaScript-style chain to Playwright Python."""
+    expr = value.strip()
+    expr = _re.sub(
+        r"\.getByRole\('((?:[^'\\]|\\.)*)',\s*\{\s*name:\s*'((?:[^'\\]|\\.)*)'\s*\}\)",
+        lambda m: f".get_by_role({m.group(1)!r}, name={m.group(2)!r})",
+        expr,
+    )
+    expr = _re.sub(
+        r"\.getByText\('((?:[^'\\]|\\.)*)'\)",
+        lambda m: f".get_by_text({m.group(1)!r})",
+        expr,
+    )
+    expr = _re.sub(
+        r"\.filter\(\{\s*hasText:\s*\"((?:[^\"\\]|\\.)*)\"\s*\}\)",
+        lambda m: f".filter(has_text={m.group(1)!r})",
+        expr,
+    )
+    return expr
 
 
 class Locator(BaseModel):
@@ -67,6 +89,9 @@ class Locator(BaseModel):
             # Ensure the xpath= prefix is present so Playwright uses XPath mode
             value = self.value if self.value.startswith("xpath=") else f"xpath={self.value}"
             return f'page.locator("{value}")'
+
+        if self.strategy == LocatorStrategy.CONTEXT:
+            return _context_to_playwright_python(self.value)
 
         strategy_map = {
             LocatorStrategy.LABEL: lambda: f'page.get_by_label("{self.value}")',

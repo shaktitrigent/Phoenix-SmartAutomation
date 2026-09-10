@@ -358,3 +358,28 @@ def test_convert_file_supports_top_level_recommended_locator(tmp_path):
     bundles = convert_file(path)
     assert len(bundles) == 1
     assert bundles[0].primary.value == "#top-level"
+
+
+def test_context_selector_is_preserved_and_renders_as_playwright_python():
+    value = (
+        'page.locator("section.products").filter({ hasText: "Blue Shirt" })'
+        ".getByRole('button', { name: 'Buy' })"
+    )
+    bundles = convert_locators([{
+        "custom_name": "BuyButton",
+        "locator_type": "Context Selector",
+        "locator_value": value,
+        "validated": True,
+        "match_count": 1,
+        "recommended": True,
+        "element_data": {"tag": "button", "ancestor_context": {"container_tag": "section"}},
+    }])
+
+    assert len(bundles) == 1
+    locator = bundles[0].primary
+    assert locator.strategy == LocatorStrategy.CONTEXT
+    assert locator.value == value
+    assert locator.to_playwright() == (
+        'page.locator("section.products").filter(has_text=\'Blue Shirt\')'
+        ".get_by_role('button', name='Buy')"
+    )

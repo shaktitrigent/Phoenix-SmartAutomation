@@ -115,6 +115,8 @@ def test_persist_locators_with_locator_bundles():
         assert loc["primary"]["metadata"]["smartlocator_recommended"] is True
         # Bundle-level metadata should also be preserved
         assert "metadata" in loc
+        assert loc["page"] == "form"
+        assert loc["metadata"]["bundle_element_name"] == "SubmitButton"
 
 
 def test_enrich_locators_with_smartlocator():

@@ -942,6 +942,38 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     if domain_knowledge:
         print_info("Domain knowledge loaded from domain_knowledge/")
 
+    # SmartLocatorAI runs before intelligence generation so its validated
+    # locator evidence can ground the generated flat/POM code. The same bundle
+    # objects are retained and merged into Phoenix persistence after generation.
+    smartlocator_bundles = []
+    try:
+        from phoenix.locators.smartlocator_integration import (
+            SmartLocatorUnavailableError,
+            generate_smartlocator_bundles,
+            smartlocator_prompt_context,
+        )
+
+        smartlocator_page = _module_from_file(manual_path)
+        print_info("SmartLocatorAI: scanning and validating the application DOM…")
+        smartlocator_bundles = generate_smartlocator_bundles(
+            application_url,
+            page=smartlocator_page,
+            validate=True,
+        )
+        locator_context = smartlocator_prompt_context(smartlocator_bundles)
+        if locator_context:
+            domain_knowledge = "\n\n".join(
+                part for part in (locator_context, domain_knowledge) if part
+            )
+        print_info(
+            f"SmartLocatorAI: {len(smartlocator_bundles)} validated LocatorBundle(s) "
+            "provided to automation generation."
+        )
+    except SmartLocatorUnavailableError as _exc:
+        print_warning(str(_exc))
+    except Exception as _exc:
+        print_warning(f"SmartLocatorAI pre-pass failed; continuing with Phoenix locators: {_exc}")
+
     # Detect layout and mode
     _use_pom = getattr(config.project, "layout", "flat") == "pom-v1"
     _use_bdd = _use_pom and getattr(config.project, "bdd", False)
@@ -999,6 +1031,13 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     if not automation_tests:
         print_warning("No automation scripts were generated.")
         return
+
+    if smartlocator_bundles:
+        from phoenix.locators.smartlocator_integration import (
+            enrich_automation_tests_with_smartlocator,
+        )
+        enrich_automation_tests_with_smartlocator(automation_tests, smartlocator_bundles)
+
     _print_intelligence_metadata_warnings(result.get("metadata"))
     for test in automation_tests:
         for warning in test.get("warnings", []):

@@ -2127,7 +2127,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Domain Knowledge (project-specific — use this to improve locator selection)",
-                    domain_knowledge[:2000],
+                    domain_knowledge[:15000],
                 ]
 
             if supporting_documents:
@@ -2905,7 +2905,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Domain Knowledge",
-                    domain_knowledge[:2000],
+                    domain_knowledge[:15000],
                 ]
 
             user_prompt = "\n".join(user_parts)

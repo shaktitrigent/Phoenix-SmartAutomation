@@ -215,8 +215,12 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "element_name": loc.get("element_name", element_id),
                     "primary": dict(loc["primary"]),
                     "alternates": [dict(alt) for alt in loc.get("alternates", [])],
-                    "metadata": {},
+                    "metadata": dict(loc.get("metadata") or {}),
                 }
+                if loc.get("page"):
+                    merged[element_id]["page"] = loc["page"]
+                if loc.get("notes"):
+                    merged[element_id]["notes"] = loc["notes"]
                 
                 # Preserve bundle-level metadata
                 for meta_key in [
@@ -226,7 +230,6 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "estimated_unique", "warnings", "element_data", "dom_path", "element_id",
                     "custom_name", "element_name", "notes", "duplicate", "dynamic", "source",
                     "element_identity", "source_names", "smartlocator_raw_records", "bundle_element_name",
-                    "page"
                 ]:
                     if meta_key in loc and loc[meta_key]:
                         merged[element_id]["metadata"][meta_key] = loc[meta_key]
@@ -264,6 +267,11 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             existing["alternates"].append(dict(alt))
                     
                     # Merge metadata
+                    existing["metadata"].update(loc.get("metadata") or {})
+                    if loc.get("page"):
+                        existing["page"] = loc["page"]
+                    if loc.get("notes"):
+                        existing["notes"] = loc["notes"]
                     for meta_key in [
                         "recommended", "recommended_locator", "element_has_working_locator",
                         "working_locator_type", "working_locator_value", "context_strategy",
@@ -271,7 +279,6 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "estimated_unique", "warnings", "element_data", "dom_path", "element_id",
                         "custom_name", "element_name", "notes", "duplicate", "dynamic", "source",
                         "element_identity", "source_names", "smartlocator_raw_records", "bundle_element_name",
-                        "page"
                     ]:
                         if meta_key in loc and loc[meta_key]:
                             existing["metadata"][meta_key] = loc[meta_key]

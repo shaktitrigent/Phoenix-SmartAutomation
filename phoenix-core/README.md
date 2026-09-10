@@ -17,6 +17,23 @@ The CLI and SDK package. No LLM or AI logic lives here — it communicates with 
 | `phoenix/integrations/jira/` | `JiraClient`, `JiraConfig`, ADF→text converter — Jira Cloud + Server/DC |
 | `phoenix/execution/` | `HealingEngine` (retry loop), `ExecutionLogger`, pytest runner |
 | `phoenix/locators/` | `LocatorRegistry` — loads/saves LocatorBundle JSON files |
+
+### SmartLocatorAI integration
+
+`phoenix automate` runs SmartLocatorAI as a non-blocking DOM pre-pass. Its
+validated `locators.json` output is translated by `smartlocator_adaptor.py`,
+merged with Phoenix-generated locator candidates, and persisted through the
+same `LocatorRegistry` path for both flat and POM layouts.
+
+Install the SmartLocatorAI package in the same environment before running the
+CLI. During local development with sibling checkouts:
+
+```bash
+pip install -e ../Phoenix-SmartLocatorAI
+```
+
+If the optional package is absent or the target cannot be scanned, Phoenix
+logs a warning and continues with its existing locator-generation flow.
 | `phoenix/reporting/` | `DataLoader`, `RunAggregator`, `TrendAggregator`, `ReportGenerator`, `render_run_report()` — 10-section self-contained HTML report |
 | `phoenix/scaffold.py` | `phoenix init` logic — creates the canonical project layout |
 | `phoenix/templates/project/` | Jinja2 templates rendered into the new project |

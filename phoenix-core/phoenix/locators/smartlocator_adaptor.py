@@ -45,6 +45,8 @@ _STRATEGY_MAP: Dict[str, LocatorStrategy] = {
     "alt text": LocatorStrategy.ALT_TEXT,
     "alt-text": LocatorStrategy.ALT_TEXT,
     "title": LocatorStrategy.TITLE,
+    "context": LocatorStrategy.CONTEXT,
+    "context selector": LocatorStrategy.CONTEXT,
 }
 
 _STABILITY_LABEL_TO_CONFIDENCE: Dict[str, float] = {

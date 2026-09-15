@@ -298,6 +298,52 @@ def test_persist_locators_merges_with_existing():
         assert loc["primary"]["metadata"].get("smartlocator_recommended") is True or warnings_found, "SmartLocatorAI data should be preserved"
 
 
+def test_rerun_adds_alternates_to_existing_locator_bundle(tmp_path):
+    locators_dir = tmp_path / "locators"
+    locators_dir.mkdir()
+    persisted_file = locators_dir / "login.json"
+    persisted_file.write_text(json.dumps([{
+        "element_id": "UsernameInput",
+        "element_name": "UsernameInput",
+        "page": "login",
+        "primary": {
+            "strategy": "css",
+            "value": "#username",
+            "confidence": 1.0,
+            "verified_in_snapshot": True,
+        },
+        "alternates": [],
+        "metadata": {},
+    }]), encoding="utf-8")
+
+    bundles = convert_locators([{
+        "custom_name": "UsernameInput",
+        "element_data": {"dom_id": "username", "tag": "input"},
+        "locator_type": "XPath",
+        "locator_value": "//input[@id='username']",
+        "validated": True,
+        "match_count": 1,
+        "stability_score": 8,
+        "element_has_working_locator": True,
+        "working_locator_type": "CSS Selector",
+        "working_locator_value": "#username",
+    }], page="login")
+
+    count = persist_locators(
+        [{"script_path": None, "page": "login", "locators": bundles}],
+        locators_dir,
+    )
+
+    assert count == 1
+    persisted = json.loads(persisted_file.read_text(encoding="utf-8"))
+    assert persisted[0]["primary"]["value"] == "#username"
+    assert any(
+        alternate["strategy"] == "xpath"
+        and alternate["value"] == "//input[@id='username']"
+        for alternate in persisted[0]["alternates"]
+    )
+
+
 if __name__ == "__main__":
     test_persist_locators_preserves_smartlocator_metadata()
     test_persist_locators_with_locator_bundles()

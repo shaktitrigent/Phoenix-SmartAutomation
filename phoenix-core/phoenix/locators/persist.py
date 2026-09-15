@@ -149,35 +149,11 @@ def persist_locators(scripts: List[Dict[str, Any]], locators_dir: Path) -> int:
             if bundle_path.exists():
                 existing = json.loads(bundle_path.read_text(encoding="utf-8"))
                 if isinstance(existing, list):
-                    existing_merged = _merge_locators(existing)
-                    # Merge new locators into existing
-                    for new_loc in merged:
-                        element_id = new_loc.get("element_id") or new_loc.get("element_name")
-                        found = False
-                        for existing_loc in existing_merged:
-                            existing_id = existing_loc.get("element_id") or existing_loc.get("element_name")
-                            if existing_id == element_id:
-                                # Merge strategies
-                                existing_strategies = existing_loc.get("strategies", [])
-                                new_strategies = new_loc.get("strategies", [])
-                                # Add new strategies that dont exist
-                                for new_strat in new_strategies:
-                                    if not any(
-                                        s.get("value") == new_strat.get("value") 
-                                        for s in existing_strategies
-                                    ):
-                                        existing_strategies.append(new_strat)
-                                existing_loc["strategies"] = existing_strategies
-                                # Merge metadata
-                                if "metadata" in new_loc:
-                                    existing_meta = existing_loc.get("metadata", {})
-                                    existing_meta.update(new_loc["metadata"])
-                                    existing_loc["metadata"] = existing_meta
-                                found = True
-                                break
-                        if not found:
-                            existing_merged.append(new_loc)
-                    merged = existing_merged
+                    # Use the shared merger for both legacy strategies and
+                    # LocatorBundle primary/alternates. The previous bespoke
+                    # path only merged ``strategies`` and therefore discarded
+                    # new alternates when an existing LocatorBundle was found.
+                    merged = _merge_locators(existing + merged)
             
             # Write the bundle
             bundle_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")

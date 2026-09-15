@@ -526,7 +526,10 @@ def _candidate_locators_for_record(entry: Dict[str, Any], bundle_name: str) -> L
                 if locator is not None:
                     candidates.append(locator)
 
-    if not candidates and any(
+    # Preserve the record's own locator even when it also contains an
+    # element-level working locator. Later deduplication removes it when both
+    # selectors are genuinely identical.
+    if any(
         key in entry for key in ("locator_type", "strategy", "locator_value", "selector", "value")
     ):
         locator = _build_locator(entry, bundle_name, origin="entry")
@@ -550,7 +553,19 @@ def _locator_rank(locator: Locator) -> Tuple[int, float, int]:
     if origin == "legacy_entry" and tier > 0:
         tier = 1
     order = metadata.get("smartlocator_order", 0)
-    return tier, locator.confidence, -int(order)
+
+    # Merging duplicate candidates can produce multiple source-order values.
+    order_values = order if isinstance(order, list) else [order]
+    numeric_orders = []
+
+    for value in order_values:
+        try:
+            numeric_orders.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    normalized_order = min(numeric_orders, default=0)
+    return tier, locator.confidence, -normalized_order
 
 
 def _merge_locator(existing: Locator, new: Locator) -> Locator:
@@ -631,9 +646,30 @@ def _convert_identity_aware_records(raw_locators: List[Dict[str, Any]], page: st
         if not candidates:
             continue
 
-        primary = _best_locator(candidates)
+        # Deduplicate candidates using their actual strategy and value.
+        unique_candidates: Dict[Tuple[str, str], Locator] = {}
+
+        for candidate in candidates:
+            key = (candidate.strategy.value, candidate.value)
+
+            if key in unique_candidates:
+                unique_candidates[key] = _merge_locator(
+                    unique_candidates[key],
+                    candidate,
+                )
+            else:
+                unique_candidates[key] = candidate
+
+        deduplicated = list(unique_candidates.values())
+        primary = _best_locator(deduplicated)
+        primary_key = (primary.strategy.value, primary.value)
+
         alternates = sorted(
-            [locator for locator in candidates if locator is not primary],
+            [
+                locator
+                for locator in deduplicated
+                if (locator.strategy.value, locator.value) != primary_key
+            ],
             key=_locator_rank,
             reverse=True,
         )

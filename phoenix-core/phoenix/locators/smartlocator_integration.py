@@ -27,6 +27,7 @@ def generate_smartlocator_bundles(
     *,
     page: str = "global",
     validate: bool = True,
+    output_dir: str | Path | None = None,
 ) -> List[object]:
     """Run SmartLocatorAI and translate its JSON output into Phoenix bundles.
 
@@ -43,11 +44,11 @@ def generate_smartlocator_bundles(
             "pip install -e ../Phoenix-SmartLocatorAI)."
         ) from exc
 
-    with tempfile.TemporaryDirectory(prefix="phoenix-smartlocator-") as tmpdir:
+    def _generate(target_dir: str) -> List[object]:
         result = generate_locators_from_dom(
             application_url,
             frameworks=["Playwright"],
-            output_dir=tmpdir,
+            output_dir=target_dir,
             class_name="SmartLocatorPage",
             use_js=True,
             validate=validate,
@@ -55,7 +56,15 @@ def generate_smartlocator_bundles(
         json_path = result.get("locators_json") if isinstance(result, dict) else None
         if not json_path or not Path(json_path).is_file():
             raise RuntimeError("SmartLocatorAI did not produce locators.json")
-        bundles = convert_file(json_path, page=page)
+        return convert_file(json_path, page=page)
+
+    if output_dir is not None:
+        target = Path(output_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        bundles = _generate(str(target))
+    else:
+        with tempfile.TemporaryDirectory(prefix="phoenix-smartlocator-") as tmpdir:
+            bundles = _generate(tmpdir)
 
     logger.info(
         "SmartLocatorAI generated %d Phoenix locator bundle(s) for %s",

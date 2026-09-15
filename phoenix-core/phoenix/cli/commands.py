@@ -1705,7 +1705,7 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
             logger.warning(f"Failed to print intelligent runtime summary: {e}")
 
 
-@click.command()
+@click.group(invoke_without_command=True)
 @click.option(
     "--locators-dir",
     "-l",
@@ -1723,7 +1723,10 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
 )
 @click.pass_context
 def locators(ctx, locators_dir, page, output):
-    """List registered LocatorBundles from locators/<page>.json files."""
+    """Inspect locators or scan a URL without invoking Phoenix Intelligence."""
+    if ctx.invoked_subcommand is not None:
+        return
+
     from phoenix.locators.registry import LocatorRegistry
     import json as _json
 
@@ -1750,6 +1753,115 @@ def locators(ctx, locators_dir, page, output):
             f"{row['confidence']:>5.2f} {row['alternates']:>4}"
         )
     click.echo(f"\n{len(rows)} bundle(s) loaded from '{locators_dir}'")
+
+
+@locators.command("scan")
+@click.option("--url", "application_url", default=None, help="Application URL to scan")
+@click.option("--page", "page_name", required=True, help="Logical page/module name")
+@click.option(
+    "--locators-dir",
+    default="locators",
+    type=click.Path(),
+    help="Phoenix locator repository directory (default: locators/)",
+)
+@click.option(
+    "--keep-raw",
+    is_flag=True,
+    help="Keep SmartLocatorAI JSON and generated page-object artifacts",
+)
+@click.option(
+    "--raw-output-dir",
+    default="smartlocator_raw",
+    type=click.Path(),
+    help="Raw artifact directory used with --keep-raw (default: smartlocator_raw/)",
+)
+@click.pass_context
+def scan_locators(
+    ctx,
+    application_url,
+    page_name,
+    locators_dir,
+    keep_raw,
+    raw_output_dir,
+):
+    """Scan, validate, convert and persist locators without an LLM call."""
+    from phoenix.locators.persist import persist_locators
+    from phoenix.locators.smartlocator_integration import (
+        SmartLocatorUnavailableError,
+        generate_smartlocator_bundles,
+    )
+
+    config_path = ctx.obj.get("config_path") if ctx.obj else None
+    config = PhoenixConfig.load(config_path)
+    resolved_url = application_url or config.project.resolved_base_url
+    if not resolved_url:
+        print_error(
+            "Application URL is required. Pass --url https://your-app.com "
+            "or set base_url in .phoenixrc."
+        )
+        raise click.Abort()
+
+    project_root = Path(config_path).resolve().parent if config_path else Path.cwd()
+    locator_path = Path(locators_dir)
+    if not locator_path.is_absolute():
+        locator_path = project_root / locator_path
+
+    raw_path = None
+    if keep_raw:
+        raw_path = Path(raw_output_dir)
+        if not raw_path.is_absolute():
+            raw_path = project_root / raw_path
+        raw_path = raw_path / page_name
+
+    print_header(f"Scanning locators for page '{page_name}'")
+    print_info(f"SmartLocatorAI: scanning and validating {resolved_url}")
+    try:
+        bundles = generate_smartlocator_bundles(
+            resolved_url,
+            page=page_name,
+            validate=True,
+            output_dir=raw_path,
+        )
+    except SmartLocatorUnavailableError as exc:
+        print_error(str(exc))
+        raise click.Abort() from exc
+    except Exception as exc:
+        print_error(f"SmartLocatorAI scan failed: {exc}")
+        raise click.Abort() from exc
+
+    accepted = [
+        bundle
+        for bundle in bundles
+        if bundle.primary.verified_in_snapshot is True
+    ]
+    unresolved = [
+        bundle
+        for bundle in bundles
+        if bundle.primary.verified_in_snapshot is not True
+    ]
+
+    if accepted:
+        persist_locators(
+            [{"page": page_name, "locators": accepted}],
+            locator_path,
+        )
+        print_success(
+            f"Saved {len(accepted)} validated LocatorBundle(s) to "
+            f"{locator_path / (page_name + '.json')}"
+        )
+    else:
+        print_warning("No uniquely validated LocatorBundles were available to save.")
+    if unresolved:
+        print_warning(
+            f"{len(unresolved)} element(s) remain unresolved; no Anthropic call "
+            "was made."
+        )
+        for bundle in unresolved:
+            print_warning(f"  {bundle.element_name}: no uniquely validated primary locator")
+    elif bundles:
+        print_success("All converted elements have a uniquely validated primary locator.")
+    if raw_path is not None:
+        print_info(f"Raw SmartLocatorAI artifacts kept in: {raw_path}")
 
 
 @click.command()

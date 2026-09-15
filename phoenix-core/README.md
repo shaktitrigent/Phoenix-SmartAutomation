@@ -34,6 +34,26 @@ pip install -e ../Phoenix-SmartLocatorAI
 
 If the optional package is absent or the target cannot be scanned, Phoenix
 logs a warning and continues with its existing locator-generation flow.
+
+Locators can also be scanned, validated, converted, and persisted without
+starting `phoenix-intelligence` or calling an LLM:
+
+```powershell
+phoenix locators scan --url "https://app.example" --page login
+```
+
+This writes uniquely validated bundles to `locators/login.json`. Candidates
+that do not have a browser-verified primary are reported as unresolved and are
+not persisted. To retain SmartLocatorAI's raw JSON and generated page-object
+artifacts for inspection:
+
+```powershell
+phoenix locators scan --url "https://app.example" --page login --keep-raw
+```
+
+Raw artifacts are written to `smartlocator_raw/login/`. This locator-only
+command never invokes Anthropic; a later LocatorExpert fallback may process
+only the unresolved elements.
 | `phoenix/reporting/` | `DataLoader`, `RunAggregator`, `TrendAggregator`, `ReportGenerator`, `render_run_report()` — 10-section self-contained HTML report |
 | `phoenix/scaffold.py` | `phoenix init` logic — creates the canonical project layout |
 | `phoenix/templates/project/` | Jinja2 templates rendered into the new project |

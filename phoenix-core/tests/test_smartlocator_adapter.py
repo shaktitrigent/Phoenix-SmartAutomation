@@ -383,3 +383,56 @@ def test_context_selector_is_preserved_and_renders_as_playwright_python():
         'page.locator("section.products").filter(has_text=\'Blue Shirt\')'
         ".get_by_role('button', name='Buy')"
     )
+
+
+def test_duplicate_candidates_with_merged_order_are_deduplicated():
+    identity = _identity_payload("duplicate-order")
+
+    records = [
+        {
+            "custom_name": f"SubmitButton{index}",
+            **identity,
+            "locator_type": "CSS Selector",
+            "locator_value": "#submit",
+            "validated": True,
+            "match_count": 1,
+        }
+        for index in range(3)
+    ]
+
+    bundles = convert_locators(records)
+
+    assert len(bundles) == 1
+
+    bundle = bundles[0]
+    assert bundle.primary.value == "#submit"
+    assert bundle.primary.verified_in_snapshot is True
+
+    # The same locator must not be repeated as an alternate.
+    assert bundle.alternates == []
+
+
+def test_flat_record_preserves_candidate_alongside_working_rollup():
+    bundles = convert_locators([{
+        "custom_name": "UsernameInput",
+        **_identity_payload("username"),
+        "locator_type": "Role Selector",
+        "locator_value": "page.getByRole('textbox', { name: 'Username' })",
+        "validated": True,
+        "match_count": 1,
+        "stability_score": 6,
+        "element_has_working_locator": True,
+        "working_locator_type": "CSS Selector",
+        "working_locator_value": "#username",
+    }])
+
+    assert len(bundles) == 1
+
+    bundle = bundles[0]
+    assert bundle.primary.value == "#username"
+
+    assert any(
+        locator.strategy == LocatorStrategy.ROLE
+        and locator.value == "textbox[name=Username]"
+        for locator in bundle.alternates
+    )

@@ -58,6 +58,42 @@ def test_missing_package_has_actionable_error(monkeypatch):
         generate_smartlocator_bundles("https://app.example")
 
 
+def test_generate_bundles_can_keep_raw_artifacts(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_generate(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        output = Path(kwargs["output_dir"]) / "locators.json"
+        output.write_text(json.dumps({
+            "locators": [{
+                "custom_name": "LoginButton",
+                "locator_type": "CSS Selector",
+                "locator_value": "#login",
+                "validated": True,
+                "match_count": 1,
+                "element_data": {"tag": "button", "id": "login"},
+            }]
+        }), encoding="utf-8")
+        return {"locators_json": str(output)}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "phoenix_smartlocatorai",
+        types.SimpleNamespace(generate_locators_from_dom=fake_generate),
+    )
+    raw_dir = tmp_path / "smartlocator_raw" / "login"
+
+    bundles = generate_smartlocator_bundles(
+        "https://app.example",
+        page="login",
+        output_dir=raw_dir,
+    )
+
+    assert len(bundles) == 1
+    assert captured["output_dir"] == str(raw_dir)
+    assert (raw_dir / "locators.json").is_file()
+
+
 def test_enrichment_feeds_same_bundles_to_flat_and_pom_locator_inputs():
     from phoenix.locators.smartlocator_adaptor import convert_locators
 

@@ -32,13 +32,27 @@ class LocatorExpertAgent(BaseAgent):
         page_url = input_data.get("page_url", "")
         element_name = input_data.get("element_name", "")
         dom_snapshot = input_data.get("dom_snapshot")
+        element_context = input_data.get("element_context") or {}
+        require_llm = bool(input_data.get("require_llm", False))
 
-        cache_key = self._cache_key("locator", page_url=page_url, element_name=element_name)
+        cache_key = self._cache_key(
+            "locator",
+            page_url=page_url,
+            element_name=element_name,
+            element_context=element_context,
+            require_llm=require_llm,
+        )
         cached = self.cache.get(cache_key)
         if cached:
             return cached
 
-        locators = self._discover_locators(element_name, page_url, dom_snapshot)
+        locators = self._discover_locators(
+            element_name,
+            page_url,
+            dom_snapshot,
+            element_context=element_context,
+            require_llm=require_llm,
+        )
 
         result = {
             "locators": locators,
@@ -46,8 +60,12 @@ class LocatorExpertAgent(BaseAgent):
             "metadata": {
                 "page_url": page_url,
                 "element_name": element_name,
+                "element_identity": element_context.get("element_identity"),
                 "llm_used": bool(self.llm_client),
                 "mcp_used": bool(self.mcp_client and page_url),
+                "provider": getattr(getattr(self.llm_client, "settings", None), "provider", None),
+                "model": getattr(getattr(self.llm_client, "settings", None), "model", None),
+                "strict_conditional_fallback": require_llm,
             },
         }
 
@@ -65,9 +83,32 @@ class LocatorExpertAgent(BaseAgent):
         element_name: str,
         page_url: str,
         dom_snapshot: Optional[str],
+        element_context: Optional[Dict[str, Any]] = None,
+        require_llm: bool = False,
     ) -> List[Dict[str, Any]]:
+        # Conditional SmartLocatorAI fallback must never manufacture heuristic
+        # candidates: without a real LocatorExpert response it stays unresolved.
+        if require_llm:
+            if not self.llm_client:
+                logger.warning(
+                    "LocatorExpertAgent: strict fallback requested without an LLM client"
+                )
+                return []
+            try:
+                return self._discover_via_llm(
+                    element_name, page_url, dom_snapshot, element_context
+                )
+            except Exception as exc:
+                logger.warning(
+                    "LocatorExpertAgent: strict LLM discovery failed; element remains unresolved: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return []
         return self._llm_with_fallback(
-            llm_fn=lambda: self._discover_via_llm(element_name, page_url, dom_snapshot),
+            llm_fn=lambda: self._discover_via_llm(
+                element_name, page_url, dom_snapshot, element_context
+            ),
             fallback_fn=lambda: self._heuristic_locators(element_name),
             operation="LocatorExpertAgent",
         )
@@ -77,6 +118,7 @@ class LocatorExpertAgent(BaseAgent):
         element_name: str,
         page_url: str,
         dom_snapshot: Optional[str],
+        element_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         # Get live page snapshot via MCP if we don't already have one.
         # Phase D: best-effort — a failing MCP call must not abort locator discovery.
@@ -120,6 +162,15 @@ class LocatorExpertAgent(BaseAgent):
             f"Discover stable Playwright locators for the element: **{element_name}**",
             f"\nPage URL: {page_url or 'not provided'}",
         ]
+        if element_context:
+            user_parts += [
+                "\n## Unresolved Element Evidence",
+                "Use only this element's identity, DOM context, attempted selectors, and "
+                "validation results. Do not use positional selectors to force uniqueness.",
+                "```json",
+                json.dumps(element_context, indent=2, sort_keys=True, default=str),
+                "```",
+            ]
         if knowledge_context:
             user_parts.append(f"\n## Locator Strategy Knowledge\n{knowledge_context[:1000]}")
         if snapshot:

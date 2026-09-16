@@ -140,13 +140,17 @@ class IntelligenceClient:
     def discover_locators(
         self,
         page_url: str,
-        elements: List[str],
+        elements: Optional[List[str]] = None,
         dom_snapshot: Optional[str] = None,
+        element_contexts: Optional[List[Dict[str, Any]]] = None,
+        require_llm: bool = False,
     ) -> Dict[str, Any]:
         payload = {
             "page_url": page_url,
-            "elements": elements,
+            "elements": elements or [],
             "dom_snapshot": dom_snapshot,
+            "element_contexts": element_contexts or [],
+            "require_llm": require_llm,
         }
         return self._post("/api/v1/locators/discover", payload)
 

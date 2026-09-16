@@ -97,6 +97,8 @@ class AgentRegistry:
         page_url: str,
         element_name: str,
         dom_snapshot: Optional[str] = None,
+        element_context: Optional[Dict[str, Any]] = None,
+        require_llm: bool = False,
     ) -> Dict[str, Any]:
         return self.invoke_agent(
             "locator_expert",
@@ -104,6 +106,8 @@ class AgentRegistry:
                 "page_url": page_url,
                 "element_name": element_name,
                 "dom_snapshot": dom_snapshot,
+                "element_context": element_context or {},
+                "require_llm": require_llm,
             },
         )
 

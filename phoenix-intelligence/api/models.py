@@ -67,8 +67,13 @@ class ManualTestCase(BaseModel):
 class Locator(BaseModel):
     """Locator schema for UI elements."""
 
+    model_config = ConfigDict(extra="allow")
+
     element: Optional[str] = None
+    element_name: Optional[str] = None
+    element_identity: Optional[str] = None
     selector: Optional[str] = None
+    value: Optional[str] = None
     strategy: Optional[str] = None
     confidence: Optional[float] = None
 
@@ -116,8 +121,10 @@ class LocatorDiscoveryRequest(BaseModel):
     """Request payload for locator discovery."""
 
     page_url: str
-    elements: List[str]
+    elements: List[str] = Field(default_factory=list)
     dom_snapshot: Optional[str] = None
+    element_contexts: List[Dict[str, Any]] = Field(default_factory=list)
+    require_llm: bool = False
 
 
 class LocatorDiscoveryResponse(BaseModel):

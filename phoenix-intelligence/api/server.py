@@ -312,13 +312,30 @@ def generate_tests(payload: TestGenerationRequest):
 def discover_locators(payload: LocatorDiscoveryRequest):
     """Discover locators for the requested elements on a page."""
     results = []
-    for element in payload.elements:
+    contexts = [context for context in payload.element_contexts if isinstance(context, dict)]
+    contextual_names = {
+        str(context.get("element_name")) for context in contexts if context.get("element_name")
+    }
+    requests = [
+        (str(context.get("element_name", "")), context)
+        for context in contexts
+        if context.get("element_name")
+    ]
+    requests.extend((element, None) for element in payload.elements if element not in contextual_names)
+    for element, context in requests:
         locators = _agent_registry.discover_locators(
             page_url=payload.page_url,
             element_name=element,
             dom_snapshot=payload.dom_snapshot,
+            element_context=context,
+            require_llm=payload.require_llm,
         )
-        results.extend(locators.get("locators", []))
+        for locator in locators.get("locators", []):
+            enriched = dict(locator)
+            enriched.setdefault("element_name", element)
+            if context and context.get("element_identity"):
+                enriched.setdefault("element_identity", context["element_identity"])
+            results.append(enriched)
 
     return {
         "locators": results,

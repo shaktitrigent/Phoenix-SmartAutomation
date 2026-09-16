@@ -58,6 +58,8 @@ tests/
 # Re-include the framework's own unit test suite — these are source code, not generated output
 !phoenix-core/tests/
 !phoenix-core/tests/**
+!phoenix-intelligence/tests/
+!phoenix-intelligence/tests/**
 reports/
 locators/
 # Phoenix core source locator package

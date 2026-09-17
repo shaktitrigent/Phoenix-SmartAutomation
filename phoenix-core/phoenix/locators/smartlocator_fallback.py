@@ -288,6 +288,7 @@ def resolve_with_locator_expert(
     resolved: List[LocatorBundle] = []
     unresolved: List[Dict[str, Any]] = []
     llm_calls = 0
+    total_tokens = 0
     started_at = time.perf_counter()
 
     for payload in payloads:
@@ -296,6 +297,16 @@ def resolve_with_locator_expert(
         llm_calls += 1
         try:
             response = discover(payload)
+            if isinstance(response, dict):
+                metadata = response.get("metadata", {})
+                tokens = (
+                    response.get("tokens_used")
+                    or metadata.get("tokens_used")
+                    or metadata.get("usage", {}).get("total_tokens")
+                    or 0
+                )
+                if isinstance(tokens, int):
+                    total_tokens += tokens
         except Exception as exc:
             unresolved.append({**payload, "error": f"locator_expert_failed: {exc}"})
             continue
@@ -331,5 +342,7 @@ def resolve_with_locator_expert(
         "resolved_bundles": untouched + resolved,
         "unresolved_elements": unresolved,
         "llm_calls": llm_calls,
+        "tokens_used": total_tokens,
         "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
     }
+

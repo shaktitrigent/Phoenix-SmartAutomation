@@ -35,25 +35,39 @@ pip install -e ../Phoenix-SmartLocatorAI
 If the optional package is absent or the target cannot be scanned, Phoenix
 logs a warning and continues with its existing locator-generation flow.
 
-Locators can also be scanned, validated, converted, and persisted without
-starting `phoenix-intelligence` or calling an LLM:
+Locators can be scanned, validated, converted, and persisted using SmartLocatorAI:
 
 ```powershell
 phoenix locators scan --url "https://app.example" --page login
 ```
 
-This writes uniquely validated bundles to `locators/login.json`. Candidates
-that do not have a browser-verified primary are reported as unresolved and are
-not persisted. To retain SmartLocatorAI's raw JSON and generated page-object
-artifacts for inspection:
+By default, this command operates in a safe, deterministic mode (`--no-llm-fallback`) and **never makes paid LLM / Anthropic calls**. Candidates that do not have a browser-verified primary locator are reported as unresolved and are not saved to the registry.
+
+To enable conditional `LocatorExpert` LLM fallback for unresolved or ambiguous elements:
+
+```powershell
+phoenix locators scan --url "https://app.example" --page login --llm-fallback
+```
+
+### LocatorExpert Fallback & Validation Rules
+
+1. **SmartLocatorAI First**: SmartLocatorAI scans and validates the DOM first. If an element is uniquely resolved (`count == 1`), LocatorExpert is **never called**.
+2. **Conditional Invocation**: If an element is missing, invalid, or ambiguous, it is sent to LocatorExpert (when `--llm-fallback` is set and valid credentials are configured).
+3. **Strict Validation**:
+   - `count == 1`: Accepted and merged into the `LocatorBundle`.
+   - `count == 0`: Rejected (not found).
+   - `count > 1`: Rejected (ambiguous).
+   - Positional selectors (`.first()`, `.last()`, `.nth()`, `:nth-child()`, `//...[1]`) are strictly rejected.
+4. **Candidate Preservation**: Validated LLM locators are merged into the bundle without destroying existing SmartLocatorAI primary or alternate locators.
+5. **Deduplication**: Repeated scans maintain normalized deduplication to prevent duplicate registry entries.
+6. **Scan Summary**: The CLI outputs a scan summary distinguishing between SmartLocatorAI resolutions, LocatorExpert fallback attempts/resolutions, unresolved count, LLM calls, duration, and token usage (when available).
+
+To retain SmartLocatorAI's raw JSON and generated page-object artifacts for inspection:
 
 ```powershell
 phoenix locators scan --url "https://app.example" --page login --keep-raw
 ```
 
-Raw artifacts are written to `smartlocator_raw/login/`. This locator-only
-command never invokes Anthropic; a later LocatorExpert fallback may process
-only the unresolved elements.
 | `phoenix/reporting/` | `DataLoader`, `RunAggregator`, `TrendAggregator`, `ReportGenerator`, `render_run_report()` — 10-section self-contained HTML report |
 | `phoenix/scaffold.py` | `phoenix init` logic — creates the canonical project layout |
 | `phoenix/templates/project/` | Jinja2 templates rendered into the new project |

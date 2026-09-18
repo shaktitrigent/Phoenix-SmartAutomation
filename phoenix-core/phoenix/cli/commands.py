@@ -1775,6 +1775,18 @@ def locators(ctx, locators_dir, page, output):
     type=click.Path(),
     help="Raw artifact directory used with --keep-raw (default: smartlocator_raw/)",
 )
+@click.option(
+    "--llm-fallback/--no-llm-fallback",
+    "llm_fallback",
+    default=False,
+    help="Enable LocatorExpert LLM fallback for unresolved/ambiguous elements (default: disabled)",
+)
+@click.option(
+    "--stability-threshold",
+    default=None,
+    type=float,
+    help="Optional stability threshold for locator fallback",
+)
 @click.pass_context
 def scan_locators(
     ctx,
@@ -1783,13 +1795,21 @@ def scan_locators(
     locators_dir,
     keep_raw,
     raw_output_dir,
+    llm_fallback,
+    stability_threshold,
 ):
-    """Scan, validate, convert and persist locators without an LLM call."""
+    """Scan, validate, convert and persist locators with optional LocatorExpert fallback."""
     from phoenix.locators.persist import persist_locators
     from phoenix.locators.smartlocator_integration import (
         SmartLocatorUnavailableError,
         generate_smartlocator_bundles,
     )
+    from phoenix.locators.smartlocator_fallback import (
+        build_unresolved_payloads,
+        fallback_reasons,
+        resolve_with_locator_expert,
+    )
+    from phoenix_shared.models.locator import Locator, LocatorStrategy
 
     config_path = ctx.obj.get("config_path") if ctx.obj else None
     config = PhoenixConfig.load(config_path)
@@ -1829,15 +1849,137 @@ def scan_locators(
         print_error(f"SmartLocatorAI scan failed: {exc}")
         raise click.Abort() from exc
 
+    sl_resolved_bundles = [
+        bundle for bundle in bundles if fallback_reasons(bundle) == []
+    ]
+    sl_resolved_count = len(sl_resolved_bundles)
+    unresolved_payloads = build_unresolved_payloads(bundles, page_url=resolved_url)
+    sent_to_fallback_count = len(unresolved_payloads) if llm_fallback else 0
+
+
+    final_bundles = list(bundles)
+    le_resolved_count = 0
+    llm_calls = 0
+    tokens_used = 0
+    duration_ms = 0.0
+    unresolved_elements = unresolved_payloads
+
+    if llm_fallback and unresolved_payloads:
+        # Verify LLM credentials / availability before attempting fallback
+        import os
+        has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        
+        # Check if intelligence server is reachable or local client configured
+        intel_client = None
+        try:
+            from phoenix.sdk.client import PhoenixClient
+            client = PhoenixClient(config_path=config_path)
+            intel_client = client._intelligence_client
+        except Exception:
+            intel_client = None
+
+        if not has_anthropic_key and intel_client is None:
+            print_warning(
+                "LLM fallback requested (--llm-fallback), but ANTHROPIC_API_KEY is not configured. "
+                "Skipping LocatorExpert fallback."
+            )
+        else:
+            print_info(f"LocatorExpert: attempting fallback for {sent_to_fallback_count} unresolved element(s)")
+            
+            # Prepare discover callback
+            def discover_callback(payload: dict) -> dict:
+                if intel_client:
+                    return intel_client.discover_locators(
+                        page_url=payload.get("page_url", resolved_url),
+                        elements=[payload.get("element_name", "")],
+                        element_contexts=[payload],
+                        require_llm=True,
+                    )
+                # Fallback to direct agent call if SDK client is unavailable
+                try:
+                    from services.agents.locator_expert import LocatorExpertAgent
+                    from services.cache import Cache
+                    from services.knowledge.base import KnowledgeBase
+                    agent = LocatorExpertAgent(KnowledgeBase(), Cache())
+                    return agent.process({
+                        "page_url": payload.get("page_url", resolved_url),
+                        "element_name": payload.get("element_name", ""),
+                        "element_context": payload,
+                        "require_llm": True,
+                    })
+                except Exception as exc:
+                    raise RuntimeError(f"LocatorExpert discovery failed: {exc}") from exc
+
+            # Prepare live Playwright validator callback
+            def _count_candidate_matches(page, candidate: Locator) -> int:
+                val = candidate.value
+                strat = candidate.strategy
+                if strat == LocatorStrategy.ROLE:
+                    m = _re.match(r'^(\w[\w-]*)(?:\[name=(.+)\])?$', val)
+                    if m and m.group(2):
+                        role, name = m.group(1), m.group(2).strip('"\'')
+                        return page.get_by_role(role, name=name).count()
+                    return page.get_by_role(val).count()
+                elif strat == LocatorStrategy.LABEL:
+                    return page.get_by_label(val).count()
+                elif strat == LocatorStrategy.PLACEHOLDER:
+                    return page.get_by_placeholder(val).count()
+                elif strat == LocatorStrategy.TEST_ID:
+                    return page.get_by_test_id(val).count()
+                elif strat == LocatorStrategy.TEXT:
+                    return page.get_by_text(val).count()
+                elif strat == LocatorStrategy.XPATH:
+                    xpath_val = val if val.startswith("xpath=") else f"xpath={val}"
+                    return page.locator(xpath_val).count()
+                elif strat == LocatorStrategy.ALT_TEXT:
+                    return page.get_by_alt_text(val).count()
+                elif strat == LocatorStrategy.TITLE:
+                    return page.get_by_title(val).count()
+                else:
+                    return page.locator(val).count()
+
+            def validate_callback(candidate: Locator, payload: dict) -> dict:
+                # Open browser page to validate candidate match count if Playwright is available
+                try:
+                    from playwright.sync_api import sync_playwright
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=True)
+                        try:
+                            page = browser.new_page()
+                            page.goto(payload.get("page_url", resolved_url), timeout=30000)
+                            match_count = _count_candidate_matches(page, candidate)
+                            return {"match_count": match_count}
+                        finally:
+                            browser.close()
+                except Exception as exc:
+                    logger.debug("Live Playwright validation fallback warning: %s", exc)
+                    # If live validation cannot open page, return error
+                    return {"match_count": 0, "error": str(exc)}
+
+            fallback_result = resolve_with_locator_expert(
+                bundles,
+                page_url=resolved_url,
+                discover=discover_callback,
+                validate=validate_callback,
+            )
+            final_bundles = fallback_result.get("resolved_bundles", bundles)
+            unresolved_elements = fallback_result.get("unresolved_elements", [])
+            llm_calls = fallback_result.get("llm_calls", 0)
+            tokens_used = fallback_result.get("tokens_used", 0)
+            duration_ms = fallback_result.get("duration_ms", 0.0)
+
+            # Count newly resolved elements by LocatorExpert
+            initial_unresolved_names = {p["element_name"] for p in unresolved_payloads}
+            for bundle in final_bundles:
+                if bundle.element_name in initial_unresolved_names and bundle.primary.verified_in_snapshot is True:
+                    le_resolved_count += 1
+
+    still_unresolved_count = len(unresolved_elements)
+
     accepted = [
         bundle
-        for bundle in bundles
+        for bundle in final_bundles
         if bundle.primary.verified_in_snapshot is True
-    ]
-    unresolved = [
-        bundle
-        for bundle in bundles
-        if bundle.primary.verified_in_snapshot is not True
     ]
 
     if accepted:
@@ -1851,17 +1993,37 @@ def scan_locators(
         )
     else:
         print_warning("No uniquely validated LocatorBundles were available to save.")
-    if unresolved:
-        print_warning(
-            f"{len(unresolved)} element(s) remain unresolved; no Anthropic call "
-            "was made."
-        )
-        for bundle in unresolved:
-            print_warning(f"  {bundle.element_name}: no uniquely validated primary locator")
-    elif bundles:
+
+    # Detailed unresolved reporting
+    if unresolved_elements:
+        for elem in unresolved_elements:
+            elem_name = elem.get("element_name", "unknown")
+            reasons = ", ".join(elem.get("fallback_reasons", [])) or "unresolved"
+            attempted = bool(elem.get("attempted_locators"))
+            print_warning(
+                f"  {elem_name}: no uniquely validated primary locator "
+                f"(reasons: {reasons}, fallback attempted: {llm_fallback})"
+            )
+    elif final_bundles:
         print_success("All converted elements have a uniquely validated primary locator.")
+
     if raw_path is not None:
         print_info(f"Raw SmartLocatorAI artifacts kept in: {raw_path}")
+
+    # Summary reporting
+    click.echo("")
+    click.echo("Scan Summary:")
+    click.echo(f"  SmartLocatorAI resolved: {sl_resolved_count}")
+    click.echo(f"  Sent to LocatorExpert:   {sent_to_fallback_count}")
+    click.echo(f"  LocatorExpert resolved:  {le_resolved_count}")
+    click.echo(f"  Still unresolved:        {still_unresolved_count}")
+    click.echo("")
+    click.echo(f"  LLM calls:               {llm_calls}")
+    if tokens_used > 0:
+        click.echo(f"  Tokens used:             {tokens_used:,}")
+    if llm_fallback and sent_to_fallback_count > 0:
+        click.echo(f"  Fallback duration:       {duration_ms:,.0f} ms")
+
 
 
 @click.command()

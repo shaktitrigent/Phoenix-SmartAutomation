@@ -2,8 +2,20 @@
 
 import json
 import os
+import sys
 from contextlib import suppress
 from pathlib import Path
+
+# Ensure local repository packages are prioritized in sys.path
+repo_root = Path(__file__).resolve().parent
+shared_path = str(repo_root / "shared")
+phoenix_core_path = str(repo_root / "phoenix-core")
+if shared_path in sys.path:
+    sys.path.remove(shared_path)
+sys.path.insert(0, shared_path)
+if phoenix_core_path in sys.path:
+    sys.path.remove(phoenix_core_path)
+sys.path.insert(0, phoenix_core_path)
 
 import pytest
 

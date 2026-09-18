@@ -228,19 +228,48 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 
                 # Now merge with LocatorBundle format
                 if "primary" in existing:
-                    # Merge primary if it has higher confidence
-                    new_primary = loc["primary"]
-                    existing_primary = existing["primary"]
-                    if new_primary.get("confidence", 0) > existing_primary.get("confidence", 0):
-                        existing["primary"] = dict(new_primary)
+                    new_primary = dict(loc["primary"])
+                    existing_primary = dict(existing["primary"])
+                    
+                    existing_ver = existing_primary.get("verified_in_snapshot") is True
+                    new_ver = new_primary.get("verified_in_snapshot") is True
+                    
+                    # Choose primary: prefer snapshot-verified, then higher confidence
+                    if new_ver and not existing_ver:
+                        existing["primary"] = new_primary
+                        winner_is_new = True
+                    elif existing_ver and not new_ver:
+                        existing["primary"] = existing_primary
+                        winner_is_new = False
+                    elif new_primary.get("confidence", 0) > existing_primary.get("confidence", 0):
+                        existing["primary"] = new_primary
+                        winner_is_new = True
+                    else:
+                        existing["primary"] = existing_primary
+                        winner_is_new = False
+                    
+                    # Ensure the non-winning primary is preserved in alternates
+                    non_winner = existing_primary if winner_is_new else new_primary
+                    prim_key = (existing["primary"].get("strategy"), existing["primary"].get("value"))
+                    non_winner_key = (non_winner.get("strategy"), non_winner.get("value"))
+                    
+                    if non_winner_key != prim_key:
+                        if not any(
+                            (a.get("strategy"), a.get("value")) == non_winner_key
+                            for a in existing["alternates"]
+                        ):
+                            existing["alternates"].append(non_winner)
                     
                     # Add new alternates
                     for alt in loc.get("alternates", []):
-                        if not any(
-                            a.get("value") == alt.get("value") 
+                        alt_dict = dict(alt)
+                        alt_key = (alt_dict.get("strategy"), alt_dict.get("value"))
+                        if alt_key != prim_key and not any(
+                            (a.get("strategy"), a.get("value")) == alt_key 
                             for a in existing["alternates"]
                         ):
-                            existing["alternates"].append(dict(alt))
+                            existing["alternates"].append(alt_dict)
+
                     
                     # Merge metadata
                     existing["metadata"].update(loc.get("metadata") or {})

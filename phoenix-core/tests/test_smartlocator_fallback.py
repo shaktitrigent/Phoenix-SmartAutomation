@@ -5,6 +5,7 @@ from __future__ import annotations
 from phoenix.locators.smartlocator_fallback import (
     build_unresolved_payload,
     fallback_reasons,
+    intelligence_discoverer,
     parse_locator_expert_candidates,
     resolve_with_locator_expert,
 )
@@ -72,6 +73,10 @@ def test_payload_contains_identity_context_attempts_and_reasons():
     assert payload is not None
     assert payload["element_identity"] == "element_data:submit"
     assert payload["ancestor_context"]["container_id"] == "checkout"
+    assert payload["tag"] == "button"
+    assert payload["visible_text"] == "Submit"
+    assert payload["container_context"] == {"container_id": "checkout"}
+    assert payload["custom_name"] == "SubmitButton"
     assert payload["attempted_locators"][0]["match_count"] == 0
     assert "not_found" in payload["fallback_reasons"]
 
@@ -133,6 +138,8 @@ def test_only_live_unique_llm_candidate_is_merged_as_primary():
     assert bundle.primary.verified_in_snapshot is True
     assert bundle.primary.metadata["source"] == "locator_expert"
     assert bundle.primary.metadata["match_count"] == 1
+    assert bundle.primary.metadata["attempt_number"] == 2
+    assert bundle.primary.metadata["resolution_timestamp"]
     assert any(locator.value == ".submit" for locator in bundle.alternates)
 
 
@@ -149,6 +156,7 @@ def test_non_unique_llm_candidates_remain_unresolved():
     assert result["resolved_bundles"] == []
     assert len(result["unresolved_elements"]) == 1
     assert result["unresolved_elements"][0]["rejected_candidates"][0]["match_count"] == 0
+    assert result["unresolved_elements"][0]["rejected_candidates"][0]["rejection_reason"] == "not_found"
 
 
 def test_locator_expert_failure_remains_unresolved():
@@ -178,3 +186,53 @@ def test_validation_failure_remains_unresolved():
     assert rejection["match_count"] is None
     assert "validation_failed" in rejection["error"]
     assert result["duration_ms"] >= 0
+
+
+def test_unique_candidate_for_wrong_element_identity_is_rejected():
+    result = resolve_with_locator_expert(
+        [_bundle(match_count=2, stability="Medium")],
+        page_url="https://app.example",
+        discover=lambda _payload: {
+            "locators": [{"strategy": "css", "value": "#other-submit"}]
+        },
+        validate=lambda _candidate, _payload: {
+            "match_count": 1,
+            "element_identity": "element_data:different-button",
+        },
+    )
+
+    assert result["resolved_bundles"] == []
+    rejection = result["unresolved_elements"][0]["rejected_candidates"][0]
+    assert rejection["rejection_reason"] == "wrong_element_identity"
+
+
+def test_empty_locator_expert_response_has_final_failure_reason():
+    result = resolve_with_locator_expert(
+        [_bundle(match_count=0)],
+        page_url="https://app.example",
+        discover=lambda _payload: {"locators": []},
+        validate=lambda _candidate, _payload: {"match_count": 1},
+    )
+
+    assert result["unresolved_elements"][0]["final_failure_reason"] == (
+        "no_valid_locator_expert_candidates"
+    )
+
+
+def test_intelligence_discoverer_sends_one_scoped_strict_request():
+    class Client:
+        def __init__(self):
+            self.kwargs = None
+
+        def discover_locators(self, **kwargs):
+            self.kwargs = kwargs
+            return {"locators": []}
+
+    client = Client()
+    payload = build_unresolved_payload(_bundle(), page_url="https://app.example")
+    response = intelligence_discoverer(client)(payload)
+
+    assert response == {"locators": []}
+    assert client.kwargs["elements"] == []
+    assert client.kwargs["element_contexts"] == [payload]
+    assert client.kwargs["require_llm"] is True

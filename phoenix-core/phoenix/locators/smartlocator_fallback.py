@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from phoenix_shared.models.locator import Locator, LocatorBundle, LocatorStrategy
@@ -74,6 +75,13 @@ def fallback_reasons(bundle: LocatorBundle) -> List[str]:
     if any(isinstance(count, int) and count > 1 for count in match_counts):
         reasons.append("ambiguous")
 
+    has_validated_candidate = any(
+        record.get("validated") is True or record.get("match_count") == 1
+        for record in records
+    )
+    if records and not has_validated_candidate:
+        reasons.append("no_validated_candidate")
+
     has_working = any(
         record.get("element_has_working_locator") is True
         and record.get("working_locator_type")
@@ -101,6 +109,14 @@ def fallback_reasons(bundle: LocatorBundle) -> List[str]:
     if not records:
         reasons.append("missing_validation_evidence")
     return list(dict.fromkeys(reasons))
+
+
+def _first_present(*sources_and_keys: Any) -> Any:
+    """Return the first non-empty value from ``(mapping, key)`` pairs."""
+    for source, key in sources_and_keys:
+        if isinstance(source, dict) and source.get(key) not in (None, "", [], {}):
+            return source[key]
+    return None
 
 
 def build_unresolved_payload(
@@ -143,16 +159,64 @@ def build_unresolved_payload(
                 "stability": record.get("stability"),
                 "stability_score": record.get("stability_score"),
                 "warnings": record.get("warnings", []),
+                "dynamic": record.get("dynamic"),
+                "duplicate": record.get("duplicate"),
+                "context_strategy": record.get("context_strategy"),
             })
+
+    ancestor_context = element_data.get("ancestor_context", {})
+    if not isinstance(ancestor_context, dict):
+        ancestor_context = {}
+    first_record = records[0] if records else {}
+    stable_attributes = element_data.get("stable_attributes")
+    if not isinstance(stable_attributes, dict):
+        stable_attributes = {
+            key: element_data[key]
+            for key in ("id", "name", "role", "aria-label", "data-testid")
+            if element_data.get(key)
+        }
 
     return {
         "element_identity": metadata.get("element_identity"),
+        "custom_name": _first_present(
+            (metadata, "custom_name"), (first_record, "custom_name")
+        ),
         "element_name": bundle.element_name,
         "page": bundle.page,
         "page_url": page_url,
         "element_data": element_data,
-        "ancestor_context": element_data.get("ancestor_context", {}),
+        "tag": _first_present((element_data, "tag"), (element_data, "tag_name")),
+        "id": element_data.get("id"),
+        "name": element_data.get("name"),
+        "role": element_data.get("role"),
+        "label": _first_present((element_data, "label"), (element_data, "accessible_name")),
+        "placeholder": element_data.get("placeholder"),
+        "visible_text": _first_present(
+            (element_data, "visible_text"), (element_data, "text")
+        ),
+        "stable_attributes": stable_attributes,
+        "dom_path": _first_present((element_data, "dom_path"), (element_data, "xpath")),
+        "ancestor_context": ancestor_context,
+        "container_context": {
+            key: value for key, value in ancestor_context.items()
+            if key.startswith("container_") and value not in (None, "", [], {})
+        },
+        "section_context": _first_present(
+            (ancestor_context, "section_context"), (element_data, "section_context")
+        ),
+        "row_context": _first_present(
+            (ancestor_context, "row_context"), (element_data, "row_context")
+        ),
+        "distinguishing_text": _first_present(
+            (ancestor_context, "distinguishing_text"),
+            (element_data, "distinguishing_text"),
+        ),
         "attempted_locators": attempted,
+        "working_locator": {
+            "available": first_record.get("element_has_working_locator"),
+            "type": first_record.get("working_locator_type"),
+            "value": first_record.get("working_locator_value"),
+        },
         "fallback_reasons": reasons,
     }
 
@@ -209,6 +273,8 @@ def parse_locator_expert_candidates(
             "fallback_reasons": payload.get("fallback_reasons", []),
             "validation_result": "pending",
             "element_identity": payload.get("element_identity"),
+            "reason": raw.get("reason") or raw.get("description"),
+            "context_strategy": raw.get("context_strategy"),
         }
         candidates.append(Locator(
             element_name=payload["element_name"],
@@ -237,6 +303,8 @@ def merge_validated_fallback(
     candidate_metadata.update({
         "validation_result": "unique",
         "match_count": 1,
+        "resolution_timestamp": datetime.now(timezone.utc).isoformat(),
+        "attempt_number": validation.get("attempt_number"),
     })
     validated = candidate.model_copy(update={
         "verified_in_snapshot": True,
@@ -263,6 +331,10 @@ def merge_validated_fallback(
         "resolved": True,
         "fallback_reasons": candidate_metadata.get("fallback_reasons", []),
         "match_count": 1,
+        "source": "locator_expert",
+        "provider": candidate_metadata.get("provider"),
+        "model": candidate_metadata.get("model"),
+        "resolution_timestamp": candidate_metadata["resolution_timestamp"],
     }
     return bundle.model_copy(update={
         "primary": primary,
@@ -301,7 +373,8 @@ def resolve_with_locator_expert(
             continue
         merged = None
         rejected = []
-        for candidate in parse_locator_expert_candidates(response, payload):
+        candidates = parse_locator_expert_candidates(response, payload)
+        for attempt_number, candidate in enumerate(candidates, start=1):
             try:
                 validation = validate(candidate, payload)
             except Exception as exc:
@@ -310,21 +383,49 @@ def resolve_with_locator_expert(
                     "value": candidate.value,
                     "match_count": None,
                     "error": f"validation_failed: {exc}",
+                    "attempt_number": attempt_number,
+                    "rejection_reason": "browser_validation_error",
                 })
                 continue
-            if validation.get("match_count") == 1:
+            validation = dict(validation or {})
+            validation["attempt_number"] = attempt_number
+            expected_identity = payload.get("element_identity")
+            actual_identity = validation.get("element_identity")
+            identity_matches = validation.get("identity_matches")
+            wrong_identity = identity_matches is False or (
+                expected_identity and actual_identity and expected_identity != actual_identity
+            )
+            if validation.get("match_count") == 1 and not wrong_identity:
                 merged = merge_validated_fallback(bundle, candidate, validation)
                 break
+            match_count = validation.get("match_count")
+            if wrong_identity:
+                rejection_reason = "wrong_element_identity"
+            elif match_count == 0:
+                rejection_reason = "not_found"
+            elif isinstance(match_count, int) and match_count > 1:
+                rejection_reason = "ambiguous"
+            else:
+                rejection_reason = "invalid_validation_result"
             rejected.append({
                 "strategy": candidate.strategy.value,
                 "value": candidate.value,
-                "match_count": validation.get("match_count"),
+                "match_count": match_count,
                 "error": validation.get("error"),
+                "attempt_number": attempt_number,
+                "rejection_reason": rejection_reason,
             })
         if merged is not None:
             resolved.append(merged)
         else:
-            unresolved.append({**payload, "rejected_candidates": rejected})
+            unresolved.append({
+                **payload,
+                "rejected_candidates": rejected,
+                "final_failure_reason": (
+                    "no_valid_locator_expert_candidates" if not candidates
+                    else "all_locator_expert_candidates_rejected"
+                ),
+            })
 
     untouched = [bundle for bundle in bundles if build_unresolved_payload(bundle, page_url=page_url) is None]
     return {
@@ -333,3 +434,16 @@ def resolve_with_locator_expert(
         "llm_calls": llm_calls,
         "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
     }
+
+
+def intelligence_discoverer(client: Any) -> DiscoveryCallable:
+    """Adapt ``IntelligenceClient`` to the scoped fallback discovery contract."""
+    def discover(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return client.discover_locators(
+            page_url=payload.get("page_url", ""),
+            elements=[],
+            element_contexts=[payload],
+            require_llm=True,
+        )
+
+    return discover

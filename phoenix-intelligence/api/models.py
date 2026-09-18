@@ -10,6 +10,7 @@ class TestGenerationOptions(BaseModel):
     test_type: str = Field(default="both", description="manual, automation, or both")
     risk_level: Optional[str] = Field(default=None, description="smoke, regression, edge")
     output_style: Optional[str] = Field(default=None, description="markdown or gherkin")
+    use_pom: bool = Field(default=True, description="Generate Page Object Model structure")
 
 
 class SupportingDocument(BaseModel):
@@ -34,6 +35,10 @@ class TestGenerationRequest(BaseModel):
     supporting_documents: List[SupportingDocument] = Field(
         default=[],
         description="Supporting artefacts for the user story (wireframes, specs, schemas, etc.)",
+    )
+    mcp_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="MCP configuration for DOM inspection during generation",
     )
 
 
@@ -62,8 +67,13 @@ class ManualTestCase(BaseModel):
 class Locator(BaseModel):
     """Locator schema for UI elements."""
 
+    model_config = ConfigDict(extra="allow")
+
     element: Optional[str] = None
+    element_name: Optional[str] = None
+    element_identity: Optional[str] = None
     selector: Optional[str] = None
+    value: Optional[str] = None
     strategy: Optional[str] = None
     confidence: Optional[float] = None
 
@@ -111,8 +121,10 @@ class LocatorDiscoveryRequest(BaseModel):
     """Request payload for locator discovery."""
 
     page_url: str
-    elements: List[str]
+    elements: List[str] = Field(default_factory=list)
     dom_snapshot: Optional[str] = None
+    element_contexts: List[Dict[str, Any]] = Field(default_factory=list)
+    require_llm: bool = False
 
 
 class LocatorDiscoveryResponse(BaseModel):
@@ -171,6 +183,10 @@ class AutomateRequest(BaseModel):
     keywords: Optional[str] = Field(
         default=None,
         description="Keyword catalog summary for injection into the BDD prompt",
+    )
+    mcp_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="MCP configuration for DOM inspection during automation generation",
     )
 
 

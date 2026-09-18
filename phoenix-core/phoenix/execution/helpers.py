@@ -4,8 +4,8 @@ Import in generated scripts with:
     from phoenix.execution.helpers import safe_click, safe_fill, open_dropdown, ...
 
 All helpers follow the Wait→Act→Assert pattern and handle the most common
-failure modes identified across SauceDemo, OrangeHRM, DemoQA, Demoblaze,
-and Maxima Apparel test runs.
+failure modes identified across enterprise web applications including
+SPA frameworks, complex navigation, dynamic content, and authentication flows.
 """
 
 from __future__ import annotations
@@ -214,7 +214,7 @@ def open_nested_menu(
     """Click a parent menu item and wait for the child item to be visible.
 
     Use this for navigation structures where sub-items are hidden until
-    the parent menu is expanded (e.g., OrangeHRM sidebar).
+    the parent menu is expanded (common in enterprise application sidebars).
 
     Args:
         page: Playwright Page.

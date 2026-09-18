@@ -54,7 +54,9 @@ def auth_storage_state(browser: Browser) -> dict:
         lp.login(os.environ["TEST_USERNAME"], os.environ["TEST_PASSWORD"])
     except ImportError:
         # Fallback when pages/ are not yet generated
-        page.goto(f"{_BASE_URL}/login", timeout=60_000)
+        # CRITICAL FIX: Use base_url without assuming /login path
+        # Phoenix DOM intelligence will detect login components from the actual page
+        page.goto(_BASE_URL, timeout=60_000)
         page.get_by_label("Username").fill(os.environ["TEST_USERNAME"])
         page.get_by_label("Password").fill(os.environ["TEST_PASSWORD"])
         page.get_by_role("button", name="Login").click()

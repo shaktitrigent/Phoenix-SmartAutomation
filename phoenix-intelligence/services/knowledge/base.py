@@ -46,6 +46,7 @@ class KnowledgeBase:
         self.domain_knowledge_path = self.base_path / "domain_knowledge"
         self.best_practices_path = self.base_path / "best_practices"
         self.playwright_path = self.base_path / "playwright"
+        self.semantic_patterns_path = self.base_path / "semantic_patterns"  # Priority 20
 
         # Ensure directories exist
         self._ensure_directories()
@@ -58,6 +59,7 @@ class KnowledgeBase:
             self.domain_knowledge_path,
             self.best_practices_path,
             self.playwright_path,
+            self.semantic_patterns_path,  # Priority 20
         ]:
             path.mkdir(parents=True, exist_ok=True)
 
@@ -278,6 +280,31 @@ class KnowledgeBase:
             ]
 
         return entries
+    
+    def get_semantic_patterns(self, query: Optional[str] = None) -> List[KnowledgeEntry]:
+        """
+        Get semantic patterns for universal application understanding (Priority 20).
+
+        Args:
+            query: Optional search query to filter patterns
+
+        Returns:
+            List of semantic pattern entries
+        """
+        cache_key = f"semantic_patterns:{query or 'all'}"
+        entries = self._cached_or_load(cache_key, self.semantic_patterns_path, "semantic_patterns")
+
+        if query:
+            query_lower = query.lower()
+            entries = [
+                e
+                for e in entries
+                if query_lower in e.title.lower()
+                or query_lower in e.content.lower()
+                or any(query_lower in tag.lower() for tag in e.tags)
+            ]
+
+        return entries
 
     def search(self, query: str, categories: Optional[List[str]] = None) -> List[KnowledgeEntry]:
         """
@@ -299,6 +326,7 @@ class KnowledgeBase:
                 "domain_knowledge",
                 "best_practices",
                 "playwright",
+                "semantic_patterns",  # Priority 20
             ]
 
         if "test_patterns" in categories:
@@ -311,6 +339,8 @@ class KnowledgeBase:
             all_entries.extend(self.get_best_practices(query))
         if "playwright" in categories:
             all_entries.extend(self.get_playwright_knowledge(query))
+        if "semantic_patterns" in categories:
+            all_entries.extend(self.get_semantic_patterns(query))  # Priority 20
 
         return all_entries
 
@@ -331,6 +361,7 @@ class KnowledgeBase:
             patterns = self.get_test_patterns(query)
             practices = self.get_best_practices(query)
             playwright_rules = self.get_playwright_knowledge()
+            semantic_patterns = self.get_semantic_patterns(query)  # Priority 20
 
             if patterns:
                 context_parts.append("## Test Patterns")
@@ -349,10 +380,17 @@ class KnowledgeBase:
                 for rule in playwright_rules[:10]:  # All 4 files + headroom
                     context_parts.append(f"### {rule.title}")
                     context_parts.append(rule.content[:800])  # Allow more for rules
+            
+            if semantic_patterns:  # Priority 20
+                context_parts.append("\n## Semantic Patterns (Universal Application Understanding)")
+                for pattern in semantic_patterns[:3]:  # Limit to top 3
+                    context_parts.append(f"### {pattern.title}")
+                    context_parts.append(pattern.content[:500])
 
         elif agent_type == "locator_expert":
             strategies = self.get_locator_strategies(query)
             playwright_rules = self.get_playwright_knowledge("locator")
+            semantic_patterns = self.get_semantic_patterns("component")  # Priority 20
 
             if strategies:
                 context_parts.append("## Locator Strategies")
@@ -365,6 +403,12 @@ class KnowledgeBase:
                 for rule in playwright_rules[:5]:
                     context_parts.append(f"### {rule.title}")
                     context_parts.append(rule.content[:800])
+            
+            if semantic_patterns:  # Priority 20
+                context_parts.append("\n## Semantic Component Patterns")
+                for pattern in semantic_patterns[:3]:
+                    context_parts.append(f"### {pattern.title}")
+                    context_parts.append(pattern.content[:500])
 
         elif agent_type == "failure_analyzer":
             practices = self.get_best_practices("failure")
@@ -375,5 +419,30 @@ class KnowledgeBase:
                 for practice in practices[:3]:
                     context_parts.append(f"### {practice.title}")
                     context_parts.append(practice.content[:500])
+        
+        elif agent_type == "semantic_analyzer":  # Priority 20
+            page_patterns = self.get_semantic_patterns("page")
+            component_patterns = self.get_semantic_patterns("component")
+            
+            if page_patterns:
+                context_parts.append("## Semantic Page Type Patterns")
+                for pattern in page_patterns[:5]:
+                    context_parts.append(f"### {pattern.title}")
+                    context_parts.append(pattern.content[:800])
+            
+            if component_patterns:
+                context_parts.append("\n## Semantic Component Patterns")
+                for pattern in component_patterns[:5]:
+                    context_parts.append(f"### {pattern.title}")
+                    context_parts.append(pattern.content[:800])
+        
+        else:
+            # Add semantic patterns for all other agents (Priority 20)
+            semantic_patterns = self.get_semantic_patterns(query)
+            if semantic_patterns:
+                context_parts.append("\n## Semantic Patterns (Universal Application Understanding)")
+                for pattern in semantic_patterns[:3]:
+                    context_parts.append(f"### {pattern.title}")
+                    context_parts.append(pattern.content[:500])
 
         return "\n\n".join(context_parts)

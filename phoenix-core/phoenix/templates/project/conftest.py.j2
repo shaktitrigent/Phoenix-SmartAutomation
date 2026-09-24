@@ -9,12 +9,16 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env.local", override=True)
 
 BASE_URL = os.environ.get("APP_URL", "{{ base_url }}")
 DEFAULT_BROWSER = os.environ.get("PHOENIX_BROWSER", "{{ browser }}")

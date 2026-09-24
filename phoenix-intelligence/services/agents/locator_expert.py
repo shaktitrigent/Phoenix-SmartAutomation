@@ -23,17 +23,36 @@ class LocatorExpertAgent(BaseAgent):
         4. Falls back to role/test-id heuristic when LLM is unavailable.
     """
 
+    def __init__(self, *args, artifacts_manager=None, dom_snapshot_manager=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.artifacts_manager = artifacts_manager
+        self.dom_snapshot_manager = dom_snapshot_manager
+
     def process(self, input_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         page_url = input_data.get("page_url", "")
         element_name = input_data.get("element_name", "")
         dom_snapshot = input_data.get("dom_snapshot")
+        element_context = input_data.get("element_context") or {}
+        require_llm = bool(input_data.get("require_llm", False))
 
-        cache_key = self._cache_key("locator", page_url=page_url, element_name=element_name)
+        cache_key = self._cache_key(
+            "locator",
+            page_url=page_url,
+            element_name=element_name,
+            element_context=element_context,
+            require_llm=require_llm,
+        )
         cached = self.cache.get(cache_key)
         if cached:
             return cached
 
-        locators = self._discover_locators(element_name, page_url, dom_snapshot)
+        locators = self._discover_locators(
+            element_name,
+            page_url,
+            dom_snapshot,
+            element_context=element_context,
+            require_llm=require_llm,
+        )
 
         result = {
             "locators": locators,
@@ -41,10 +60,18 @@ class LocatorExpertAgent(BaseAgent):
             "metadata": {
                 "page_url": page_url,
                 "element_name": element_name,
+                "element_identity": element_context.get("element_identity"),
                 "llm_used": bool(self.llm_client),
                 "mcp_used": bool(self.mcp_client and page_url),
+                "provider": getattr(getattr(self.llm_client, "settings", None), "provider", None),
+                "model": getattr(getattr(self.llm_client, "settings", None), "model", None),
+                "strict_conditional_fallback": require_llm,
             },
         }
+
+        # Save locator artifacts if artifacts manager is available
+        if self.artifacts_manager and locators:
+            self._save_locator_artifacts(element_name, locators, page_url)
 
         self.cache.set(cache_key, result, ttl=7200)
         return result
@@ -56,9 +83,32 @@ class LocatorExpertAgent(BaseAgent):
         element_name: str,
         page_url: str,
         dom_snapshot: Optional[str],
+        element_context: Optional[Dict[str, Any]] = None,
+        require_llm: bool = False,
     ) -> List[Dict[str, Any]]:
+        # Conditional SmartLocatorAI fallback must never manufacture heuristic
+        # candidates: without a real LocatorExpert response it stays unresolved.
+        if require_llm:
+            if not self.llm_client:
+                logger.warning(
+                    "LocatorExpertAgent: strict fallback requested without an LLM client"
+                )
+                return []
+            try:
+                return self._discover_via_llm(
+                    element_name, page_url, dom_snapshot, element_context
+                )
+            except Exception as exc:
+                logger.warning(
+                    "LocatorExpertAgent: strict LLM discovery failed; element remains unresolved: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return []
         return self._llm_with_fallback(
-            llm_fn=lambda: self._discover_via_llm(element_name, page_url, dom_snapshot),
+            llm_fn=lambda: self._discover_via_llm(
+                element_name, page_url, dom_snapshot, element_context
+            ),
             fallback_fn=lambda: self._heuristic_locators(element_name),
             operation="LocatorExpertAgent",
         )
@@ -68,6 +118,7 @@ class LocatorExpertAgent(BaseAgent):
         element_name: str,
         page_url: str,
         dom_snapshot: Optional[str],
+        element_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         # Get live page snapshot via MCP if we don't already have one.
         # Phase D: best-effort — a failing MCP call must not abort locator discovery.
@@ -75,7 +126,26 @@ class LocatorExpertAgent(BaseAgent):
         if not snapshot and self.mcp_client and page_url:
             logger.info("Fetching page snapshot via MCP: %s", page_url)
             try:
-                snapshot = self.mcp_client.inspect_page(page_url) or ""
+                # Pass project, page, and execution_id for DOM reuse
+                import time
+                execution_id = f"locator_{int(time.time())}"
+                snapshot = self.mcp_client.inspect_page(
+                    page_url,
+                    project="locator_generation",
+                    page=element_name,
+                    execution_id=execution_id
+                ) or ""
+                
+                # Record DOM consumption
+                if self.dom_snapshot_manager and snapshot:
+                    dom_hash = self.dom_snapshot_manager.compute_dom_hash(snapshot)
+                    self.dom_snapshot_manager.record_dom_consumer(
+                        module_name="LocatorExpertAgent",
+                        dom_hash=dom_hash,
+                        purpose="locator_generation",
+                        success=True
+                    )
+                    
             except Exception as _mcp_exc:
                 logger.warning(
                     "MCP inspect_page failed for %s — continuing without snapshot: %s",
@@ -92,6 +162,15 @@ class LocatorExpertAgent(BaseAgent):
             f"Discover stable Playwright locators for the element: **{element_name}**",
             f"\nPage URL: {page_url or 'not provided'}",
         ]
+        if element_context:
+            user_parts += [
+                "\n## Unresolved Element Evidence",
+                "Use only this element's identity, DOM context, attempted selectors, and "
+                "validation results. Do not use positional selectors to force uniqueness.",
+                "```json",
+                json.dumps(element_context, indent=2, sort_keys=True, default=str),
+                "```",
+            ]
         if knowledge_context:
             user_parts.append(f"\n## Locator Strategy Knowledge\n{knowledge_context[:1000]}")
         if snapshot:
@@ -160,3 +239,44 @@ class LocatorExpertAgent(BaseAgent):
                 "description": "test-id fallback (heuristic)",
             },
         ]
+    
+    def _save_locator_artifacts(
+        self,
+        element_name: str,
+        locators: List[Dict[str, Any]],
+        page_url: str
+    ) -> None:
+        """Save locator artifacts with full metadata.
+        
+        Args:
+            element_name: Name of the element
+            locators: List of locator dictionaries
+            page_url: Page URL
+        """
+        if not self.artifacts_manager:
+            return
+        
+        try:
+            from phoenix.execution.artifacts import LocatorRecord
+            
+            # Convert locator dicts to LocatorRecord objects
+            locator_records = []
+            for idx, loc in enumerate(locators):
+                record = LocatorRecord(
+                    element_name=element_name,
+                    locator=loc.get("playwright_code", loc.get("value", "")),
+                    locator_type=loc.get("strategy", "unknown"),
+                    priority=idx,
+                    confidence=loc.get("confidence", 0.0),
+                    source="llm" if self.llm_client else "heuristic",
+                    generated_by="LocatorExpertAgent",
+                    validation_result="pending",
+                    reason=loc.get("description", "")
+                )
+                locator_records.append(record)
+            
+            self.artifacts_manager.save_locators(element_name, locator_records)
+            logger.info(f"[LOCATOR] Artifacts saved for {element_name}: {len(locators)} locators")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save locator artifacts: {e}")

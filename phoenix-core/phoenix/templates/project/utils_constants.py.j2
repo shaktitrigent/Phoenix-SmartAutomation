@@ -19,7 +19,9 @@ TIMEOUTS = {
 
 URLS = {
     "base":    os.environ.get("APP_URL", "{{ base_url }}"),
-    "login":   os.environ.get("APP_URL", "{{ base_url }}") + "/auth/login",
+    # CRITICAL FIX: Removed hardcoded /auth/login path
+    # Phoenix DOM intelligence will detect login components from the actual page
+    # Applications should configure their specific login paths in environment or page objects
 }
 
 # ---------------------------------------------------------------------------

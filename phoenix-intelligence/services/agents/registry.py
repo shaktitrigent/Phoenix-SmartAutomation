@@ -9,6 +9,7 @@ from services.agents.script_fixer import ScriptFixerAgent
 from services.agents.test_generator import TestGeneratorAgent
 from services.cache import Cache
 from services.knowledge.base import KnowledgeBase
+from services.request_config import RequestConfig
 
 
 class AgentRegistry:
@@ -136,9 +137,10 @@ class AgentRegistry:
         use_bdd: bool = False,
         keywords: str = "",
         project_context: Optional[Dict[str, Any]] = None,
+        request_config: Optional[RequestConfig] = None,
     ) -> Dict[str, Any]:
-        # Phase 1 carries metadata to the service boundary only. Do not load
-        # environment files, select locator bundles, or mutate shared clients.
+        # Request configuration is carried to this boundary only. Consumption
+        # and request-scoped LLM initialization belong to Phase 3.
         agent = self._agents.get("test_generator")
         result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,

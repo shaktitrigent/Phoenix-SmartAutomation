@@ -80,6 +80,7 @@ from services.knowledge.base import KnowledgeBase
 from services.llm.client import LLMClient
 from services.mcp.client import MCPClient
 from services.agents.registry import AgentRegistry
+from services.request_config import load_request_config
 from api.models import (
     AutomateRequest,
     AutomateResponse,
@@ -390,6 +391,7 @@ def automate_from_manual(payload: AutomateRequest):
     context_kwargs = {}
     if payload.project_context is not None:
         context_kwargs["project_context"] = payload.project_context.model_dump()
+        context_kwargs["request_config"] = load_request_config(payload.project_context)
     result = _agent_registry.automate_from_manual(
         manual_tests=payload.manual_tests,
         application_url=payload.application_url,

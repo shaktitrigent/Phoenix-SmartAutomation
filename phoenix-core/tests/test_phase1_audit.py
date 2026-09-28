@@ -48,6 +48,9 @@ def test_real_registry_boundary_has_no_context_side_effects(
     boundary = Mock(wraps=registry.automate_from_manual)
     monkeypatch.setattr(registry, "automate_from_manual", boundary)
     monkeypatch.setattr(server, "_agent_registry", registry)
+    # Phase 2 loading has dedicated tests; keep this Phase 1 boundary audit
+    # independent of file reads while still exercising the real registry.
+    monkeypatch.setattr(server, "load_request_config", lambda context: None)
     settings_before = vars(server._mcp_settings).copy()
     environment_before = dict(os.environ)
 

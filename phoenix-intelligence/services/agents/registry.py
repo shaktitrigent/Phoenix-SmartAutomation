@@ -135,7 +135,10 @@ class AgentRegistry:
         use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
+        project_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        # Phase 1 carries metadata to the service boundary only. Do not load
+        # environment files, select locator bundles, or mutate shared clients.
         agent = self._agents.get("test_generator")
         result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,

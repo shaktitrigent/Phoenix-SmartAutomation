@@ -25,6 +25,8 @@ classifiers = [
 ]
 
 dependencies = [
+    # Supplied locally with this monorepo/release; see README installation commands.
+    "phoenix-shared==0.1.5",
     "playwright>=1.40.0",
     "pytest>=7.4.0",
     "pytest-playwright>=0.4.0",

@@ -2,6 +2,7 @@
 
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, ConfigDict, Field
+from phoenix_shared.contracts.project_context import ProjectContext
 
 
 class TestGenerationOptions(BaseModel):
@@ -164,6 +165,9 @@ class AutomateRequest(BaseModel):
         description="Structured manual test dicts parsed from manual_tests/ directory"
     )
     application_url: Optional[str] = Field(default=None, description="Application URL under test")
+    project_context: Optional[ProjectContext] = Field(
+        default=None, description="Client project metadata; paths are not opened or resolved by the API"
+    )
     domain_knowledge: Optional[str] = Field(
         default=None,
         description="Project-specific context from domain_knowledge/ directory",

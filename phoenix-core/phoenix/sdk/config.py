@@ -20,6 +20,26 @@ from pydantic import BaseModel, Field
 from phoenix.integrations.jira.config import JiraConfig
 
 
+def resolve_config_path(
+    config_path: Optional[str] = None, *, search_parents: bool = False
+) -> Optional[Path]:
+    """Resolve an explicit config or discover one using Phoenix's filename order.
+
+    Automation searches all ancestors; other callers retain the historical
+    current-directory/parent-directory discovery scope.
+    """
+    if config_path is not None:
+        return Path(config_path).resolve()
+    current = Path.cwd().resolve()
+    directories = [current, *current.parents] if search_parents else [current, current.parent]
+    for directory in directories:
+        for filename in (".phoenixrc", "phoenix.yaml", "config.yaml"):
+            candidate = directory / filename
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def _load_toml(path: Path) -> Dict[str, Any]:
     """Load a TOML file using stdlib tomllib (3.11+) or the tomli back-port."""
     print("[DEBUG] ===== _load_toml() called =====")
@@ -27,29 +47,6 @@ def _load_toml(path: Path) -> Dict[str, Any]:
     print("[DEBUG] filepath.resolve():", path.resolve())
     print("[DEBUG] filepath.exists():", path.exists())
     
-    # Print file contents with line numbers before loading
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            contents = f.read()
-            # Write to temp file to avoid console encoding issues
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.txt', delete=False) as temp_f:
-                temp_f.write(f"TOML file contents: {path}\n")
-                temp_f.write("=" * 80 + "\n")
-                for i, line in enumerate(contents.split('\n'), 1):
-                    temp_f.write(f"{i:4d}: {line}\n")
-                temp_path = temp_f.name
-            print(f"[DEBUG] TOML file contents written to: {temp_path}")
-    except Exception as e:
-        print(f"[DEBUG] Error reading file: {e}")
-        # Try reading as binary
-        try:
-            with open(path, "rb") as f:
-                contents = f.read()
-                print(f"[DEBUG] Binary file contents (first 500 bytes): {contents[:500]}")
-        except Exception as e2:
-            print(f"[DEBUG] Error reading binary file: {e2}")
-        
     if sys.version_info >= (3, 11):
         import tomllib
 
@@ -204,21 +201,7 @@ class PhoenixConfig(BaseModel):
         traceback.print_stack()
         print("[DEBUG] config_path parameter:", config_path)
         
-        if config_path is None:
-            current_dir = Path.cwd()
-            print("[DEBUG] Auto-discovery current_dir:", current_dir)
-            print("[DEBUG] Auto-discovery parent_dir:", current_dir.parent)
-            for search_dir in [current_dir, current_dir.parent]:
-                print("[DEBUG] Searching in:", search_dir)
-                for filename in [".phoenixrc", "phoenix.yaml", "config.yaml"]:
-                    candidate = search_dir / filename
-                    print(f"[DEBUG] Checking candidate: {candidate} - exists: {candidate.exists()}")
-                    if candidate.exists():
-                        config_path = str(candidate)
-                        print("[DEBUG] Found config file:", config_path)
-                        break
-                if config_path:
-                    break
+        config_path = resolve_config_path(config_path)
 
         if config_path is None or not Path(config_path).exists():
             print("[DEBUG] No config file found, loading from environment")

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urljoin
 
 import requests
 
 from phoenix.sdk.config import PhoenixConfig
+from phoenix_shared.contracts.project_context import ProjectContext
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ class IntelligenceClient:
         mcp_command: str = "npx",
         mcp_args: str = "@playwright/mcp@latest",
         mcp_timeout: int = 60,
+        project_context: Optional[Union[ProjectContext, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
@@ -194,6 +196,8 @@ class IntelligenceClient:
                 "timeout": mcp_timeout,
             }
         }
+        if project_context is not None:
+            payload["project_context"] = ProjectContext.model_validate(project_context).model_dump()
         return self._post("/api/v1/tests/automate", payload)
 
     def fix_script(

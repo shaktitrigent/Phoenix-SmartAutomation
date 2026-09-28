@@ -874,10 +874,12 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     from phoenix.generators.manual_parser import load_manual_tests_from_dir, load_manual_tests_from_file
     from phoenix.locators.extractor import extract_locators_from_script, page_name_from_script_path
     from phoenix.locators.registry import LocatorRegistry
-    from phoenix.sdk.config import PhoenixConfig
+    from phoenix.sdk.config import PhoenixConfig, resolve_config_path
     from phoenix.sdk.intelligence_client import IntelligenceClient
+    from phoenix_shared.contracts.project_context import ProjectContext
 
-    config_path = ctx.obj.get("config_path")
+    config_path = resolve_config_path(ctx.obj.get("config_path"), search_parents=True)
+    project_root = config_path.parent if config_path else Path.cwd().resolve()
     verbose = ctx.obj.get("verbose", False)
     config = PhoenixConfig.load(config_path)
 
@@ -937,7 +939,6 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         raise click.Abort()
 
     # Load project-specific domain knowledge
-    project_root = Path(config_path).parent if config_path else Path.cwd()
     domain_knowledge = _load_domain_knowledge(project_root)
     if domain_knowledge:
         print_info("Domain knowledge loaded from domain_knowledge/")
@@ -1004,6 +1005,13 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             _logging.getLogger(__name__).warning("Keyword catalog load failed (non-fatal): %s", _exc)
 
     # Call intelligence server with enhanced MCP/DOM configuration
+    project_context = ProjectContext(
+        project_root=str(project_root),
+        application_url=application_url,
+        page_name=_module_from_file(manual_path),
+        locator_directory=str(project_root / "locators"),
+        environment_file=str(project_root / ".env.local"),
+    )
     intel_client = IntelligenceClient(config)
     try:
         click.echo("")
@@ -1022,6 +1030,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             mcp_command="npx",
             mcp_args="@playwright/mcp@latest",
             mcp_timeout=120,  # Increased timeout for comprehensive DOM analysis
+            project_context=project_context,
         )
     except Exception as exc:
         print_error(f"Intelligence server error: {exc}")

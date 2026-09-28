@@ -387,6 +387,9 @@ def automate_from_manual(payload: AutomateRequest):
         # Update agent registry with new MCP client
         _agent_registry._mcp_client = _mcp_client
     
+    context_kwargs = {}
+    if payload.project_context is not None:
+        context_kwargs["project_context"] = payload.project_context.model_dump()
     result = _agent_registry.automate_from_manual(
         manual_tests=payload.manual_tests,
         application_url=payload.application_url,
@@ -395,6 +398,7 @@ def automate_from_manual(payload: AutomateRequest):
         use_pom=payload.use_pom,
         use_bdd=payload.use_bdd,
         keywords=payload.keywords or "",
+        **context_kwargs,
     )
     
     # Restore original MCP settings

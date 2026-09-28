@@ -76,8 +76,24 @@ phoenix locators scan --url "https://app.example" --page login --keep-raw
 
 ```powershell
 cd phoenix-core
-pip install -e .
+python -m pip install -e ../shared -e .
 ```
+
+`phoenix-shared` is supplied by this repository, not assumed to be available on
+PyPI. Keep the sibling `shared/` directory when installing Core from source.
+The command above supplies both local distributions to pip in one operation.
+The existing repository-root flow (install Shared first, then Core) also works.
+
+For a standalone wheel installation, obtain matching Shared and Core wheels
+from the same release and run from their directory:
+
+```powershell
+python -m pip install ./phoenix_shared-0.1.5-py3-none-any.whl ./phoenix_core-0.1.5-py3-none-any.whl
+```
+
+Core's metadata requires the matching Shared version. Installing a Core wheel
+alone requires that version to be already installed or supplied through a local
+wheel directory; no public Shared package is assumed.
 
 ## Key design decisions
 

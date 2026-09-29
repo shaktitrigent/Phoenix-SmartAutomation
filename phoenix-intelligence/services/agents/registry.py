@@ -10,6 +10,10 @@ from services.agents.test_generator import TestGeneratorAgent
 from services.cache import Cache
 from services.knowledge.base import KnowledgeBase
 from services.request_config import RequestConfig
+from services.request_llm import build_request_llm
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRegistry:
@@ -100,7 +104,23 @@ class AgentRegistry:
         dom_snapshot: Optional[str] = None,
         element_context: Optional[Dict[str, Any]] = None,
         require_llm: bool = False,
+        request_config: Optional[RequestConfig] = None,
     ) -> Dict[str, Any]:
+        if request_config is not None:
+            request_llm = build_request_llm(request_config.values)
+            agent = LocatorExpertAgent(
+                self.knowledge_base,
+                Cache(),
+                mcp_client=self._mcp_client,
+                llm_client=request_llm.client,
+            )
+            return agent.process({
+                "page_url": page_url,
+                "element_name": element_name,
+                "dom_snapshot": dom_snapshot,
+                "element_context": element_context or {},
+                "require_llm": require_llm,
+            })
         return self.invoke_agent(
             "locator_expert",
             {
@@ -138,10 +158,42 @@ class AgentRegistry:
         keywords: str = "",
         project_context: Optional[Dict[str, Any]] = None,
         request_config: Optional[RequestConfig] = None,
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        # Request configuration is carried to this boundary only. Consumption
-        # and request-scoped LLM initialization belong to Phase 3.
-        agent = self._agents.get("test_generator")
+        llm_client = self._llm_client
+        llm_reason = None
+        if request_config is not None:
+            request_llm = build_request_llm(request_config.values)
+            llm_client = request_llm.client
+            llm_reason = request_llm.reason
+        existing_agent = self._agents.get("test_generator")
+        fully_initialized = hasattr(self, "knowledge_base") and hasattr(self, "cache")
+        if fully_initialized:
+            # Agents are request-local: a client created for one project is
+            # never stored on the registry or reused by another request.
+            agent = TestGeneratorAgent(
+                self.knowledge_base, self.cache,
+                mcp_client=self._mcp_client, llm_client=llm_client,
+            )
+            LocatorExpertAgent(
+                self.knowledge_base, self.cache,
+                mcp_client=self._mcp_client, llm_client=llm_client,
+            )
+        else:
+            # Preserve compatibility with lightweight/embedded registries and
+            # older integrations that provide a generator without initializing
+            # the registry service container. Production registries always use
+            # the request-local branch above.
+            if existing_agent is None:
+                raise RuntimeError("test_generator_agent_unavailable")
+            agent = existing_agent
+        bundles = locator_bundles or []
+        logger.info(
+            "Automation request: project_context=%s config_source=%s bundles=%d llm_available=%s",
+            project_context is not None,
+            ",".join(request_config.diagnostics.sources) if request_config else "legacy",
+            len(bundles), bool(llm_client),
+        )
         result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,
             application_url=application_url,
@@ -150,8 +202,22 @@ class AgentRegistry:
             use_pom=use_pom,
             use_bdd=use_bdd,
             keywords=keywords,
+            locator_bundles=bundles,
         )
-        return self._with_runtime_metadata(result, "test_generator")
+        result.setdefault("metadata", {})
+        result["metadata"].update({
+            "agent": "test_generator",
+            "llm_configured": bool(llm_client),
+            "locator_bundles_loaded": len(bundles),
+            "locator_sources": sorted({
+                (b.get("metadata") or {}).get("locator_source", "unresolved")
+                for b in bundles
+            }),
+            "locator_expert_scope": "unresolved_elements_only",
+        })
+        if llm_reason:
+            result["metadata"]["llm_unavailable_reason"] = llm_reason
+        return result
 
     def fix_script(
         self,

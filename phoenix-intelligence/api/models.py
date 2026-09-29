@@ -122,6 +122,7 @@ class LocatorDiscoveryRequest(BaseModel):
     """Request payload for locator discovery."""
 
     page_url: str
+    project_context: Optional[ProjectContext] = None
     elements: List[str] = Field(default_factory=list)
     dom_snapshot: Optional[str] = None
     element_contexts: List[Dict[str, Any]] = Field(default_factory=list)
@@ -167,6 +168,10 @@ class AutomateRequest(BaseModel):
     application_url: Optional[str] = Field(default=None, description="Application URL under test")
     project_context: Optional[ProjectContext] = Field(
         default=None, description="Client project metadata; paths are not opened or resolved by the API"
+    )
+    locator_bundles: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Validated LocatorBundle evidence supplied by Phoenix Core",
     )
     domain_knowledge: Optional[str] = Field(
         default=None,

@@ -1,0 +1,292 @@
+"""Deterministic enforcement of validated locator evidence in generated code."""
+
+from __future__ import annotations
+
+import ast
+import re
+from typing import Any, Iterable
+
+
+_ROLE_WORDS = {
+    "button": {"button"},
+    "input": {"input", "field", "textbox"},
+    "link": {"link", "anchor"},
+    "checkbox": {"checkbox"},
+    "combobox": {"combobox", "dropdown", "select"},
+}
+_NON_NAME_SUFFIXES = {"input", "field", "element", "control"}
+
+
+def normalize_element_name(value: object) -> str:
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _name_forms(value: object) -> set[str]:
+    normalized = normalize_element_name(value)
+    if not normalized:
+        return set()
+    words = normalized.split()
+    forms = {normalized}
+    if words[-1] in _NON_NAME_SUFFIXES:
+        forms.add(" ".join(words[:-1]))
+    return {form for form in forms if form}
+
+
+def _bundle_aliases(bundle: dict[str, Any]) -> set[str]:
+    metadata = bundle.get("metadata") or {}
+    values: list[object] = [
+        bundle.get("element_name"), bundle.get("element_id"),
+        metadata.get("bundle_element_name"), metadata.get("custom_name"),
+    ]
+    source_names = metadata.get("source_names", [])
+    values.extend(source_names if isinstance(source_names, list) else [source_names])
+    for locator in [bundle.get("primary"), *(bundle.get("alternates") or [])]:
+        if not isinstance(locator, dict):
+            continue
+        values.extend([locator.get("element_name"), locator.get("element_id")])
+        locator_metadata = locator.get("metadata") or {}
+        values.extend([locator_metadata.get("custom_name"), locator_metadata.get("element_name")])
+    return {form for value in values for form in _name_forms(value)}
+
+
+def _bundle_role(bundle: dict[str, Any]) -> str | None:
+    metadata = bundle.get("metadata") or {}
+    element_data = metadata.get("element_data") or {}
+    if not isinstance(element_data, dict):
+        element_data = {}
+    locator_metadata = (bundle.get("primary") or {}).get("metadata") or {}
+    locator_data = locator_metadata.get("element_data") or {}
+    if not isinstance(locator_data, dict):
+        locator_data = {}
+    tag = str(element_data.get("tag") or locator_data.get("tag") or "").casefold()
+    role = str(element_data.get("role") or locator_data.get("role") or "").casefold()
+    input_type = str(element_data.get("type") or locator_data.get("type") or "").casefold()
+    if role in _ROLE_WORDS:
+        return role
+    if tag == "input" and input_type in {"submit", "button", "reset", "image"}:
+        return "button"
+    if tag in {"input", "textarea"}:
+        return "input"
+    if tag == "button":
+        return "button"
+    if tag == "a":
+        return "link"
+    if input_type == "checkbox":
+        return "checkbox"
+    return None
+
+
+def _role_compatible(label: str, bundle: dict[str, Any]) -> bool:
+    words = set(normalize_element_name(label).split())
+    requested = {role for role, aliases in _ROLE_WORDS.items() if words & aliases}
+    actual = _bundle_role(bundle)
+    return not requested or actual is None or actual in requested
+
+
+def bundle_matches_element(label: str, bundle: dict[str, Any]) -> bool:
+    """Return whether exact normalized identity and role evidence match."""
+    return bool(_name_forms(label) & _bundle_aliases(bundle)) and _role_compatible(label, bundle)
+
+
+def match_locator_bundle(
+    label: str,
+    bundles: Iterable[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Match a generated element label to one unambiguous validated bundle."""
+    query_forms = _name_forms(label)
+    if not query_forms:
+        return None
+    matches = []
+    for order, bundle in enumerate(bundles):
+        metadata = bundle.get("metadata") or {}
+        aliases = _bundle_aliases(bundle)
+        if not (aliases & query_forms) or not _role_compatible(label, bundle):
+            continue
+        usable = []
+        for candidate in [bundle.get("primary"), *(bundle.get("alternates") or [])]:
+            if not isinstance(candidate, dict):
+                continue
+            value = candidate.get("value") or candidate.get("selector")
+            candidate_metadata = candidate.get("metadata") or {}
+            status = str(candidate_metadata.get("status", metadata.get("status", ""))).casefold()
+            from phoenix.locators.smartlocator_fallback import has_positional_selector
+
+            if (
+                isinstance(value, str) and value.strip()
+                and candidate.get("verified_in_snapshot") is True
+                and not candidate.get("broken") and not candidate.get("unresolved")
+                and not metadata.get("broken") and not metadata.get("unresolved")
+                and not candidate_metadata.get("broken") and not candidate_metadata.get("unresolved")
+                and status not in {"broken", "unresolved", "invalid"}
+                and not has_positional_selector(str(value))
+            ):
+                usable.append(candidate)
+        if usable:
+            identity = metadata.get("element_identity")
+            matches.append((order, identity, bundle, usable))
+
+    if not matches:
+        return None
+    identities = {identity for _, identity, _, _ in matches if identity}
+    if len(matches) > 1 and (
+        len(identities) != 1 or any(identity is None for _, identity, _, _ in matches)
+    ):
+        return None
+    _, _, bundle, usable = matches[0]
+    primary = bundle.get("primary")
+    selected = next((item for item in usable if item is primary), None)
+    selected = selected or usable[0]
+    source = (
+        (selected.get("metadata") or {}).get("locator_source")
+        or metadata.get("locator_source")
+        or ("stored_primary" if primary is selected else "stored_alternate")
+    )
+    strategy = str(selected.get("strategy", "css")).casefold()
+    value = str(selected.get("value") or selected.get("selector") or "").strip()
+    try:
+        from phoenix_shared.models.locator import Locator, LocatorStrategy
+
+        strategy_value = LocatorStrategy(strategy)
+        rendered = Locator(
+            element_name=str(bundle.get("element_name") or label),
+            strategy=strategy_value,
+            value=value,
+            verified_in_snapshot=True,
+        ).to_playwright()
+        ast.parse(rendered, mode="eval")
+    except (ValueError, TypeError, SyntaxError):
+        return None
+
+    result = dict(bundle)
+    result_metadata = dict(metadata)
+    result_metadata["locator_source"] = source
+    result["metadata"] = result_metadata
+    result_primary = dict(selected)
+    result_primary["metadata"] = {
+        **(selected.get("metadata") or {}),
+        "locator_source": source,
+    }
+    result["primary"] = result_primary
+    result["alternates"] = [
+        {
+            **item,
+            "metadata": {
+                **(item.get("metadata") or {}),
+                "locator_source": "stored_alternate",
+            },
+        }
+        for item in usable
+        if item is not selected
+    ]
+    return result
+
+
+def _root_expression(node: ast.expr) -> ast.expr:
+    current = node
+    while isinstance(current, ast.Call):
+        current = current.func.value if isinstance(current.func, ast.Attribute) else current.func
+    while isinstance(current, ast.Attribute):
+        if current.attr == "_page":
+            return current
+        current = current.value
+    if isinstance(current, ast.Name) and current.id == "page":
+        return current
+    return ast.Name(id="page", ctx=ast.Load())
+
+
+class _PageRoot(ast.NodeTransformer):
+    def __init__(self, root: ast.expr) -> None:
+        self.root = root
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if node.id == "page":
+            return ast.copy_location(self.root, node)
+        return node
+
+
+def _render_for_root(bundle: dict[str, Any], root: ast.expr) -> str:
+    from phoenix_shared.models.locator import Locator, LocatorStrategy
+
+    primary = bundle["primary"]
+    strategy = LocatorStrategy(str(primary.get("strategy", "css")).casefold())
+    locator = Locator(
+        element_name=str(bundle.get("element_name", "element")),
+        strategy=strategy,
+        value=str(primary.get("value") or primary.get("selector") or "").strip(),
+        verified_in_snapshot=True,
+    )
+    expression = ast.parse(locator.to_playwright(), mode="eval").body
+    return ast.unparse(_PageRoot(root).visit(expression))
+
+
+def reconcile_generated_code(
+    source: str,
+    bundles: Iterable[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Replace generated locator expressions with validated bundle selectors.
+
+    Only locator expression spans are changed. Other generated source, including
+    interaction values and comments, is preserved byte-for-byte.
+    """
+    tree = ast.parse(source)
+    bundle_list = list(bundles)
+    lines = source.splitlines(keepends=True)
+    byte_offsets = []
+    total = 0
+    for line in lines:
+        byte_offsets.append(total)
+        total += len(line.encode("utf-8"))
+    source_bytes = source.encode("utf-8")
+    edits: list[tuple[int, int, bytes]] = []
+    used: list[dict[str, Any]] = []
+    unresolved: list[str] = []
+    seen_used: set[tuple[str, str]] = set()
+
+    def span(node: ast.AST) -> tuple[int, int]:
+        start = byte_offsets[node.lineno - 1] + node.col_offset
+        end = byte_offsets[node.end_lineno - 1] + node.end_col_offset
+        return start, end
+
+    def process_target(target: ast.expr, label: str) -> None:
+        selected = match_locator_bundle(label, bundle_list)
+        if selected is None:
+            unresolved.append(label)
+            return
+        root = _root_expression(target)
+        rendered = _render_for_root(selected, root).encode("utf-8")
+        start, end = span(target)
+        edits.append((start, end, rendered))
+        primary = selected["primary"]
+        identity = (str(selected.get("element_name", "")), str(primary.get("value", "")))
+        if identity not in seen_used:
+            seen_used.add(identity)
+            used.append(selected)
+
+    class Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:
+            function_name = node.func.id if isinstance(node.func, ast.Name) else ""
+            if function_name.endswith("_ready") and len(node.args) >= 2:
+                string_labels = [arg.value for arg in node.args[2:] if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+                if string_labels:
+                    process_target(node.args[1], string_labels[-1])
+                    for arg in node.args[2:]:
+                        self.visit(arg)
+                    return
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "locator" and node.args:
+                selector = node.args[0]
+                if isinstance(selector, ast.Constant) and isinstance(selector.value, str):
+                    raw = selector.value.strip()
+                    label = raw.lstrip("#.").replace("-", " ").replace("_", " ")
+                    selected = match_locator_bundle(label, bundle_list)
+                    if selected is not None:
+                        process_target(node, label)
+                        return
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    for start, end, replacement in sorted(edits, reverse=True):
+        source_bytes = source_bytes[:start] + replacement + source_bytes[end:]
+    final = source_bytes.decode("utf-8")
+    ast.parse(final)
+    return final, used, list(dict.fromkeys(unresolved))

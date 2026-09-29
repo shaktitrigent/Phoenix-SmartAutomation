@@ -313,6 +313,11 @@ def generate_tests(payload: TestGenerationRequest):
 def discover_locators(payload: LocatorDiscoveryRequest):
     """Discover locators for the requested elements on a page."""
     results = []
+    request_config = (
+        load_request_config(payload.project_context)
+        if payload.project_context is not None
+        else None
+    )
     contexts = [context for context in payload.element_contexts if isinstance(context, dict)]
     contextual_names = {
         str(context.get("element_name")) for context in contexts if context.get("element_name")
@@ -330,6 +335,7 @@ def discover_locators(payload: LocatorDiscoveryRequest):
             dom_snapshot=payload.dom_snapshot,
             element_context=context,
             require_llm=payload.require_llm,
+            request_config=request_config,
         )
         for locator in locators.get("locators", []):
             enriched = dict(locator)
@@ -400,6 +406,7 @@ def automate_from_manual(payload: AutomateRequest):
         use_pom=payload.use_pom,
         use_bdd=payload.use_bdd,
         keywords=payload.keywords or "",
+        locator_bundles=payload.locator_bundles,
         **context_kwargs,
     )
     

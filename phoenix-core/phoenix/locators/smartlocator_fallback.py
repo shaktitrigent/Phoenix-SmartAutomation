@@ -327,6 +327,7 @@ def merge_validated_fallback(
             deduplicated[key] = locator.model_copy(update={"fallback": True})
 
     bundle_metadata = dict(bundle.metadata or {})
+    bundle_metadata.pop("unresolved", None)
     bundle_metadata["locator_expert_fallback"] = {
         "resolved": True,
         "fallback_reasons": candidate_metadata.get("fallback_reasons", []),
@@ -448,14 +449,20 @@ def resolve_with_locator_expert(
     }
 
 
-def intelligence_discoverer(client: Any) -> DiscoveryCallable:
+def intelligence_discoverer(
+    client: Any,
+    project_context: object | None = None,
+) -> DiscoveryCallable:
     """Adapt ``IntelligenceClient`` to the scoped fallback discovery contract."""
     def discover(payload: Dict[str, Any]) -> Dict[str, Any]:
-        return client.discover_locators(
-            page_url=payload.get("page_url", ""),
-            elements=[],
-            element_contexts=[payload],
-            require_llm=True,
-        )
+        kwargs = {
+            "page_url": payload.get("page_url", ""),
+            "elements": [],
+            "element_contexts": [payload],
+            "require_llm": True,
+        }
+        if project_context is not None:
+            kwargs["project_context"] = project_context
+        return client.discover_locators(**kwargs)
 
     return discover

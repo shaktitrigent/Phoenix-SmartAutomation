@@ -350,10 +350,8 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     if explicit_locator_match:
         explicit_locator = explicit_locator_match.group(1)
         # Use the explicit locator as the field label
-        logger.info(f"EXPLICIT LOCATOR FOUND: {explicit_locator} from criterion: {criterion}")
         return explicit_locator, _normalise_fill_value(quoted or cleaned)
 
-    # "in the X field" or "into the X field" → extract field from that
     field_match = re.search(
         r"(?:in|into|for)\s+(?:the\s+)?[`'\"]?([a-zA-Z\s]+?)[`'\"]?\s+(?:field|input|box|area|textbox|text\s+box)",
         criterion,
@@ -1441,25 +1439,18 @@ def _apply_explicit_locator_fixes(script_code: str, manual_test: Dict[str, Any])
     
     CRITICAL FIX: Replace fabricated locators with user-specified ones like id='user-name'
     """
-    logger.info(f"DEBUG: _apply_explicit_locator_fixes called. manual_test keys: {manual_test.keys()}")
-    logger.info(f"DEBUG: manual_test structure: {manual_test}")
-    
     steps = manual_test.get("steps", [])
-    logger.info(f"DEBUG: Steps found: {len(steps)}")
     if not steps:
-        logger.info(f"DEBUG: No steps found, returning original script")
         return script_code
     
     # Build a mapping of explicit locators from manual test criteria
     explicit_locators = {}
     for step in steps:
         action = step.get("action", "")
-        logger.info(f"DEBUG: Processing step action: {action}")
         # Extract explicit locators: id='user-name', name='password', etc.
         # Match: id='user-name' or id="user-name" or id=user-name
         for match in re.finditer(r"(?:id|name|data-testid|class|placeholder|aria-label)\s*=\s*['\"]?([^'\"]+)['\"]?", action, re.IGNORECASE):
             locator_value = match.group(1)
-            logger.info(f"DEBUG: Found explicit locator: {locator_value} in action: {action}")
             # Map common field names to their explicit locators
             if 'user-name' in action.lower() or 'username' in action.lower():
                 explicit_locators['username'] = locator_value
@@ -1468,11 +1459,8 @@ def _apply_explicit_locator_fixes(script_code: str, manual_test: Dict[str, Any])
             elif 'login' in action.lower() or 'login-button' in action.lower():
                 explicit_locators['login'] = locator_value
     
-    logger.info(f"DEBUG: Explicit locators mapping: {explicit_locators}")
-    
     # Apply fixes to the script
     if explicit_locators:
-        logger.info(f"DEBUG: Applying locator fixes to script. Found {len(explicit_locators)} explicit locators")
         lines = script_code.split('\n')
         fixed_lines = []
         
@@ -2613,6 +2601,7 @@ class TestGeneratorAgent(BaseAgent):
         use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Generate one automation script for each supplied manual test.
 
@@ -2632,6 +2621,17 @@ class TestGeneratorAgent(BaseAgent):
         """
         if not manual_tests:
             return {"automation_tests": []}
+
+        if locator_bundles:
+            domain_knowledge = "\n\n".join(
+                part for part in (
+                    domain_knowledge,
+                    "## Validated Phoenix LocatorBundle evidence\n"
+                    "Treat selector values as immutable; validated evidence is enforced "
+                    "before output is written.\n"
+                    + json.dumps(locator_bundles, ensure_ascii=False, separators=(",", ":")),
+                ) if part
+            )
 
         knowledge_context = self.get_knowledge_context(query="playwright automation")
 

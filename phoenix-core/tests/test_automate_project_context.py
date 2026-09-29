@@ -143,7 +143,16 @@ def test_api_route_forwards_context_without_changing_legacy_calls(
     registry = create_autospec(AgentRegistry, instance=True, spec_set=True)
     registry.automate_from_manual.return_value = {"automation_tests": []}
     monkeypatch.setattr(server, "_agent_registry", registry)
-    payload = {"manual_tests": [], "application_url": "https://app.example/login"}
+    locator_evidence = [{
+        "element_name": "LoginButton",
+        "primary": {"strategy": "css", "value": "#login", "verified_in_snapshot": True},
+        "metadata": {"locator_source": "stored_primary"},
+    }]
+    payload = {
+        "manual_tests": [],
+        "application_url": "https://app.example/login",
+        "locator_bundles": locator_evidence,
+    }
     context = {
         "project_root": r"C:\QA Projects\Phoenix",
         "application_url": payload["application_url"],
@@ -157,6 +166,7 @@ def test_api_route_forwards_context_without_changing_legacy_calls(
     assert response.status_code == 200, response.text
     kwargs = registry.automate_from_manual.call_args.kwargs
     assert kwargs["application_url"] == payload["application_url"]
+    assert kwargs["locator_bundles"] == locator_evidence
     if context_mode == "present":
         assert kwargs["project_context"] == context
     else:

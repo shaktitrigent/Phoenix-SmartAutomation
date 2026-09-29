@@ -70,6 +70,8 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
         # LLM emits "selector" for the raw CSS/XPath/attribute string
         if "value" not in p and "selector" in p:
             p["value"] = p.pop("selector")
+        if not isinstance(p.get("value"), str):
+            p["value"] = ""
         # Pass through verified_in_snapshot (prompt may omit it)
         if "verified_in_snapshot" in item and "verified_in_snapshot" not in p:
             p["verified_in_snapshot"] = item["verified_in_snapshot"]

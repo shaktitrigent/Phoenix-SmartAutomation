@@ -236,3 +236,25 @@ def test_intelligence_discoverer_sends_one_scoped_strict_request():
     assert client.kwargs["elements"] == []
     assert client.kwargs["element_contexts"] == [payload]
     assert client.kwargs["require_llm"] is True
+
+
+def test_intelligence_discoverer_forwards_project_context():
+    class Client:
+        def __init__(self):
+            self.kwargs = None
+
+        def discover_locators(self, **kwargs):
+            self.kwargs = kwargs
+            return {"locators": []}
+
+    client = Client()
+    context = {
+        "project_root": "C:/project",
+        "page_name": "login",
+        "locator_directory": "C:/project/locators",
+        "environment_file": "C:/project/.env.local",
+    }
+    discover = intelligence_discoverer(client, context)
+    discover(build_unresolved_payload(_bundle(), page_url="https://app.example"))
+
+    assert client.kwargs["project_context"] == context

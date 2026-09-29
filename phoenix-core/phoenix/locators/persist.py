@@ -252,6 +252,11 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     non_winner = existing_primary if winner_is_new else new_primary
                     prim_key = (existing["primary"].get("strategy"), existing["primary"].get("value"))
                     non_winner_key = (non_winner.get("strategy"), non_winner.get("value"))
+
+                    if non_winner_key == prim_key:
+                        existing_primary.setdefault("metadata", {}).update(
+                            new_primary.get("metadata") or {}
+                        )
                     
                     if non_winner_key != prim_key:
                         if not any(
@@ -289,6 +294,51 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             existing["metadata"][meta_key] = loc[meta_key]
         else:
             # Legacy strategies format
+            if element_id in merged and "primary" in merged[element_id]:
+                existing = merged[element_id]
+                existing.setdefault("alternates", [])
+                candidates = list(loc.get("strategies", []) or [])
+                if loc.get("selector"):
+                    candidates.append({
+                        "strategy": "css",
+                        "value": loc["selector"],
+                        "confidence": 0.7,
+                    })
+                primary_key = (
+                    (existing.get("primary") or {}).get("strategy"),
+                    (existing.get("primary") or {}).get("value"),
+                )
+                for candidate in candidates:
+                    value = candidate.get("value") or candidate.get("selector")
+                    if not isinstance(value, str) or not value.strip():
+                        continue
+                    strategy = str(candidate.get("strategy") or "css").lower()
+                    if "css" in strategy:
+                        strategy = "css"
+                    elif "xpath" in strategy:
+                        strategy = "xpath"
+                    alternate_key = (strategy, value)
+                    if alternate_key == primary_key or any(
+                        (alternate.get("strategy"), alternate.get("value")) == alternate_key
+                        for alternate in existing["alternates"]
+                    ):
+                        continue
+                    alternate = {
+                        "strategy": strategy,
+                        "value": value,
+                        "confidence": candidate.get("confidence", 0.5),
+                        "fallback": True,
+                    }
+                    if candidate.get("verified_in_snapshot") is not None:
+                        alternate["verified_in_snapshot"] = candidate["verified_in_snapshot"]
+                    if candidate.get("metadata"):
+                        alternate["metadata"] = dict(candidate["metadata"])
+                    existing["alternates"].append(alternate)
+                existing_metadata = existing.setdefault("metadata", {})
+                for key, value in (loc.get("metadata") or {}).items():
+                    existing_metadata.setdefault(key, value)
+                continue
+
             if element_id not in merged:
                 merged[element_id] = {
                     "element_id": element_id,

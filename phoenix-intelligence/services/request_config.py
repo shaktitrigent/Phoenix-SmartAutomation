@@ -1,7 +1,6 @@
 """Request-local project environment parsing; never changes process settings."""
 
 import os
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
@@ -9,12 +8,15 @@ from typing import Mapping, Optional, Tuple
 
 from dotenv.parser import parse_stream
 from phoenix_shared.contracts.project_context import ProjectContext
+from services.environment_files import open_environment, UnsafeEnvironmentFile
 
 
 @dataclass(frozen=True)
 class ConfigDiagnostics:
     project_context_received: bool = True
     project_root_accessible: bool = False
+    project_environment_loaded: bool = False
+    fallback_to_process_only: bool = True
     env_file_found: bool = False
     env_local_file_found: bool = False
     anthropic_key_available: bool = False
@@ -60,18 +62,14 @@ def _inside_root(root: Path, path: Path) -> Path:
     return resolved
 
 
-def _read_file(path: Path):
-    try:
-        metadata = path.stat()
-    except FileNotFoundError:
-        return {}, False, False
-    if not stat.S_ISREG(metadata.st_mode):
-        raise _InvalidPath("environment_path_not_file")
+def _read_file(root: Path, name: str):
     values = {}
     malformed = False
     # parse_stream handles quoting/escapes/= without printing malformed content
     # or interpolating against ambient os.environ. Bare keys are not overrides.
-    with path.open("r", encoding="utf-8-sig") as stream:
+    with open_environment(root, name) as stream:
+        if stream is None:
+            return {}, False, False
         for binding in parse_stream(stream):
             malformed |= binding.error
             if not binding.error and binding.key is not None and binding.value is not None:
@@ -104,9 +102,14 @@ def load_request_config(context: Optional[ProjectContext]) -> Optional[RequestCo
         local_path = _inside_root(root, _native_path(context.environment_file))
         if local_path == base_path:
             raise _InvalidPath("environment_file_duplicates_base")
-        base, base_found, base_malformed = _read_file(base_path)
-        local, local_found, local_malformed = _read_file(local_path)
-    except _InvalidPath as exc:
+        supplied = _native_path(context.environment_file)
+        if (supplied if supplied.is_absolute() else root / supplied) != root / ".env.local":
+            raise _InvalidPath("environment_filename_not_allowed")
+        # Preliminary containment checks do not authorize reads. The secure
+        # opener independently validates the actual handle and every ancestor.
+        base, base_found, base_malformed = _read_file(root, ".env")
+        local, local_found, local_malformed = _read_file(root, ".env.local")
+    except (_InvalidPath, UnsafeEnvironmentFile) as exc:
         reason = str(exc)
     except (OSError, ValueError, RuntimeError, UnicodeError):
         reason = "environment_file_unavailable" if accessible else "project_root_unavailable"
@@ -117,6 +120,8 @@ def load_request_config(context: Optional[ProjectContext]) -> Optional[RequestCo
             sources += ("project_env_local",)
         return RequestConfig(merged, ConfigDiagnostics(
             project_root_accessible=True,
+            project_environment_loaded=base_found or local_found,
+            fallback_to_process_only=not (base_found or local_found),
             env_file_found=base_found,
             env_local_file_found=local_found,
             anthropic_key_available=bool(merged.get("ANTHROPIC_API_KEY")),

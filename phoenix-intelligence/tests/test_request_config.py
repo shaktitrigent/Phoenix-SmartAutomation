@@ -111,14 +111,15 @@ def test_absolute_inside_path_from_phase1_and_read_allowlist(tmp_path, monkeypat
     (tmp_path / ".env").write_text("PHASE2_VALUE=base\n")
     (tmp_path / ".env.local").write_text("PHASE2_VALUE=local\n")
     (tmp_path / ".env.other").write_text("PHASE2_VALUE=wrong\n")
-    original_open = Path.open
+    from services import request_config
+    original_open = request_config.open_environment
     opened = []
 
-    def track(path, *args, **kwargs):
-        opened.append(path)
-        return original_open(path, *args, **kwargs)
+    def track(root, name):
+        opened.append(root / name)
+        return original_open(root, name)
 
-    monkeypatch.setattr(Path, "open", track)
+    monkeypatch.setattr(request_config, "open_environment", track)
     result = load_request_config(context(tmp_path, tmp_path / ".env.local"))
     assert result.values["PHASE2_VALUE"] == "local"
     assert opened == [tmp_path / ".env", tmp_path / ".env.local"]
@@ -156,7 +157,7 @@ def test_unavailable_or_invalid_root(tmp_path, kind):
 
 def test_permission_error_has_safe_reason(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("PHASE2_VALUE=ignored")
-    monkeypatch.setattr(Path, "open", Mock(side_effect=PermissionError("sensitive-path-and-value")))
+    monkeypatch.setattr("services.request_config.open_environment", Mock(side_effect=PermissionError("sensitive-path-and-value")))
     result = load_request_config(context(tmp_path))
     assert result.diagnostics.reason == "environment_file_unavailable"
     assert "sensitive" not in repr(result)
@@ -178,19 +179,21 @@ def test_foreign_windows_paths_are_not_reinterpreted(root, monkeypatch):
 @pytest.mark.parametrize("filename,reason", [
     (".env", "environment_file_duplicates_base"),
     ("", "invalid_path"),
-    ("subdir", "environment_path_not_file"),
+    ("subdir", "environment_filename_not_allowed"),
 ])
 def test_invalid_local_paths(tmp_path, filename, reason):
     (tmp_path / "subdir").mkdir()
     assert load_request_config(context(tmp_path, filename)).diagnostics.reason == reason
 
 
-def test_custom_local_file_is_the_only_override(tmp_path):
+def test_custom_local_file_is_rejected(tmp_path):
     (tmp_path / "settings").mkdir()
     (tmp_path / "settings" / "project.env").write_text("PHASE2_CUSTOM=chosen\n")
     (tmp_path / ".env.local").write_text("PHASE2_CUSTOM=not-selected\n")
     result = load_request_config(context(tmp_path, "settings/project.env"))
-    assert result.values["PHASE2_CUSTOM"] == "chosen"
+    assert result.diagnostics.reason == "environment_filename_not_allowed"
+    assert result.diagnostics.fallback_to_process_only
+    assert not result.diagnostics.project_environment_loaded
 
 
 def test_base_file_escape_is_also_rejected(tmp_path, monkeypatch):
@@ -293,4 +296,34 @@ def test_api_registry_isolation_and_no_secret_output(tmp_path, monkeypatch, capf
     for secret in secrets:
         assert secret not in output
     assert "request_config" not in response.json()
+    assert "values" not in response.json()
+
+
+
+def test_locator_discovery_route_uses_project_scoped_config(tmp_path, monkeypatch, caplog):
+    from fastapi.testclient import TestClient
+    from api import server
+
+    project_key = "sk-ant-" + "p" * 32
+    (tmp_path / ".env.local").write_text(
+        f"ANTHROPIC_API_KEY={project_key}\n", encoding="utf-8"
+    )
+    registry = Mock()
+    registry.discover_locators.return_value = {"locators": []}
+    monkeypatch.setattr(server, "_agent_registry", registry)
+    context_data = context(tmp_path).model_dump()
+    caplog.set_level(logging.DEBUG)
+
+    response = TestClient(server.app).post("/api/v1/locators/discover", json={
+        "page_url": "https://app.example/login",
+        "element_contexts": [{"element_name": "Username input"}],
+        "require_llm": True,
+        "project_context": context_data,
+    })
+
+    assert response.status_code == 200
+    request_config = registry.discover_locators.call_args.kwargs["request_config"]
+    assert isinstance(request_config, RequestConfig)
+    assert request_config.values["ANTHROPIC_API_KEY"] == project_key
+    assert project_key not in caplog.text + response.text
     assert "values" not in response.json()

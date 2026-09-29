@@ -947,20 +947,36 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     # locator evidence can ground the generated flat/POM code. The same bundle
     # objects are retained and merged into Phoenix persistence after generation.
     smartlocator_bundles = []
+    locator_evidence = []
+    smartlocator_scan = None
+    smartlocator_page = _module_from_file(manual_path)
     try:
+        from phoenix.locators.smartlocator_fallback import intelligence_discoverer
         from phoenix.locators.smartlocator_integration import (
             SmartLocatorUnavailableError,
             generate_smartlocator_bundles,
+            locator_bundle_evidence,
+            live_locator_validator,
+            resolve_automation_locator_evidence,
             smartlocator_prompt_context,
+            validated_locator_bundles,
         )
 
-        smartlocator_page = _module_from_file(manual_path)
-        print_info("SmartLocatorAI: scanning and validating the application DOM…")
-        smartlocator_bundles = generate_smartlocator_bundles(
-            application_url,
-            page=smartlocator_page,
-            validate=True,
+        smartlocator_scan = generate_smartlocator_bundles
+        smartlocator_bundles = validated_locator_bundles(
+            project_root / "locators", smartlocator_page, manual_tests
         )
+        if smartlocator_bundles:
+            print_info(
+                f"SmartLocatorAI: loaded {len(smartlocator_bundles)} validated stored "
+                "LocatorBundle(s); unresolved elements will be scanned after generation."
+            )
+        else:
+            print_info(
+                "SmartLocatorAI: no usable stored bundles discovered; unresolved elements "
+                "will be scanned after generation."
+            )
+        locator_evidence = locator_bundle_evidence(smartlocator_bundles)
         locator_context = smartlocator_prompt_context(smartlocator_bundles)
         if locator_context:
             domain_knowledge = "\n\n".join(
@@ -1031,6 +1047,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             mcp_args="@playwright/mcp@latest",
             mcp_timeout=120,  # Increased timeout for comprehensive DOM analysis
             project_context=project_context,
+            locator_bundles=locator_evidence,
         )
     except Exception as exc:
         print_error(f"Intelligence server error: {exc}")
@@ -1041,11 +1058,30 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         print_warning("No automation scripts were generated.")
         return
 
-    if smartlocator_bundles:
-        from phoenix.locators.smartlocator_integration import (
-            enrich_automation_tests_with_smartlocator,
+    try:
+        resolution = resolve_automation_locator_evidence(
+            automation_tests,
+            smartlocator_bundles,
+            application_url=application_url,
+            page=smartlocator_page,
+            scan=smartlocator_scan,
+            discover=intelligence_discoverer(intel_client),
+            validate=live_locator_validator(application_url),
         )
-        enrich_automation_tests_with_smartlocator(automation_tests, smartlocator_bundles)
+        print_info(
+            "Locator evidence: "
+            f"stored={resolution['stored_count']}, "
+            f"scan_results={resolution['scanned_count']}, "
+            f"fresh_selected={resolution['fresh_count']}, "
+            f"LocatorExpert_calls={resolution['locator_expert_calls']}, "
+            f"unresolved={len(resolution['unresolved'])}."
+        )
+    except Exception as _exc:
+        print_warning(
+            "Locator evidence reconciliation failed; generated output was not accepted: "
+            f"{type(_exc).__name__}"
+        )
+        raise click.Abort() from _exc
 
     _print_intelligence_metadata_warnings(result.get("metadata"))
     for test in automation_tests:

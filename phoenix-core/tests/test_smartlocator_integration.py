@@ -94,6 +94,63 @@ def test_generate_bundles_can_keep_raw_artifacts(monkeypatch, tmp_path):
     assert (raw_dir / "locators.json").is_file()
 
 
+def test_targeted_generation_filters_elements_before_locator_validation(monkeypatch, tmp_path):
+    import pytest
+
+    captured = {}
+    package = types.ModuleType("phoenix_smartlocatorai")
+    package.__path__ = []
+    package.generate_locators_from_dom = lambda *_args, **_kwargs: pytest.fail(
+        "targeted scans must use the element-filtered path"
+    )
+    scanner = types.ModuleType("phoenix_smartlocatorai.dom_scanner")
+    elements = [
+        {"tag": "input", "aria-label": "Username", "id": "user-name"},
+        {"tag": "button", "text": "Purchase", "id": "purchase"},
+    ]
+    scanner.scan_dom = lambda *_args, **_kwargs: elements
+    scanner._guess_custom_name = lambda element: (
+        "UsernameInput" if element["tag"] == "input" else "PurchaseButton"
+    )
+
+    def generate(selected):
+        captured["selected"] = selected
+        return [{
+            "custom_name": scanner._guess_custom_name(element),
+            "locator_type": "CSS Selector",
+            "locator_value": "#user-name",
+            "validated": False,
+            "match_count": 0,
+            "element_data": element,
+        } for element in selected]
+
+    scanner.generate_locators_from_elements = generate
+    core = types.ModuleType("phoenix_smartlocatorai.core")
+
+    def validate(_url, locators, _auth):
+        for locator in locators:
+            locator.update(validated=True, match_count=1, recommended=True)
+        return locators
+
+    core._validate_locators_with_playwright = validate
+    monkeypatch.setitem(sys.modules, "phoenix_smartlocatorai", package)
+    monkeypatch.setitem(sys.modules, "phoenix_smartlocatorai.dom_scanner", scanner)
+    monkeypatch.setitem(sys.modules, "phoenix_smartlocatorai.core", core)
+
+    bundles = generate_smartlocator_bundles(
+        "https://app.example",
+        page="login",
+        validate=True,
+        output_dir=tmp_path / "raw",
+        element_names=["Username input"],
+    )
+
+    assert len(captured["selected"]) == 1
+    assert captured["selected"][0]["id"] == "user-name"
+    assert len(bundles) == 1
+    assert bundles[0].primary.verified_in_snapshot is True
+
+
 def test_enrichment_feeds_same_bundles_to_flat_and_pom_locator_inputs():
     from phoenix.locators.smartlocator_adaptor import convert_locators
 

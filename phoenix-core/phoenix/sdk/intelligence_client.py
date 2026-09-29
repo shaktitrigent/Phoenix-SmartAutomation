@@ -145,6 +145,7 @@ class IntelligenceClient:
         dom_snapshot: Optional[str] = None,
         element_contexts: Optional[List[Dict[str, Any]]] = None,
         require_llm: bool = False,
+        project_context: Optional[Union[ProjectContext, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = {
             "page_url": page_url,
@@ -153,6 +154,8 @@ class IntelligenceClient:
             "element_contexts": element_contexts or [],
             "require_llm": require_llm,
         }
+        if project_context is not None:
+            payload["project_context"] = ProjectContext.model_validate(project_context).model_dump()
         return self._post("/api/v1/locators/discover", payload)
 
     def analyze_failure(
@@ -180,6 +183,7 @@ class IntelligenceClient:
         mcp_args: str = "@playwright/mcp@latest",
         mcp_timeout: int = 60,
         project_context: Optional[Union[ProjectContext, Dict[str, Any]]] = None,
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
@@ -198,6 +202,8 @@ class IntelligenceClient:
         }
         if project_context is not None:
             payload["project_context"] = ProjectContext.model_validate(project_context).model_dump()
+        if locator_bundles is not None:
+            payload["locator_bundles"] = locator_bundles
         return self._post("/api/v1/tests/automate", payload)
 
     def fix_script(

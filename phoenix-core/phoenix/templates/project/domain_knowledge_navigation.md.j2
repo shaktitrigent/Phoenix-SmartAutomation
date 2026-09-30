@@ -13,7 +13,7 @@ Document URL patterns and routing rules for {{ project_name }}.
 Example:
 | Page            | URL Path                    |
 |-----------------|-----------------------------|
-| Login           | /auth/login                 |
+| Login           | (application-specific)       |
 | Dashboard       | /dashboard/index            |
 | Employee List   | /pim/viewEmployeeList       |
 | Add Employee    | /pim/addEmployee            |
@@ -27,7 +27,7 @@ YOUR TABLE:
 ## Authentication Flow
 
 Example:
-- Login URL: `/auth/login`
+- Login URL: (application-specific - detected from DOM)
 - After login: redirects to `/dashboard/index`
 - Session timeout: 30 minutes idle
 

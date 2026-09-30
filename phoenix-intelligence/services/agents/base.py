@@ -44,6 +44,8 @@ class LocatorDiscoveryInput(TypedDict):
     page_url: str
     element_name: str
     dom_snapshot: NotRequired[str]
+    element_context: NotRequired[Dict[str, Any]]
+    require_llm: NotRequired[bool]
 
 
 class TestGenerationInput(TypedDict):

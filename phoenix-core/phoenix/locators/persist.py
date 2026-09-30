@@ -181,6 +181,26 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         element_id = loc.get("element_id") or loc.get("element_name")
         if not element_id:
             continue
+
+        if "primary" in loc and loc["primary"] is None:
+            if element_id in merged and "primary" in merged[element_id]:
+                existing_metadata = merged[element_id].setdefault("metadata", {})
+                existing_metadata.setdefault("last_candidate_unresolved_reason", "primary_missing")
+                continue
+            loc = dict(loc)
+            metadata = dict(loc.get("metadata") or {})
+            metadata.setdefault("unresolved_reason", "primary_missing")
+            metadata["locator_source"] = "unresolved"
+            loc["metadata"] = metadata
+            loc["primary"] = {
+                "element_name": loc.get("element_name", element_id),
+                "strategy": "css",
+                "value": "",
+                "confidence": 0.0,
+                "fallback": False,
+                "verified_in_snapshot": False,
+                "metadata": {"unresolved_reason": "primary_missing", "locator_source": "unresolved"},
+            }
         
         # If this is a LocatorBundle format (has primary), preserve that format
         if "primary" in loc and isinstance(loc["primary"], dict):

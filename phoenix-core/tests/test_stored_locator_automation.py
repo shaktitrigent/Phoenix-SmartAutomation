@@ -1,6 +1,7 @@
 """Stored LocatorBundle discovery and automation request evidence."""
 
 import json
+import ast
 
 import pytest
 
@@ -11,6 +12,7 @@ from phoenix.locators.smartlocator_integration import (
 from phoenix.locators.reconciliation import match_locator_bundle, reconcile_generated_code
 from phoenix.locators.smartlocator_adaptor import convert_locators
 from phoenix.locators.smartlocator_integration import resolve_automation_locator_evidence
+from phoenix_shared.models.locator import Locator, LocatorBundle, LocatorStrategy
 
 
 def _bundle(verified=True):
@@ -124,6 +126,41 @@ def test_uses_validated_alternate_when_primary_value_is_null(tmp_path):
     assert bundles[0].metadata["locator_source"] == "stored_alternate"
 
 
+def test_uses_validated_alternate_when_primary_object_is_null(tmp_path):
+    item = _bundle()
+    item["primary"] = None
+    path = tmp_path / "locators"
+    path.mkdir()
+    (path / "login.json").write_text(json.dumps([item]), encoding="utf-8")
+
+    bundles = validated_locator_bundles(path, "login")
+
+    assert len(bundles) == 1
+    assert bundles[0].primary.value == "button[name=Login]"
+    assert bundles[0].metadata["locator_source"] == "stored_alternate"
+    assert bundles[0].metadata["unresolved_reason"] == "primary_missing"
+
+
+def test_null_primary_without_alternate_is_persisted_as_unresolved_not_usable(tmp_path):
+    from phoenix.locators.persist import _merge_locators
+
+    merged = _merge_locators([{
+        "element_id": "EmailAddressInput_Login",
+        "element_name": "EmailAddressInput_Login",
+        "primary": None,
+        "alternates": [],
+    }])
+
+    assert merged[0]["primary"]["value"] == ""
+    assert merged[0]["primary"]["verified_in_snapshot"] is False
+    assert merged[0]["metadata"]["locator_source"] == "unresolved"
+    assert merged[0]["metadata"]["unresolved_reason"] == "primary_missing"
+    path = tmp_path / "locators"
+    path.mkdir()
+    (path / "login.json").write_text(json.dumps(merged), encoding="utf-8")
+    assert validated_locator_bundles(path, "login") == []
+
+
 @pytest.mark.parametrize("status", ["broken", "unresolved"])
 def test_ignores_broken_or_unresolved_bundle(tmp_path, status):
     item = _bundle()
@@ -154,6 +191,333 @@ def test_submit_input_bundle_matches_button_requirement():
     item["metadata"]["element_data"] = {"tag": "input", "type": "submit"}
 
     assert match_locator_bundle("Login button", [item])["primary"]["value"] == "#login-button"
+
+
+def test_action_sentence_matches_context_qualified_login_email_and_not_signup_email():
+    login_email = {
+        "element_name": "EmailAddressInput_Login",
+        "primary": {
+            "strategy": "context",
+            "value": '''page.locator("div").filter({ hasText: "Login to your account" }).locator("form").filter({ hasText: "Login" }).locator("input[name='email']")''',
+            "verified_in_snapshot": True,
+        },
+        "metadata": {
+            "element_identity": "login-email-identity",
+            "element_data": {
+                "tag": "input", "type": "text", "name": "email",
+                "placeholder": "Email Address",
+                "ancestor_context": {"container_text": "Login to your account"},
+            },
+        },
+    }
+    signup_email = {
+        "element_name": "EmailAddressInput_Signup",
+        "primary": {
+            "strategy": "css", "value": "#signup-email", "verified_in_snapshot": True,
+        },
+        "metadata": {
+            "element_identity": "signup-email-identity",
+            "element_data": {
+                "tag": "input", "type": "text", "name": "email",
+                "placeholder": "Email Address",
+                "ancestor_context": {"container_text": "Signup form"},
+            },
+        },
+    }
+
+    selected = match_locator_bundle(
+        "When I enter TEST_USERNAME in the login email field",
+        [signup_email, login_email],
+    )
+
+    assert selected["element_name"] == "EmailAddressInput_Login"
+
+
+def test_login_button_action_sentence_matches_login_button_bundle():
+    login_button = {
+        "element_name": "LoginButton",
+        "primary": {"strategy": "css", "value": "#login-button", "verified_in_snapshot": True},
+        "metadata": {
+            "element_identity": "login-button-identity",
+            "element_data": {"tag": "button", "text": "Login"},
+        },
+    }
+
+    selected = match_locator_bundle("And I click the Login button", [login_button])
+
+    assert selected["primary"]["value"] == "#login-button"
+
+
+def test_context_chain_converts_to_python_and_is_inserted_into_generated_code():
+    context_value = '''page.locator("div").filter({ hasText: "Login to your account" }).locator("form").filter({ hasText: "Login" }).locator("input[name='email']")'''
+    bundle = {
+        "element_name": "EmailAddressInput_Login",
+        "primary": {
+            "strategy": "context", "value": context_value,
+            "verified_in_snapshot": True,
+        },
+        "metadata": {
+            "element_identity": "login-email-identity",
+            "element_data": {
+                "tag": "input", "type": "text", "name": "email",
+                "placeholder": "Email Address",
+                "ancestor_context": {"container_text": "Login to your account"},
+            },
+        },
+    }
+    source = (
+        "def login(page):\n"
+        '    fill_ready(page, page.get_by_label("Email Address"), "user", '
+        '"When I enter TEST_USERNAME in the login email field")\n'
+    )
+
+    final, selected, unresolved = reconcile_generated_code(source, [bundle])
+
+    ast.parse(final)
+    assert ".filter(has_text='Login to your account')" in final
+    assert ".filter(has_text='Login')" in final
+    assert 'locator("input[name=\'email\']")' in final
+    assert selected[0]["metadata"]["locator_source"] == "stored_primary"
+    assert unresolved == []
+
+
+def test_null_primary_without_validated_alternate_is_not_usable():
+    item = {
+        "element_name": "EmailAddressInput_Login",
+        "primary": {"strategy": "css", "value": None, "verified_in_snapshot": True},
+        "alternates": [],
+        "metadata": {"element_identity": "login-email-identity"},
+    }
+
+    assert match_locator_bundle("login email field", [item]) is None
+
+
+def test_password_input_stored_primary_regression():
+    password = {
+        "element_name": "PasswordInput",
+        "primary": {"strategy": "css", "value": "[name='password']", "verified_in_snapshot": True},
+        "metadata": {
+            "element_identity": "password-identity",
+            "element_data": {"tag": "input", "type": "password", "name": "password"},
+        },
+    }
+
+    assert match_locator_bundle("When I enter TEST_PASSWORD in the Password field", [password])["primary"]["value"] == "[name='password']"
+
+
+def test_semantic_matching_is_domain_agnostic_for_unbranded_elements():
+    address = {
+        "element_name": "ShippingAddressInput",
+        "primary": {"strategy": "css", "value": "#shipping-address", "verified_in_snapshot": True},
+        "metadata": {
+            "element_identity": "shipping-address-identity",
+            "element_data": {
+                "tag": "input", "name": "address", "placeholder": "Address",
+                "ancestor_context": {"container_text": "Shipping details"},
+            },
+        },
+    }
+
+    selected = match_locator_bundle("When I enter the shipping address field", [address])
+
+    assert selected["primary"]["value"] == "#shipping-address"
+
+
+def test_all_login_elements_resolve_without_scan_or_locator_expert():
+    email = {
+        "element_name": "EmailAddressInput_Login",
+        "primary": {
+            "strategy": "context",
+            "value": '''page.locator("div").filter({ hasText: "Login to your account" }).locator("form").filter({ hasText: "Login" }).locator("input[name='email']")''',
+            "verified_in_snapshot": True,
+            "metadata": {"locator_source": "stored_primary"},
+        },
+        "metadata": {
+            "element_identity": "login-email-identity",
+            "locator_source": "stored_primary",
+            "element_data": {
+                "tag": "input", "type": "text", "name": "email",
+                "placeholder": "Email Address",
+                "ancestor_context": {"container_text": "Login to your account"},
+            },
+        },
+    }
+    password = {
+        "element_name": "PasswordInput",
+        "primary": {
+            "strategy": "css", "value": "[name='password']", "verified_in_snapshot": True,
+            "metadata": {"locator_source": "stored_primary"},
+        },
+        "metadata": {
+            "element_identity": "password-identity", "locator_source": "stored_primary",
+            "element_data": {"tag": "input", "type": "password", "name": "password"},
+        },
+    }
+    button = {
+        "element_name": "LoginButton",
+        "primary": {
+            "strategy": "css", "value": "#login-button", "verified_in_snapshot": True,
+            "metadata": {"locator_source": "stored_primary"},
+        },
+        "metadata": {
+            "element_identity": "login-button-identity", "locator_source": "stored_primary",
+            "element_data": {"tag": "button", "text": "Login"},
+        },
+    }
+    evidence = [email, password, button]
+    stored = [
+        LocatorBundle(
+            element_name=bundle["element_name"],
+            page="login",
+            primary=Locator(
+                element_name=bundle["element_name"],
+                strategy=LocatorStrategy(bundle["primary"]["strategy"]),
+                value=bundle["primary"]["value"],
+                verified_in_snapshot=True,
+                metadata={
+                    **(bundle["primary"].get("metadata") or {}),
+                    "element_data": (bundle.get("metadata") or {}).get("element_data"),
+                    "locator_source": "stored_primary",
+                },
+            ),
+            metadata={**bundle["metadata"], "locator_source": "stored_primary"},
+        )
+        for bundle in evidence
+    ]
+    tests = [{
+        "script_code": (
+            "def login(page):\n"
+            '    fill_ready(page, page.get_by_label("Email Address"), "user", '
+            '"When I enter TEST_USERNAME in the login email field")\n'
+            '    fill_ready(page, page.get_by_label("Password"), "password", '
+            '"When I enter TEST_PASSWORD in the Password field")\n'
+            '    click_ready(page, page.get_by_role("button", name="Login"), '
+            '"And I click the Login button")\n'
+        ),
+    }]
+    calls = []
+
+    result = resolve_automation_locator_evidence(
+        tests,
+        stored,
+        application_url="https://example.invalid/login",
+        page="login",
+        scan=lambda *args, **kwargs: calls.append("scan") or [],
+        discover=lambda payload: calls.append(payload) or {},
+        validate=lambda *_: {},
+    )
+
+    assert calls == []
+    assert result["locator_expert_calls"] == 0
+    assert result["unresolved"] == []
+    assert all(selector in tests[0]["script_code"] for selector in (
+        "input[name='email']", "[name='password']", "#login-button"
+    ))
+    assert {item["source"] for item in tests[0]["locator_provenance"]} == {"stored_primary"}
+
+
+def test_output_manager_reconciles_actual_email_or_chain_and_login_button(tmp_path):
+    from phoenix.locators.smartlocator_integration import reconcile_automation_tests_with_bundles
+    from phoenix.output.coordinator import OutputManager
+
+    email_context = '''page.locator("div").filter({ hasText: "Login to your account" }).locator("form").filter({ hasText: "Login" }).locator("input[name='email']")'''
+    stored = [
+        {
+            "element_name": "EmailAddressInput_Login",
+            "primary": {"strategy": "context", "value": email_context, "verified_in_snapshot": True},
+            "alternates": [],
+            "metadata": {
+                "element_identity": "login-email-identity",
+                "locator_source": "stored_primary",
+                "element_data": {
+                    "tag": "input", "type": "text", "name": "email",
+                    "placeholder": "Email Address",
+                    "ancestor_context": {"container_text": "Login to your account"},
+                },
+            },
+        },
+        {
+            "element_name": "EmailAddressInput_Signup",
+            "primary": {"strategy": "css", "value": "#signup-email", "verified_in_snapshot": True},
+            "alternates": [],
+            "metadata": {
+                "element_identity": "signup-email-identity",
+                "locator_source": "stored_primary",
+                "element_data": {
+                    "tag": "input", "type": "text", "name": "email",
+                    "placeholder": "Email Address",
+                    "ancestor_context": {"container_text": "Signup form"},
+                },
+            },
+        },
+        {
+            "element_name": "PasswordInput",
+            "primary": {"strategy": "css", "value": "[name='password']", "verified_in_snapshot": True},
+            "alternates": [],
+            "metadata": {
+                "element_identity": "password-identity",
+                "locator_source": "stored_primary",
+                "element_data": {"tag": "input", "type": "password", "name": "password"},
+            },
+        },
+        {
+            "element_name": "LoginButton",
+            "primary": {"strategy": "role", "value": "button[name=Login]", "verified_in_snapshot": True},
+            "alternates": [],
+            "metadata": {
+                "element_identity": "login-button-identity",
+                "locator_source": "stored_primary",
+                "element_data": {"tag": "button", "text": "Login"},
+            },
+        },
+    ]
+    generic_email_or_chain = """self._page.get_by_test_id("username").or_(self._page.get_by_test_id("email")).or_(self._page.get_by_placeholder("Login Email", exact=True)).or_(self._page.get_by_placeholder("Username", exact=True)).or_(self._page.get_by_placeholder("Email", exact=True)).or_(self._page.get_by_label("Login Email", exact=True)).or_(self._page.get_by_label("Username", exact=True)).or_(self._page.get_by_label("Email", exact=True)).or_(self._page.locator("[data-test='username'], [data-testid='username'], [data-test='email'], [data-testid='email']")).or_(self._page.locator("input[name='username'], input[name='email'], input[type='email']"))"""
+    old_page_code = (
+        "class RegisteredUserLoginPage:\n"
+        "    def registered_user_login(self):\n"
+        f"        fill_ready(self._page, {generic_email_or_chain}, "
+        '"TEST_USERNAME", "Email field")\n'
+    )
+    generated_page_code = (
+        "class RegisteredUserLoginPage:\n"
+        "    def registered_user_login(self):\n"
+        "        # --- Step 5: Enter the value from `TEST_USERNAME` in the login email field ---\n"
+        f"        fill_ready(self._page, {generic_email_or_chain}, "
+        '"TEST_USERNAME", "Email field")\n'
+        "        # --- Step 6: Enter the value from `TEST_PASSWORD` in the login password field ---\n"
+        '        fill_ready(self._page, self._page.locator("[name=\'password\']"), "TEST_PASSWORD", "Password field")\n'
+        "        # --- Step 7: Click the Login button ---\n"
+        '        click_ready(self._page, self._page.get_by_role("button", name="Login"), "Login button")\n'
+    )
+    tests = [{
+        "locators": [],
+        "pom_bundle": {
+            "page_objects": [{
+                "action": "extend",
+                "file": "pages/registered_user_login_page.py",
+                "class_name": "RegisteredUserLoginPage",
+                "code": generated_page_code,
+            }],
+            "tests": [], "locators": [], "test_data": [],
+        },
+    }]
+    page_path = tmp_path / "pages" / "registered_user_login_page.py"
+    page_path.parent.mkdir()
+    page_path.write_text(old_page_code, encoding="utf-8")
+
+    unresolved, _used = reconcile_automation_tests_with_bundles(tests, stored)
+    OutputManager(tmp_path).apply(tests[0]["pom_bundle"])
+    final_page = page_path.read_text(encoding="utf-8")
+
+    assert unresolved == []
+    assert "filter(has_text='Login to your account')" in final_page
+    assert "filter(has_text='Login')" in final_page
+    assert "input[name='email']" in final_page
+    assert "[name='password']" in final_page
+    assert "get_by_role('button', name='Login')" in final_page
+    assert ".or_(" not in final_page
+    assert "#signup-email" not in final_page
+    assert {item["source"] for item in tests[0]["locator_provenance"]} == {"stored_primary"}
 
 
 def test_name_matching_rejects_similar_but_distinct_elements():

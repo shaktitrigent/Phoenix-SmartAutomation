@@ -59,6 +59,21 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
     # Get the element_name for propagation to sub-dicts
     element_name = item.get("element_name")
 
+    if "primary" in item and item["primary"] is None:
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("unresolved_reason", "primary_missing")
+        metadata["locator_source"] = "unresolved"
+        item["metadata"] = metadata
+        item["primary"] = {
+            "element_name": element_name or "unresolved",
+            "strategy": "css",
+            "value": "",
+            "confidence": 0.0,
+            "fallback": False,
+            "verified_in_snapshot": False,
+            "metadata": {"unresolved_reason": "primary_missing", "locator_source": "unresolved"},
+        }
+
     # ``primary`` locator sub-dict normalisation
     if "primary" in item and isinstance(item["primary"], dict):
         p = dict(item["primary"])

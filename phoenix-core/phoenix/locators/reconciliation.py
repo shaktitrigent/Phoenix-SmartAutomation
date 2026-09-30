@@ -15,11 +15,35 @@ _ROLE_WORDS = {
     "combobox": {"combobox", "dropdown", "select"},
 }
 _NON_NAME_SUFFIXES = {"input", "field", "element", "control"}
+_ACTION_WORDS = {
+    "given", "when", "then", "and", "but", "enter", "type", "fill", "click",
+    "press", "tap", "select", "choose", "pick", "verify", "check", "assert",
+    "ensure", "confirm", "navigate", "open", "visit", "locate", "find", "the",
+    "a", "an", "i", "we", "you", "my", "your", "in", "into", "on", "to",
+    "for", "of", "from", "with", "please", "value", "using", "use", "should",
+    "be", "is", "are", "was", "were", "displayed", "visible", "shown", "field",
+    "input", "button", "element", "control", "textbox", "page", "locator", "get",
+    "by", "role", "name", "hastext", "filter", "form", "div",
+}
+_ROLE_TOKENS = {token for aliases in _ROLE_WORDS.values() for token in aliases}
+_TOKEN_FILLER = {"test", "data", "user", "name"}
 
 
 def normalize_element_name(value: object) -> str:
     value = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
     return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _semantic_tokens(value: object) -> frozenset[str]:
+    """Remove action phrasing and test-data placeholders, retaining identity words."""
+    text = str(value or "")
+    text = re.sub(r"\bTEST_[A-Z0-9_]+\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    return frozenset(
+        token
+        for token in re.findall(r"[a-z0-9]+", text.casefold())
+        if token not in _ACTION_WORDS and token not in _TOKEN_FILLER
+    )
 
 
 def _name_forms(value: object) -> set[str]:
@@ -48,6 +72,70 @@ def _bundle_aliases(bundle: dict[str, Any]) -> set[str]:
         locator_metadata = locator.get("metadata") or {}
         values.extend([locator_metadata.get("custom_name"), locator_metadata.get("element_name")])
     return {form for value in values for form in _name_forms(value)}
+
+
+def _bundle_identity_profiles(bundle: dict[str, Any]) -> list[frozenset[str]]:
+    """Return element-name profiles, plus profiles qualified by their own context."""
+    metadata = bundle.get("metadata") or {}
+    names: list[object] = [
+        bundle.get("element_name"),
+        bundle.get("element_id"),
+        metadata.get("bundle_element_name"),
+        metadata.get("custom_name"),
+    ]
+    source_names = metadata.get("source_names", [])
+    names.extend(source_names if isinstance(source_names, list) else [source_names])
+    contexts: list[object] = []
+
+    def add_element_data(element_data: object) -> None:
+        if not isinstance(element_data, dict):
+            return
+        names.extend(
+            element_data.get(key)
+            for key in ("aria-label", "aria_label", "accessible_name", "placeholder", "name", "id", "text", "label")
+        )
+        contexts.extend(
+            element_data.get(key)
+            for key in ("container_text", "section_context", "form_context", "form_name", "container_id", "container_testid")
+        )
+        ancestor = element_data.get("ancestor_context")
+        if isinstance(ancestor, dict):
+            contexts.extend(ancestor.values())
+
+    add_element_data(metadata.get("element_data"))
+    raw_records = metadata.get("smartlocator_raw_records", [])
+    if isinstance(raw_records, list):
+        for record in raw_records:
+            if not isinstance(record, dict):
+                continue
+            names.extend(record.get(key) for key in ("custom_name", "element_name", "label"))
+            add_element_data(record.get("element_data"))
+            ancestor = record.get("ancestor_context")
+            if isinstance(ancestor, dict):
+                contexts.extend(ancestor.values())
+
+    context_profiles = [tokens for value in contexts if (tokens := _semantic_tokens(value))]
+    profiles: list[frozenset[str]] = []
+    for value in names:
+        tokens = _semantic_tokens(value)
+        if tokens:
+            profiles.append(tokens)
+            profiles.extend(tokens | context for context in context_profiles)
+
+    for locator in [bundle.get("primary"), *(bundle.get("alternates") or [])]:
+        if not isinstance(locator, dict):
+            continue
+        locator_metadata = locator.get("metadata") or {}
+        names.extend(locator.get(key) for key in ("element_name", "element_id"))
+        names.extend(locator_metadata.get(key) for key in ("custom_name", "element_name"))
+        add_element_data(locator_metadata.get("element_data"))
+        if str(locator.get("strategy", "")).casefold() == "context":
+            tokens = _semantic_tokens(locator.get("value"))
+            if tokens:
+                profiles.append(tokens)
+                profiles.extend(tokens | context for context in context_profiles)
+
+    return list(dict.fromkeys(profiles))
 
 
 def _bundle_role(bundle: dict[str, Any]) -> str | None:
@@ -85,23 +173,55 @@ def _role_compatible(label: str, bundle: dict[str, Any]) -> bool:
 
 
 def bundle_matches_element(label: str, bundle: dict[str, Any]) -> bool:
-    """Return whether exact normalized identity and role evidence match."""
-    return bool(_name_forms(label) & _bundle_aliases(bundle)) and _role_compatible(label, bundle)
+    """Return whether semantic identity and element-role evidence match."""
+    query = _semantic_tokens(label) - _ROLE_TOKENS
+    return bool(query) and any(
+        query.issubset(profile)
+        for profile in _bundle_identity_profiles(bundle)
+    ) and _role_compatible(label, bundle)
+
+
+def _bundle_match_score(
+    label: str,
+    bundle: dict[str, Any],
+    *,
+    context: str = "",
+) -> tuple[int, int, int] | None:
+    query = _semantic_tokens(label) - _ROLE_TOKENS
+    if not query or not _role_compatible(label, bundle):
+        return None
+    context_tokens = (_semantic_tokens(context) - _ROLE_TOKENS) - query
+    matching = [
+        profile for profile in _bundle_identity_profiles(bundle)
+        if query.issubset(profile)
+    ]
+    if not matching:
+        return None
+    return max(
+        (
+            len(query),
+            len(profile & context_tokens),
+            -len(profile - query - context_tokens),
+        )
+        for profile in matching
+    )
 
 
 def match_locator_bundle(
     label: str,
     bundles: Iterable[dict[str, Any]],
+    *,
+    context: str = "",
 ) -> dict[str, Any] | None:
     """Match a generated element label to one unambiguous validated bundle."""
-    query_forms = _name_forms(label)
-    if not query_forms:
+    query_tokens = _semantic_tokens(label) - _ROLE_TOKENS
+    if not query_tokens:
         return None
     matches = []
     for order, bundle in enumerate(bundles):
         metadata = bundle.get("metadata") or {}
-        aliases = _bundle_aliases(bundle)
-        if not (aliases & query_forms) or not _role_compatible(label, bundle):
+        score = _bundle_match_score(label, bundle, context=context)
+        if score is None:
             continue
         usable = []
         for candidate in [bundle.get("primary"), *(bundle.get("alternates") or [])]:
@@ -124,19 +244,22 @@ def match_locator_bundle(
                 usable.append(candidate)
         if usable:
             identity = metadata.get("element_identity")
-            matches.append((order, identity, bundle, usable))
+            matches.append((score, order, identity, bundle, usable))
 
     if not matches:
         return None
-    identities = {identity for _, identity, _, _ in matches if identity}
+    best_score = max(score for score, *_ in matches)
+    matches = [match for match in matches if match[0] == best_score]
+    identities = {identity for _, _, identity, _, _ in matches if identity}
     if len(matches) > 1 and (
-        len(identities) != 1 or any(identity is None for _, identity, _, _ in matches)
+        len(identities) != 1 or any(identity is None for _, _, identity, _, _ in matches)
     ):
         return None
-    _, _, bundle, usable = matches[0]
+    _, _, _, bundle, usable = matches[0]
     primary = bundle.get("primary")
     selected = next((item for item in usable if item is primary), None)
     selected = selected or usable[0]
+    metadata = bundle.get("metadata") or {}
     source = (
         (selected.get("metadata") or {}).get("locator_source")
         or metadata.get("locator_source")
@@ -249,7 +372,8 @@ def reconcile_generated_code(
         return start, end
 
     def process_target(target: ast.expr, label: str) -> None:
-        selected = match_locator_bundle(label, bundle_list)
+        context = _preceding_step_context(target, lines)
+        selected = match_locator_bundle(label, bundle_list, context=context)
         if selected is None:
             unresolved.append(label)
             return
@@ -290,3 +414,17 @@ def reconcile_generated_code(
     final = source_bytes.decode("utf-8")
     ast.parse(final)
     return final, used, list(dict.fromkeys(unresolved))
+
+
+def _preceding_step_context(node: ast.AST, lines: list[str]) -> str:
+    """Get the nearest generated step comment immediately associated with a call."""
+    index = node.lineno - 2
+    while index >= 0 and not lines[index].strip():
+        index -= 1
+    if index < 0:
+        return ""
+    comment = lines[index].strip()
+    if not comment.startswith("#"):
+        return ""
+    comment = comment.lstrip("#").strip().strip("- ").strip()
+    return re.sub(r"^step\s+\d+\s*:\s*", "", comment, flags=re.IGNORECASE)

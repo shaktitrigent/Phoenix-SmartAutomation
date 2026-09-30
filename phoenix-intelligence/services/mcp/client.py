@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import shutil
 import time
 from typing import Optional
@@ -9,6 +10,45 @@ from typing import Optional
 from services.config import MCPSettings
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_and_bound(text: str, max_chars: int = 2000) -> str:
+    """Redact sensitive tokens and bound error/stderr output size."""
+    if not text:
+        return ""
+    # Redact API keys, tokens, passwords
+    redacted = re.sub(
+        r"(sk-ant-[a-zA-Z0-9_-]{10,}|sk-[a-zA-Z0-9]{20,}|Bearer\s+[a-zA-Z0-9_\-\.]{10,}|password[\"'\s:=]+[^\s\"',;]+)",
+        "[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if len(redacted) > max_chars:
+        return redacted[:max_chars] + f"... [truncated {len(redacted) - max_chars} chars]"
+    return redacted
+
+
+def _extract_content_text(content) -> str:
+    """Extract plain text from MCP tool result content blocks."""
+    text = ""
+    if content:
+        for block in content:
+            if hasattr(block, "text"):
+                text += block.text
+            elif isinstance(block, dict):
+                text += block.get("text", "")
+    return text
+
+
+def _check_tool_result(result, tool_name: str) -> None:
+    """Check if an MCP tool result returned an error status."""
+    if result is None:
+        return
+    is_error = getattr(result, "isError", False) or getattr(result, "is_error", False)
+    if is_error:
+        err_text = _extract_content_text(getattr(result, "content", None))
+        err_msg = _redact_and_bound(err_text.strip() or f"MCP tool {tool_name} returned isError=True")
+        raise InspectionFailedError(f"MCP tool {tool_name} failed: {err_msg}")
 
 
 class InspectionFailedError(RuntimeError):
@@ -133,12 +173,21 @@ class MCPClient:
         # Direct MCP call (original behavior)
         print(f"[PHOENIX MCP] Starting direct MCP call")
         start_time = time.time()
+        timeout_val = float(self.settings.timeout) if self.settings and hasattr(self.settings, "timeout") else 60.0
         try:
-            result = self._run_async(self._inspect_page_async(url))
+            result = self._run_async(self._inspect_page_async(url), timeout=timeout_val)
             duration = time.time() - start_time
             
             print(f"[PHOENIX MCP] Direct MCP call completed in {duration:.2f}s")
-            print(f"[PHOENIX MCP] Snapshot size: {len(result)} chars")
+            print(f"[PHOENIX MCP] Snapshot size: {len(result) if result else 0} chars")
+
+            if not result or not result.strip():
+                print(f"[PHOENIX MCP] ✗ Empty DOM snapshot received")
+                raise InspectionFailedError(
+                    f"MCP inspection of {url!r} returned an empty DOM snapshot. "
+                    "The page may require authentication or JavaScript to render content. "
+                    "Verify the URL is correct and the page loads without login."
+                )
             
             # Store MCP response artifact if artifacts manager is available
             if self.artifacts_manager and result:
@@ -156,9 +205,12 @@ class MCPClient:
             
             print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
             return result
+        except InspectionFailedError:
+            raise
         except Exception as exc:
             duration = time.time() - start_time
-            print(f"[PHOENIX MCP] ✗ MCP call FAILED after {duration:.2f}s")
+            safe_err = _redact_and_bound(str(exc))
+            print(f"[PHOENIX MCP] ✗ MCP call FAILED after {duration:.2f}s: {safe_err}")
             
             # Store failed MCP response artifact
             if self.artifacts_manager:
@@ -169,24 +221,16 @@ class MCPClient:
                     snapshot_size_bytes=0,
                     duration_seconds=duration,
                     success=False,
-                    error_message=str(exc)
+                    error_message=safe_err
                 )
                 self.artifacts_manager.save_mcp_response(mcp_record)
             
             raise InspectionFailedError(
-                f"MCP browser connection failed while inspecting {url!r}. "
+                f"MCP browser connection failed while inspecting {url!r}: {safe_err}. "
                 "Cannot generate automation without a DOM snapshot. "
                 "Check that: (1) the page is accessible, (2) no authentication/CAPTCHA blocks "
                 "the initial load, (3) the @playwright/mcp server is running."
             ) from exc
-
-        if not result or not result.strip():
-            print(f"[PHOENIX MCP] ✗ Empty DOM snapshot received")
-            raise InspectionFailedError(
-                f"MCP inspection of {url!r} returned an empty DOM snapshot. "
-                "The page may require authentication or JavaScript to render content. "
-                "Verify the URL is correct and the page loads without login."
-            )
 
     async def _inspect_page_async(self, url: str) -> str:
         """Async implementation: connect, navigate, snapshot, disconnect."""
@@ -209,10 +253,10 @@ class MCPClient:
             await session.initialize()
 
             logger.info("MCP: navigating to %s", url)
-            await session.call_tool("browser_navigate", {"url": url})
+            nav_result = await session.call_tool("browser_navigate", {"url": url})
+            _check_tool_result(nav_result, "browser_navigate")
 
             # Wait for page to fully load before taking snapshot
-            # Use intelligent waiting instead of fixed sleep for SPA support
             logger.info("MCP: waiting for page load and SPA rendering")
             await asyncio.sleep(2)  # Initial wait for navigation
             
@@ -222,40 +266,28 @@ class MCPClient:
                 await asyncio.sleep(0.5)  # Wait between checks
                 logger.info(f"MCP: checking if page has rendered (attempt {attempt + 1}/{max_wait_attempts})")
                 
-                # Check if page has meaningful content by checking the DOM
                 try:
-                    # Try to get page content to check if rendered
                     dom_check_result = await session.call_tool("browser_evaluate", {
-                        "expression": "() => document.documentElement.outerHTML"
+                        "function": "() => document.documentElement.outerHTML"
                     })
+                    _check_tool_result(dom_check_result, "browser_evaluate")
                     
-                    if dom_check_result and dom_check_result.content:
-                        dom_text = ""
-                        for block in dom_check_result.content:
-                            if hasattr(block, "text"):
-                                dom_text += block.text
-                            elif isinstance(block, dict):
-                                dom_text += block.get("text", "")
-                        
-                        # Check for meaningful elements
-                        meaningful_elements = dom_text.count('<input') + dom_text.count('<button') + dom_text.count('<form') + dom_text.count('<a ')
-                        
-                        if len(dom_text) > 100 and meaningful_elements > 0:
-                            logger.info(f"MCP: Page has rendered content ({len(dom_text)} bytes, {meaningful_elements} elements)")
-                            break
+                    dom_text = _extract_content_text(getattr(dom_check_result, "content", None))
+                    meaningful_elements = dom_text.count('<input') + dom_text.count('<button') + dom_text.count('<form') + dom_text.count('<a ')
+                    
+                    if len(dom_text) > 100 and meaningful_elements > 0:
+                        logger.info(f"MCP: Page has rendered content ({len(dom_text)} bytes, {meaningful_elements} elements)")
+                        break
+                except InspectionFailedError:
+                    raise
                 except Exception as e:
                     logger.debug(f"MCP: DOM check failed: {e}")
             
             logger.info("MCP: taking accessibility snapshot")
             snapshot_result = await session.call_tool("browser_snapshot", {})
+            _check_tool_result(snapshot_result, "browser_snapshot")
 
-            text = ""
-            if snapshot_result and snapshot_result.content:
-                for block in snapshot_result.content:
-                    if hasattr(block, "text"):
-                        text += block.text
-                    elif isinstance(block, dict):
-                        text += block.get("text", "")
+            text = _extract_content_text(getattr(snapshot_result, "content", None))
 
             logger.info(
                 "MCP: snapshot received (%d chars)",
@@ -267,36 +299,39 @@ class MCPClient:
                 logger.warning(f"MCP: Accessibility tree too small ({len(text)} chars), capturing full HTML as fallback")
                 try:
                     html_result = await session.call_tool("browser_evaluate", {
-                        "expression": "() => document.documentElement.outerHTML"
+                        "function": "() => document.documentElement.outerHTML"
                     })
+                    _check_tool_result(html_result, "browser_evaluate")
+                    html_text = _extract_content_text(getattr(html_result, "content", None))
                     
-                    if html_result and html_result.content:
-                        html_text = ""
-                        for block in html_result.content:
-                            if hasattr(block, "text"):
-                                html_text += block.text
-                            elif isinstance(block, dict):
-                                html_text += block.get("text", "")
-                        
-                        if len(html_text) > len(text):
-                            logger.info(f"MCP: Using full HTML instead ({len(html_text)} chars vs {len(text)} chars)")
-                            text = html_text
+                    if len(html_text) > len(text):
+                        logger.info(f"MCP: Using full HTML instead ({len(html_text)} chars vs {len(text)} chars)")
+                        text = html_text
+                except InspectionFailedError:
+                    raise
                 except Exception as e:
                     logger.debug(f"MCP: HTML fallback failed: {e}")
             
-            # Log accessibility tree size for debugging
-            if text:
-                logger.info(f"MCP: DOM captured successfully")
-            else:
-                logger.warning(f"MCP: DOM is empty")
+            if not text or not text.strip():
+                logger.warning("MCP: DOM snapshot is empty")
+                raise InspectionFailedError(
+                    f"MCP inspection of {url!r} returned an empty DOM snapshot. "
+                    "The page may require authentication or JavaScript to render content. "
+                    "Verify the URL is correct and the page loads without login."
+                )
 
+            logger.info("MCP: DOM captured successfully")
             await session.call_tool("browser_close", {})
-
             return text
 
     @staticmethod
-    def _run_async(coro):
-        """Run an async coroutine from synchronous code."""
+    def _run_async(coro, timeout: Optional[float] = 60.0):
+        """Run an async coroutine from synchronous code with optional timeout."""
+        async def _with_timeout():
+            if timeout and timeout > 0:
+                return await asyncio.wait_for(coro, timeout=timeout)
+            return await coro
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -306,10 +341,10 @@ class MCPClient:
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, coro)
+                future = pool.submit(asyncio.run, _with_timeout())
                 return future.result()
         else:
-            return asyncio.run(coro)
+            return asyncio.run(_with_timeout())
 
     def is_available(self) -> bool:
         """Check whether the MCP command is reachable on this system."""

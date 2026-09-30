@@ -123,7 +123,7 @@ def _write_module_artifacts(
     try:
         engine = TestDataEngine(project_root=project_root)
         _steps = [
-            step if isinstance(step, str) else step.get("step", "")
+            step if isinstance(step, str) else (step.get("action") or step.get("step") or "")
             for test in all_manual
             for step in (test.get("steps") or [])
         ]
@@ -1056,7 +1056,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     automation_tests = result.get("automation_tests", [])
     if not automation_tests:
         print_warning("No automation scripts were generated.")
-        return
+        raise click.Abort()
 
     try:
         resolution = resolve_automation_locator_evidence(

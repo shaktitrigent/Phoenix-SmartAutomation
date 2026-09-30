@@ -405,29 +405,53 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     return "Field", quoted or "value"
 
 
+def _resolve_fill_value_expr(field: str, value: str) -> str:
+    """Resolve fill value to either an os.environ expression or a safe string literal."""
+    val_clean = value.strip().strip("'\"`")
+    val_upper = val_clean.upper()
+    field_lower = field.lower()
+
+    if val_upper in ("TEST_USERNAME", "$TEST_USERNAME", "ENV_TEST_USERNAME", "TEST_USER") or (
+        "username" in field_lower and any(
+            k in val_clean.lower()
+            for k in ["from environment", "valid user", "valid credentials", "env var", "environment variable"]
+        )
+    ):
+        return 'os.environ["TEST_USERNAME"]'
+
+    if val_upper in ("TEST_PASSWORD", "$TEST_PASSWORD", "ENV_TEST_PASSWORD") or (
+        "password" in field_lower and any(
+            k in val_clean.lower()
+            for k in ["from environment", "valid password", "valid credentials", "env var", "environment variable"]
+        )
+    ):
+        return 'os.environ["TEST_PASSWORD"]'
+
+    if val_clean.startswith("os.environ"):
+        return val_clean
+
+    return f'"{_safe_py_str(val_clean)}"'
+
+
+def _split_compound_actions(criterion: str) -> List[str]:
+    """Split compound criteria into atomic action steps if multiple distinct actions exist."""
+    if not criterion:
+        return []
+    pattern = r'\s+(?:and|then)\s+(?=(?:enter|type|fill|input|click|press|tap|submit|select|choose|check|uncheck|verify|assert|validate)\b)'
+    parts = re.split(pattern, criterion, flags=re.IGNORECASE)
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts if len(parts) > 1 else [criterion]
+
+
 def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
-    """Build a generic DOM-aware locator expression for a semantic target.
-    
-    CRITICAL FIX: If field is an explicit locator (e.g., 'user-name' from id='user-name'),
-    use it directly as a CSS selector with highest priority.
-    """
+    """Build a generic DOM-aware locator expression for a semantic target."""
+    if field.startswith(("#", ".", "[", "//", "xpath=")):
+        return f'page.locator("{_safe_py_str(field)}")'
+
     label = _safe_py_str(_normalise_field_label(field))
     token = _safe_py_str(re.sub(r"[^a-z0-9]+", "-", field.lower()).strip("-"))
     css_token = _safe_py_str(field.lower().replace(" ", "-"))
-    
-    # CRITICAL FIX: Check if field is an explicit locator (looks like CSS selector)
-    # Patterns: 'user-name', 'login-btn', 'password' (single words or hyphenated without spaces)
-    if re.match(r'^[a-z][a-z0-9\-_]*$', field.lower()):
-        # This looks like an explicit locator (CSS class or ID without # prefix)
-        # Add # prefix for ID selectors, . for class selectors
-        if field.lower().startswith('btn-') or field.lower().endswith('-btn'):
-            # Likely a button class
-            return f'page.locator(".{field}")'
-        else:
-            # Use as ID selector (most common for explicit locators like 'user-name')
-            return f'page.locator("#{field}")'
-    
-    # Enhanced patterns for common field types
+
     field_lower = field.lower()
     
     if kind == "button":
@@ -578,15 +602,18 @@ def _extract_assertion_subject(criterion: str) -> str:
     return cleaned[:60]
 
 
-def _criterion_to_playwright_lines(
+def _criterion_to_playwright_lines_atomic(
     criterion: str,
     step_num: int,
     application_url: Optional[str] = None,
+    include_header: bool = False,
 ) -> List[str]:
-    """Map a single acceptance criterion → list of indented Playwright code lines."""
+    """Map a single atomic acceptance criterion → list of indented Playwright code lines."""
     control = _classify_control(criterion, application_url)
     lower = criterion.lower()
-    lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+    lines: List[str] = []
+    if include_header:
+        lines.append(f"    # Step {step_num}: {criterion}")
 
     if control == ControlType.LOGIN:
         # Extract URL, username, password from step text
@@ -598,8 +625,8 @@ def _criterion_to_playwright_lines(
         username_val = user_match.group(1).strip().strip("'\"") if user_match else None
         pass_match = _LOGIN_PASS_RE.search(criterion)
         password_val = pass_match.group(1).strip().strip("'\"") if pass_match else None
-        username_expr = f'"{_safe_py_str(username_val)}"' if username_val else 'os.environ["TEST_USERNAME"]'
-        password_expr = f'"{_safe_py_str(password_val)}"' if password_val else 'os.environ["TEST_PASSWORD"]'
+        username_expr = _resolve_fill_value_expr("Username", username_val) if username_val else 'os.environ["TEST_USERNAME"]'
+        password_expr = _resolve_fill_value_expr("Password", password_val) if password_val else 'os.environ["TEST_PASSWORD"]'
         username_locator = _semantic_locator_expr("Username")
         password_locator = _semantic_locator_expr("Password")
         login_locator = _semantic_locator_expr("Login", kind="button")
@@ -645,22 +672,27 @@ def _criterion_to_playwright_lines(
     elif control == ControlType.TEXT_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
         locator_expr = _semantic_locator_expr(field)
+        val_expr = _resolve_fill_value_expr(field, value)
         lines.append(
-            f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "{_safe_py_str(field)} field")'
+            f'    fill_ready(page, {locator_expr}, {val_expr}, "{_safe_py_str(field)} field")'
         )
 
     elif control == ControlType.PASSWORD_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
-        locator_expr = _semantic_locator_expr(field if field != "Field" else "Password")
+        f_name = field if field != "Field" else "Password"
+        locator_expr = _semantic_locator_expr(f_name)
+        val_expr = _resolve_fill_value_expr(f_name, value)
         lines.append(
-            f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "Password field")'
+            f'    fill_ready(page, {locator_expr}, {val_expr}, "Password field")'
         )
 
     elif control == ControlType.EMAIL_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
-        locator_expr = _semantic_locator_expr(field if field != "Field" else "Email")
+        f_name = field if field != "Field" else "Email"
+        locator_expr = _semantic_locator_expr(f_name)
+        val_expr = _resolve_fill_value_expr(f_name, value)
         lines.append(
-            f'    fill_ready(page, {locator_expr}, "{_safe_py_str(value)}", "Email field")'
+            f'    fill_ready(page, {locator_expr}, {val_expr}, "Email field")'
         )
 
     elif control == ControlType.CHECKBOX:
@@ -794,8 +826,8 @@ def _criterion_to_playwright_lines(
         password_locator = _semantic_locator_expr("Password")
         login_locator = _semantic_locator_expr("Login", kind="button")
         lines += [
-            f'    fill_ready(page, {username_locator}, os.environ.get("TEST_USERNAME", "test_user"), "Username input")',
-            f'    fill_ready(page, {password_locator}, os.environ.get("TEST_PASSWORD", "test_password"), "Password input")',
+            f'    fill_ready(page, {username_locator}, os.environ["TEST_USERNAME"], "Username input")',
+            f'    fill_ready(page, {password_locator}, os.environ["TEST_PASSWORD"], "Password input")',
             f'    click_ready(page, {login_locator}, "Login button")',
             '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
@@ -842,6 +874,25 @@ def _criterion_to_playwright_lines(
         logger.warning("Criterion not recognized for heuristic mapping: %s", criterion)
         lines.append(_manual_review_warning_line("Criterion not mapped to a stable automation step", criterion))
 
+    return lines
+
+
+def _criterion_to_playwright_lines(
+    criterion: str,
+    step_num: int,
+    application_url: Optional[str] = None,
+) -> List[str]:
+    """Map a single acceptance criterion → list of indented Playwright code lines."""
+    sub_parts = _split_compound_actions(criterion)
+    if len(sub_parts) > 1:
+        lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+        for sub in sub_parts:
+            sub_lines = _criterion_to_playwright_lines_atomic(sub, step_num, application_url, include_header=False)
+            lines.extend(sub_lines)
+        lines.append("")
+        return lines
+
+    lines = _criterion_to_playwright_lines_atomic(criterion, step_num, application_url, include_header=True)
     lines.append("")
     return lines
 
@@ -1371,23 +1422,81 @@ def _parse_bdd_bundle_output(raw: str) -> Tuple[Dict[str, Any], List[Dict[str, A
     return bundle, locators_raw, recommendations
 
 
-_AUTH_PRECONDITION_PHRASES = (
-    "logged in",
-    "authenticated",
-    "on the dashboard",
-    "already logged in",
-    "signed in",
-    "valid session",
-    "active session",
-    "user is logged",
-    "user has logged",
+_NEGATION_AUTH_PATTERNS = (
+    r"\bnot\s+(?:already\s+)?logged\s+in\b",
+    r"\buser\s+is\s+not\s+(?:already\s+)?(?:logged\s+in|authenticated)\b",
+    r"\bnot\s+authenticated\b",
+    r"\bunauthenticated\b",
+    r"\blogin\s+page\b",
+    r"\blog\s+in\s+page\b",
+    r"\bbefore\s+login\b",
+    r"\bwithout\s+login\b",
+    r"\bwithout\s+authentication\b",
+    r"\bguest\b",
+    r"\blogged\s+out\b",
+    r"\bno\s+active\s+session\b",
+    r"\bnever\s+logged\s+in\b",
+)
+
+_LOGIN_SCENARIO_PATTERNS = (
+    r"\binvalid\s+login\b",
+    r"\bempty\s+credentials\b",
+    r"\bblank\s+(?:username|password|credentials)\b",
+    r"\bwrong\s+(?:username|password|credentials)\b",
+    r"\bincorrect\s+(?:username|password|credentials)\b",
+    r"\bfailed\s+login\b",
+    r"\blogin\s+failure\b",
+    r"\blogin\s+with\s+(?:valid|invalid|empty|blank|incorrect|wrong)\b",
+    r"\blogin\s+test\b",
+    r"\buser\s+logs\s+in\b",
+    r"\buser\s+logs\s+into\b",
+    r"\buser\s+logging\s+in\b",
+    r"\bperform\s+login\b",
+    r"\battempt\s+login\b",
+    r"^test_.*login",
+    r"^test_.*credential",
+)
+
+_AUTH_PRECONDITION_PATTERNS = (
+    r"\balready\s+logged\s+in\b",
+    r"\buser\s+is\s+logged\s+in\b",
+    r"\buser\s+has\s+logged\s+in\b",
+    r"\buser\s+is\s+authenticated\b",
+    r"\bauthenticated\s+user\b",
+    r"\bvalid\s+session\b",
+    r"\bactive\s+session\b",
+    r"\blogged\s+in\s+as\b",
+    r"\bon\s+the\s+dashboard\b",
+    r"\buser\s+is\s+on\s+(?:the\s+)?dashboard\b",
 )
 
 
-def _needs_authenticated_page(preconditions: str) -> bool:
-    """Return True when the preconditions indicate the user must already be logged in."""
+def _needs_authenticated_page(
+    preconditions: str = "",
+    name: str = "",
+    description: str = "",
+) -> bool:
+    """Return True when preconditions indicate the user must already be logged in.
+
+    Returns False for login scenarios (valid/invalid/empty), unauthenticated states,
+    negations (e.g. 'not already logged in'), and unrelated scenarios.
+    """
+    combined = f"{name} {description}".lower()
+    if any(re.search(p, combined) for p in _LOGIN_SCENARIO_PATTERNS):
+        return False
+
+    if not preconditions or not preconditions.strip():
+        return False
+
     low = preconditions.lower()
-    return any(phrase in low for phrase in _AUTH_PRECONDITION_PHRASES)
+
+    if any(re.search(p, low) for p in _NEGATION_AUTH_PATTERNS):
+        return False
+
+    if any(re.search(p, low) for p in _LOGIN_SCENARIO_PATTERNS):
+        return False
+
+    return any(re.search(p, low) for p in _AUTH_PRECONDITION_PATTERNS)
 
 
 def _extract_test_body_lines(script_code: str) -> List[str]:
@@ -1649,6 +1758,28 @@ def _synthesize_pom_bundle(
         ],
         "test_data": [],
     }
+
+
+def _expected_result_to_assertion_lines(expected: str) -> List[str]:
+    """Convert a step's expected result into executable Playwright assertion line(s)."""
+    if not expected or expected.startswith("[NEEDS MANUAL REVIEW]"):
+        return []
+    expected_lower = expected.lower()
+    # URL assertion
+    url_frag = re.search(r"[/][\w/-]+", expected)
+    if "url" in expected_lower or "redirect" in expected_lower:
+        if "dashboard" in expected_lower:
+            return ['    expect(page).to_have_url(re.compile(r".*dashboard.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)']
+        elif "login" in expected_lower:
+            return ['    expect(page).to_have_url(re.compile(r".*login.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)']
+        elif url_frag:
+            return [f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"), timeout=ASSERTION_TIMEOUT_MS)']
+    # Visible/displayed assertion
+    if any(k in expected_lower for k in ["is displayed", "is visible", "is shown", "appears", "contains the value", "is checked", "is unchecked"]):
+        subject = _extract_assertion_subject(expected)
+        if subject and not _looks_like_placeholder_assertion(subject):
+            return [f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=False), "{_safe_py_str(subject)} assertion")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)']
+    return []
 
 
 class TestGeneratorAgent(BaseAgent):
@@ -2428,6 +2559,9 @@ class TestGeneratorAgent(BaseAgent):
                 
                 if expected:
                     body_lines.append(f"    # Expected: {expected}")
+                    assertion_lines = _expected_result_to_assertion_lines(expected)
+                    if assertion_lines:
+                        body_lines.extend(assertion_lines)
                 if test_data:
                     body_lines.append(f"    # Test data: {test_data}")
                 body_lines.append("")  # Empty line for readability
@@ -2442,7 +2576,7 @@ class TestGeneratorAgent(BaseAgent):
         test_func_name = self._derive_short_name(manual_test.get("name", "test"))
         description = manual_test.get("description", manual_test.get("name", ""))
 
-        return (
+        script = (
             f'"""{description.replace(chr(34), chr(39))} — automated by Phoenix."""\n'
             "import re\n"
             "import pytest\n"
@@ -2453,6 +2587,7 @@ class TestGeneratorAgent(BaseAgent):
             f'    """{description.replace(chr(34), chr(39))}"""\n'
             f"{body}\n"
         )
+        return script
 
     def _generate_single_automation_fallback(
         self,
@@ -2529,7 +2664,7 @@ class TestGeneratorAgent(BaseAgent):
         script_lower = script.lower()
         
         for step in manual_steps:
-            step_text = step.get("step", "") if isinstance(step, dict) else str(step)
+            step_text = (step.get("action") or step.get("step") or "") if isinstance(step, dict) else str(step)
             step_lower = step_text.lower()
             
             # Check if step is implemented by looking for key action keywords

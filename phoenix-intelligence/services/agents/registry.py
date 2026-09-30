@@ -33,6 +33,18 @@ class AgentRegistry:
         self._llm_client = llm_client
         self._init_agents(mcp_client, llm_client)
 
+    @property
+    def mcp_client(self):
+        return self._mcp_client
+
+    @mcp_client.setter
+    def mcp_client(self, client):
+        self._mcp_client = client
+        if "test_generator" in self._agents:
+            self._agents["test_generator"].mcp_client = client
+        if "locator_expert" in self._agents:
+            self._agents["locator_expert"].mcp_client = client
+
     def _init_agents(self, mcp_client=None, llm_client=None) -> None:
         kwargs = dict(mcp_client=mcp_client, llm_client=llm_client)
         self._agents["test_generator"] = TestGeneratorAgent(

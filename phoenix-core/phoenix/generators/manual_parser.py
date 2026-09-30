@@ -214,7 +214,8 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
         # Pad to at least 4 cells
         while len(row) < 4:
             row.append("")
-        step_num_raw, action, expected, test_data = row[0], row[1], row[2], row[3]
+        step_num_raw, action, expected = row[0], row[1], row[2]
+        test_data = " | ".join(c for c in row[3:] if c) if len(row) > 4 else row[3]
         try:
             step_num = int(step_num_raw)
         except ValueError:
@@ -234,21 +235,11 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
     if not steps and steps_block:
         steps = _parse_list_steps(steps_block)
 
-    # Extract steps from description if available (Main Flow, etc.)
-    # Some manual tests embed numbered steps in the description
-    # Prefer description steps if they provide more detailed steps than the table
-    desc_steps = []
-    if description:
-        desc_steps = _parse_list_steps(description)
-    
-    # Use description steps if they are more numerous than table steps
-    # or if table steps are generic/low-quality (like single "Navigate and log in" step)
-    if desc_steps and (len(desc_steps) > len(steps) or len(steps) <= 1):
-        steps = desc_steps
-    elif not steps and desc_steps:
-        steps = desc_steps
+    # If still no steps, extract steps from description if available (Main Flow, etc.)
+    if not steps and description:
+        steps = _parse_list_steps(description)
 
-    # Last resort: try extracting steps from description or acceptance criteria blocks
+    # Last resort: try extracting steps from alternative blocks
     if not steps:
         for section_key in ("acceptance criteria", "criteria", "steps", "scenario", "main flow", "test case flow", "flow", "mainflow"):
             alt_block = sections.get(section_key, "")

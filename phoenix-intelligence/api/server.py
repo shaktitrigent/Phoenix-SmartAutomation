@@ -213,14 +213,58 @@ def _decorate_metadata(result: dict) -> dict:
     result["metadata"]["prompt_hot_reload"] = True
 
     warnings = list(result["metadata"].get("warnings", []))
-    for test in result.get("automation_tests", []):
+    rejection_reasons = []
+    automation_tests = result.get("automation_tests", [])
+    manual_tests = result.get("manual_tests", [])
+
+    # Single pass over automation tests: collect warnings and rejection reasons
+    for test in automation_tests:
         warnings.extend(test.get("warnings", []))
+        for rec in test.get("recommendations", []):
+            if "rejected" in rec.lower() or "invalid locator" in rec.lower():
+                rejection_reasons.append(rec)
+
     if warnings:
         deduped = []
         for warning in warnings:
             if warning not in deduped:
                 deduped.append(warning)
         result["metadata"]["warnings"] = deduped
+
+    # Calculate status, accepted_count, rejected_count
+    valid_auto_count = sum(
+        1 for t in automation_tests
+        if t.get("script_code") or t.get("pom_bundle") or t.get("bdd_bundle")
+    )
+    total_auto_count = len(automation_tests)
+    rejected_auto_count = total_auto_count - valid_auto_count
+
+    if total_auto_count > 0:
+        if valid_auto_count == total_auto_count and not rejection_reasons:
+            status = "success"
+        elif valid_auto_count > 0:
+            status = "partial"
+        else:
+            status = "failed"
+
+        accepted_count = valid_auto_count
+        rejected_count = rejected_auto_count + (
+            1 if rejection_reasons and status == "partial" else 0
+        )
+    elif manual_tests:
+        status = "success"
+        accepted_count = len(manual_tests)
+        rejected_count = 0
+    else:
+        status = "failed"
+        accepted_count = 0
+        rejected_count = 0
+
+    result["metadata"]["status"] = status
+    result["metadata"]["accepted_count"] = accepted_count
+    result["metadata"]["rejected_count"] = rejected_count
+    result["metadata"]["rejection_reasons"] = rejection_reasons
+    result.setdefault("status", status)
     return result
 
 

@@ -78,6 +78,88 @@ def test_cli_context_reaches_sdk_and_api_model(
     assert "PHASE_ONE_SECRET" not in os.environ
 
 
+def test_cli_locator_expert_discovery_reuses_project_context(tmp_path, monkeypatch):
+    root = tmp_path / "Phoenix Project"
+    manual = root / "manual_tests"
+    manual.mkdir(parents=True)
+    (root / ".phoenixrc").write_text(
+        '[project]\nbase_url = "https://configured.example/login"\nlayout = "pom-v1"\n',
+        encoding="utf-8",
+    )
+    (manual / "manual_test_Login.md").write_text(
+        "# Login\n\n## Test Steps\n1. Enter the login email field\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(
+        "phoenix.locators.smartlocator_integration.generate_smartlocator_bundles",
+        lambda *args, **kwargs: [],
+    )
+    captured_requests = []
+
+    def post(url, *, json, timeout):
+        captured_requests.append((url, json))
+        if url.endswith("/api/v1/locators/discover"):
+            return Mock(status_code=200, json=lambda: {
+                "locators": [], "metadata": {},
+            })
+        return Mock(status_code=200, json=lambda: {
+            "automation_tests": [{
+                "name": "login",
+                "script_template": "pom",
+                "script_code": "",
+                "locators": [],
+                "pom_bundle": {
+                    "page_objects": [{
+                        "action": "extend",
+                        "file": "pages/login_page.py",
+                        "class_name": "LoginPage",
+                        "code": "class LoginPage:\n    def login(self):\n        pass\n",
+                    }],
+                    "tests": [], "locators": [], "test_data": [],
+                },
+            }],
+        })
+
+    monkeypatch.setattr("phoenix.sdk.intelligence_client.requests.post", post)
+    def resolve_with_discovery(tests, bundles, **kwargs):
+        kwargs["discover"]({
+            "page_url": "https://configured.example/login",
+            "element_name": "Email field",
+            "element_context": {},
+        })
+        return {
+            "stored_count": 0,
+            "scanned_count": 0,
+            "fresh_count": 0,
+            "locator_expert_calls": 1,
+            "unresolved": ["Email field"],
+        }
+
+    monkeypatch.setattr(
+        "phoenix.locators.smartlocator_integration.resolve_automation_locator_evidence",
+        resolve_with_discovery,
+    )
+    monkeypatch.setattr(
+        "phoenix.output.coordinator.OutputManager.apply",
+        lambda self, bundle: [str(self.root / "pages" / "login_page.py")],
+    )
+
+    result = CliRunner().invoke(main, ["automate", "--url", "https://configured.example/login"])
+
+    assert result.exit_code == 0, result.output
+    discovery = next(
+        payload for url, payload in captured_requests
+        if url.endswith("/api/v1/locators/discover")
+    )
+    assert discovery["project_context"] == {
+        "project_root": str(root.resolve()),
+        "application_url": "https://configured.example/login",
+        "page_name": "manual_tests",
+        "locator_directory": str(root / "locators"),
+        "environment_file": str(root / ".env.local"),
+    }
+
+
 def test_explicit_relative_config_and_nearest_project(tmp_path, monkeypatch):
     outer = tmp_path / "outer"
     inner = outer / "inner"

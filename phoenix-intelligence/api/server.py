@@ -221,6 +221,39 @@ def _decorate_metadata(result: dict) -> dict:
             if warning not in deduped:
                 deduped.append(warning)
         result["metadata"]["warnings"] = deduped
+    # These counts describe generated outputs, not browser-passing tests.
+    tests = result.get("automation_tests", [])
+    manual_tests = result.get("manual_tests", [])
+    reasons = []
+
+    for test in tests:
+        for recommendation in test.get("recommendations", []):
+            if isinstance(recommendation, str) and recommendation.startswith("Invalid locators rejected:"):
+                details = recommendation.split(":", 1)[1].strip()
+                for line in details.splitlines():
+                    reason = line.strip().lstrip("- ")
+                    if reason and reason not in reasons:
+                        reasons.append(reason)
+
+    metadata = result["metadata"]
+    metadata["accepted_count"] = len(tests) + len(manual_tests)
+    metadata["rejected_count"] = len(reasons)
+    metadata["rejection_reasons"] = reasons
+
+    partial = (
+        bool(reasons)
+        or metadata.get("translation_status") == "partial"
+        or any(
+            (test.get("generation_quality") or {}).get("status") == "partial"
+            or (test.get("generation_quality") or {}).get("requires_manual_review")
+            for test in tests
+        )
+    )
+    metadata["status"] = (
+        "failed" if not metadata["accepted_count"]
+        else "partial" if partial
+        else "success"
+    )
     return result
 
 

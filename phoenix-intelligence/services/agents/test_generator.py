@@ -1,6 +1,9 @@
 """Test generation agent - uses LLM + Knowledge Base + MCP for real code generation."""
 
 import ast
+from phoenix_shared.automation_translation import (
+    assertion_lines, bind_page_object_body, fill_value_expression, resolve_script_environment_values, step_coverage,
+)
 import json
 import logging
 import re
@@ -212,34 +215,6 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
     if re.search(r"(select|choose|pick)\s+(from|to|leave|start|end)\s+date", lower):
         return ControlType.DATE_PICKER_FUTURE
 
-    # URL-based hints
-    if ("/checkboxes" in url_lower or "checkbox" in url_lower) and any(
-        k in lower for k in ["check", "tick", "uncheck", "untick"]
-    ):
-        return ControlType.CHECKBOX
-    if "/dropdown" in url_lower and any(
-        k in lower for k in ["select", "choose", "pick", "option"]
-    ):
-        return ControlType.SELECT_DROPDOWN
-    if "/upload" in url_lower and any(k in lower for k in ["upload", "attach", "file"]):
-        return ControlType.FILE_INPUT
-    if ("/javascript_alerts" in url_lower or "/alerts" in url_lower) and any(
-        k in lower for k in ["alert", "dialog", "confirm", "prompt", "dismiss", "accept"]
-    ):
-        if "confirm" in lower:
-            return ControlType.BROWSER_CONFIRM
-        if "prompt" in lower:
-            return ControlType.BROWSER_PROMPT
-        return ControlType.BROWSER_ALERT
-    if ("/drag_and_drop" in url_lower or "/drag" in url_lower) and any(
-        k in lower for k in ["drag", "drop"]
-    ):
-        return ControlType.DRAG_DROP
-    if ("/hovers" in url_lower or "/hover" in url_lower) and any(
-        k in lower for k in ["hover", "mouse over"]
-    ):
-        return ControlType.HOVER_TARGET
-
     # MENU_CLICK: "Click X in the navigation menu" / "Click X menu"
     if any(k in lower for k in ["click", "press", "tap"]) and any(
         k in lower for k in ["menu", "navigation", "nav", "sidebar", "submenu"]
@@ -299,7 +274,7 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
 
 def _extract_quoted_value(text: str) -> Optional[str]:
     """Return the first quoted or backtick-delimited string found in text."""
-    m = re.search(r'[`"\']([^`"\']+)[`"\']', text)
+    m = re.search(r'[`"\']([^`"\']*)[`"\']', text)
     return m.group(1) if m else None
 
 
@@ -318,7 +293,7 @@ def _normalise_field_label(field: str) -> str:
 
 def _normalise_fill_value(value: str) -> str:
     """Clean natural-language punctuation around a field value."""
-    return value.strip().strip("`'\"").rstrip(".,;:")
+    return value.strip().strip("`'\"")
 
 
 def _strip_fill_action_prefix(text: str) -> str:
@@ -360,7 +335,7 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     if field_match:
         field = _normalise_field_label(field_match.group(1))
         value = (
-            quoted or re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
+            quoted if quoted is not None else re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
         )
         return field, _normalise_fill_value(value)
 
@@ -372,8 +347,9 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
         return _normalise_field_label(field), _normalise_fill_value(value)
 
     # Handle quoted value pattern first - this is the most reliable extraction
-    if quoted and quoted in cleaned:
-        field = cleaned.split(quoted, 1)[0]
+    if quoted is not None and quoted in cleaned:
+        quote_match = re.search(r'[`"\']([^`"\']*)[`"\']', cleaned)
+        field = cleaned[:quote_match.start()] if quote_match else cleaned
         field = re.sub(r"\s+(?:with|as|value|=)\s*$", "", field, flags=re.IGNORECASE)
         # Remove leading article from field if present
         field = _LEADING_ARTICLE_RE.sub("", field).strip()
@@ -406,31 +382,9 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
 
 
 def _resolve_fill_value_expr(field: str, value: str) -> str:
-    """Resolve fill value to either an os.environ expression or a safe string literal."""
-    val_clean = value.strip().strip("'\"`")
-    val_upper = val_clean.upper()
-    field_lower = field.lower()
+    """Resolve explicitly supplied variables without default credential names."""
+    return fill_value_expression(value)
 
-    if val_upper in ("TEST_USERNAME", "$TEST_USERNAME", "ENV_TEST_USERNAME", "TEST_USER") or (
-        "username" in field_lower and any(
-            k in val_clean.lower()
-            for k in ["from environment", "valid user", "valid credentials", "env var", "environment variable"]
-        )
-    ):
-        return 'os.environ["TEST_USERNAME"]'
-
-    if val_upper in ("TEST_PASSWORD", "$TEST_PASSWORD", "ENV_TEST_PASSWORD") or (
-        "password" in field_lower and any(
-            k in val_clean.lower()
-            for k in ["from environment", "valid password", "valid credentials", "env var", "environment variable"]
-        )
-    ):
-        return 'os.environ["TEST_PASSWORD"]'
-
-    if val_clean.startswith("os.environ"):
-        return val_clean
-
-    return f'"{_safe_py_str(val_clean)}"'
 
 
 def _split_compound_actions(criterion: str) -> List[str]:
@@ -625,8 +579,10 @@ def _criterion_to_playwright_lines_atomic(
         username_val = user_match.group(1).strip().strip("'\"") if user_match else None
         pass_match = _LOGIN_PASS_RE.search(criterion)
         password_val = pass_match.group(1).strip().strip("'\"") if pass_match else None
-        username_expr = _resolve_fill_value_expr("Username", username_val) if username_val else 'os.environ["TEST_USERNAME"]'
-        password_expr = _resolve_fill_value_expr("Password", password_val) if password_val else 'os.environ["TEST_PASSWORD"]'
+        username_expr = _resolve_fill_value_expr("Username", username_val) if username_val is not None else None
+        password_expr = _resolve_fill_value_expr("Password", password_val) if password_val is not None else None
+        if username_expr is None or password_expr is None:
+            return [_manual_review_warning_line("Login requires explicitly supplied credentials", criterion)]
         username_locator = _semantic_locator_expr("Username")
         password_locator = _semantic_locator_expr("Password")
         login_locator = _semantic_locator_expr("Login", kind="button")
@@ -778,91 +734,20 @@ def _criterion_to_playwright_lines_atomic(
         )
 
     elif control == ControlType.DRAG_DROP:
-        lines += [
-            "    source = page.locator('#column-a')",
-            "    target = page.locator('#column-b')",
-            "    source.drag_to(target)",
-        ]
+        lines.append(_manual_review_warning_line("Drag and drop requires explicit source and target evidence", criterion))
 
     elif control == ControlType.ASSERTION:
-        subject = _extract_assertion_subject(criterion)
-        if re.search(r"\b(page|screen|view)\s+is\s+displayed\b", lower):
-            lines.append('    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)')
-            lines.append(_manual_review_warning_line("Page-state assertion requires DOM-derived business evidence", criterion))
-        elif any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
-            # Enhanced URL assertion handling for dashboard redirection
-            # "user is successfully redirected to the Dashboard" → match dashboard in URL
-            if "dashboard" in lower and "redirect" in lower:
-                lines.append(
-                    f'    expect(page).to_have_url(re.compile(r".*dashboard.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)'
-                )
-            elif "login" in lower and "redirect" in lower:
-                lines.append(
-                    f'    expect(page).to_have_url(re.compile(r".*login.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)'
-                )
-            else:
-                url_frag = re.search(r"[/][\w/-]+", subject)
-                if url_frag:
-                    lines.append(
-                        f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"))'
-                    )
-                else:
-                    lines.append(
-                        f'    expect(page).to_have_url(re.compile(r".*{re.escape(subject)}.*"))'
-                    )
-        elif "title" in lower:
-            lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
-        else:
-            if _looks_like_placeholder_assertion(subject):
-                lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
-            else:
-                lines.append(
-                    f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=True), "{_safe_py_str(subject)} assertion target")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)'
-                )
+        translated = assertion_lines(criterion)
+        lines.extend(translated or [_manual_review_warning_line("Assertion requires explicit UI or URL evidence", criterion)])
 
     elif control == ControlType.LOGIN_CREDENTIALS:
-        # "Login using valid credentials" — use env vars; no URL extraction needed
-        username_locator = _semantic_locator_expr("Username")
-        password_locator = _semantic_locator_expr("Password")
-        login_locator = _semantic_locator_expr("Login", kind="button")
-        lines += [
-            f'    fill_ready(page, {username_locator}, os.environ["TEST_USERNAME"], "Username input")',
-            f'    fill_ready(page, {password_locator}, os.environ["TEST_PASSWORD"], "Password input")',
-            f'    click_ready(page, {login_locator}, "Login button")',
-            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
-        ]
+        lines.append(_manual_review_warning_line("Login requires explicit fields, values and submit control", criterion))
 
     elif control == ControlType.DATE_PICKER_FUTURE:
-        # "Select a future From Date" / "Select From Date"
-        field_match = re.search(
-            r"(from|to|start|end|leave)\s+date",
-            lower,
-        )
-        field_label = field_match.group(0).title() if field_match else "Date"
-        lines += [
-            f'    # Date picker — select a future date for "{field_label}"',
-            f'    page.locator("input.oxd-date-input-field, input[placeholder*=\'Date\'], [class*=\'date\'] input").click()',
-            '    dismiss_known_overlays(page)',
-            '    # Click the next-month arrow until a future date is reachable, then click a date cell',
-            '    future_date_cell = page.locator("[class*=\'calender-cell\'], [class*=\'day\']:not([class*=\'disabled\']):not([class*=\'prev\']):not([class*=\'next\'])").nth(14)',
-            '    future_date_cell.click(timeout=ACTION_TIMEOUT_MS)',
-        ]
+        lines.append(_manual_review_warning_line("Date selection requires a supplied date and control evidence", criterion))
 
     elif control == ControlType.DATE_PICKER_PAST:
-        # "Select past leave date" / "Select a past date"
-        field_match = re.search(
-            r"(from|to|start|end|leave|past)\s+.*date|date.*past",
-            lower,
-        )
-        field_label = field_match.group(0).title() if field_match else "Date"
-        lines += [
-            f'    # Date picker — select a past date for "{field_label}"',
-            f'    page.locator("input.oxd-date-input-field, input[placeholder*=\'Date\'], [class*=\'date\'] input").click()',
-            '    dismiss_known_overlays(page)',
-            '    # Click a past date cell (use a date 7 days ago)',
-            '    past_date_cell = page.locator("[class*=\'calender-cell\'], [class*=\'day\']:not([class*=\'disabled\']):not([class*=\'prev\']):not([class*=\'next\'])").nth(1)',
-            '    past_date_cell.click(timeout=ACTION_TIMEOUT_MS)',
-        ]
+        lines.append(_manual_review_warning_line("Date selection requires a supplied date and control evidence", criterion))
 
     elif control == ControlType.WAIT:
         lines += [
@@ -1633,6 +1518,7 @@ def _synthesize_pom_bundle(
     test_name: str,
     preconditions: str = "",
     human_name: str = "",
+    description: str = "",
 ) -> Dict[str, Any]:
     """Build a minimal ``pom_bundle`` from a flat Playwright script.
 
@@ -1665,36 +1551,14 @@ def _synthesize_pom_bundle(
     nav_lines = []
     interaction_lines = []
     
-    for ln in body_lines:
-        if re.match(r"\s*(?:self\._)?page\.goto\(", ln):
-            nav_lines.append(ln)
-        elif ln.lstrip().startswith("#"):
-            # Keep comments
-            interaction_lines.append(ln)
-        else:
-            # This is an interaction line - preserve it
-            interaction_lines.append(ln)
-    
-    # Replace `page.` → `self._page.` and standalone `page` args; skip comment lines
-    # so prose like "the login page. The user remains" is not mangled.
-    # Remove .first from locator chains in test method body (not in helper functions)
-    processed_lines = []
-    for ln in interaction_lines:
-        if ln.lstrip().startswith("#"):
-            processed_lines.append(ln)
-        else:
-            # First replace page references
-            ln = re.sub(r"\bpage\b", "self._page", re.sub(r"(?<!\.)page\.", "self._page.", ln))
-            # Remove .first from locator chains in test method body
-            # Only remove if it's part of a fill_ready or click_ready call (test actions)
-            # Keep .first in helper function definitions
-            if "fill_ready(" in ln or "click_ready(" in ln:
-                # Remove .first before comma or closing parenthesis
-                # Handle both with and without spaces
-                ln = re.sub(r'\.first\s*(?=[,\)])', '', ln)
-            processed_lines.append(ln)
-    interaction_lines = processed_lines
-    
+    # Preserve explicit navigation steps; never substitute a project default URL.
+    interaction_lines = body_lines
+
+    # Rebind identifiers without changing UI strings or supplied data.
+    if interaction_lines:
+        adapted = bind_page_object_body(textwrap.dedent("\n".join(interaction_lines)))
+        interaction_lines = textwrap.indent(adapted, "        ").splitlines()
+
     # CORE FIX: If no interaction lines after removing navigation, add basic interaction
     # This can happen if the fallback only generated navigation
     if not interaction_lines or all(ln.strip().startswith("#") for ln in interaction_lines):
@@ -1717,6 +1581,7 @@ def _synthesize_pom_bundle(
         f"from __future__ import annotations\n\n"
         f"import os\n"
         f"import re\n"
+        f"import pytest\n"
         f"from playwright.sync_api import Locator, Page, expect\n"
         f"from pages.base_page import BasePage\n\n\n"
         f"{_FALLBACK_RUNTIME_HELPERS}\n\n\n"
@@ -1731,7 +1596,7 @@ def _synthesize_pom_bundle(
     # Choose the correct pytest fixture based on preconditions: tests that start
     # from an already-authenticated state should use authenticated_page so the
     # session-scoped storage state is reused instead of logging in again.
-    _fixture = "authenticated_page" if _needs_authenticated_page(preconditions) else "page"
+    _fixture = "authenticated_page" if _needs_authenticated_page(preconditions, name=human_name, description=description) else "page"
 
     # ── Test file ──────────────────────────────────────────────────────────
     test_code = (
@@ -1744,7 +1609,7 @@ def _synthesize_pom_bundle(
         f"def test_{test_name}({_fixture}: Page) -> None:\n"
         f'    """{test_name.replace("_", " ")}."""\n'
         f"    _po = {page_class}({_fixture})\n"
-        f"    _po.navigate()\n"
+        
         f"    _po.{test_name}()\n"
     )
 
@@ -1761,25 +1626,9 @@ def _synthesize_pom_bundle(
 
 
 def _expected_result_to_assertion_lines(expected: str) -> List[str]:
-    """Convert a step's expected result into executable Playwright assertion line(s)."""
-    if not expected or expected.startswith("[NEEDS MANUAL REVIEW]"):
-        return []
-    expected_lower = expected.lower()
-    # URL assertion
-    url_frag = re.search(r"[/][\w/-]+", expected)
-    if "url" in expected_lower or "redirect" in expected_lower:
-        if "dashboard" in expected_lower:
-            return ['    expect(page).to_have_url(re.compile(r".*dashboard.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)']
-        elif "login" in expected_lower:
-            return ['    expect(page).to_have_url(re.compile(r".*login.*", re.IGNORECASE), timeout=ASSERTION_TIMEOUT_MS)']
-        elif url_frag:
-            return [f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"), timeout=ASSERTION_TIMEOUT_MS)']
-    # Visible/displayed assertion
-    if any(k in expected_lower for k in ["is displayed", "is visible", "is shown", "appears", "contains the value", "is checked", "is unchecked"]):
-        subject = _extract_assertion_subject(expected)
-        if subject and not _looks_like_placeholder_assertion(subject):
-            return [f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=False), "{_safe_py_str(subject)} assertion")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)']
-    return []
+    """Translate only explicitly supplied expected evidence."""
+    return assertion_lines(expected)
+
 
 
 class TestGeneratorAgent(BaseAgent):
@@ -2508,7 +2357,7 @@ class TestGeneratorAgent(BaseAgent):
         body_lines: List[str] = []
 
         # Always start with navigation (this will be preserved in POM mode)
-        body_lines.append(f'    page.goto("{url}", timeout=300_000)')  # Increased timeout to 300s
+        body_lines.append(f"    page.goto({url!r}, timeout=NAVIGATION_TIMEOUT_MS)")  # Increased timeout to 300s
         body_lines.append('    page.wait_for_load_state("domcontentloaded")')
         body_lines.append('    expect(page.locator("body")).to_be_visible()')
         body_lines.append("")  # Empty line for readability
@@ -2522,46 +2371,31 @@ class TestGeneratorAgent(BaseAgent):
                 
                 body_lines.append(f"    # --- Step {step_num}: {action} ---")
                 
-                # Debug logging to trace field/value extraction
-                logger.info(f"DEBUG: Processing step '{action}'")
                 field, value = _extract_fill_target_and_value(action)
-                logger.info(f"DEBUG: Extracted field='{field}', value='{value}'")
-                
-                # Generate meaningful Playwright code for each step
-                playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
-                playwright_lines = [ln for ln in playwright_lines if not ln.startswith(f"    # Step {step_num}:")]
-                
-                # CRITICAL FIX: If no meaningful lines were generated, create basic functional code
-                if not playwright_lines or all(ln.strip().startswith("#") for ln in playwright_lines):
-                    # Generate basic functional code instead of placeholders
-                    logger.warning(f"No specific action generated for step: {action}, creating basic interaction")
-                    
-                    # Extract field and value for fill operations
-                    if field and value:
-                        # Generate a fill operation
-                        body_lines.append(f'    # Fill {field} with {value}')
-                        body_lines.append(f'    page.fill("{field}", "{value}")')
-                    elif "click" in action.lower():
-                        # Generate a basic click
-                        body_lines.append(f'    # Click element related to: {action}')
-                        body_lines.append(f'    page.click("body")  # TODO: Update with specific selector')
-                    elif "navigate" in action.lower() or "go to" in action.lower():
-                        # Generate navigation
-                        body_lines.append(f'    # Navigate to: {action}')
-                        body_lines.append(f'    page.goto("{url}")')
-                    else:
-                        # Generic placeholder with actionable TODO
-                        body_lines.append(f'    # Action: {action}')
-                        body_lines.append(f'    # TODO: Implement specific Playwright action')
-                        body_lines.append(f'    # Suggested: page.fill(), page.click(), or page.select_option()')
+                is_assertion = bool(re.match(r"(?:verify|assert|ensure|confirm|validate)\b", action, re.I))
+                if is_assertion:
+                    playwright_lines = assertion_lines(expected or action, action=action)
+                else:
+                    playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
+                meaningful = [ln for ln in playwright_lines if ln.strip() and not ln.strip().startswith("#")]
+                needs_review = any("[NEEDS MANUAL REVIEW]" in ln for ln in playwright_lines)
+                if not meaningful or needs_review:
+                    body_lines.append("    # [NEEDS MANUAL REVIEW] Unsupported action or missing evidence")
+                    body_lines.append(f"    pytest.skip({('Untranslated manual step ' + str(step_num) + ': supply explicit action/expected evidence')!r})")
                 else:
                     body_lines.extend(playwright_lines)
-                
-                if expected:
+                if expected and not is_assertion:
+                    locator = None
+                    expr = None
+                    if re.match(r"(?:enter|type|fill|input|provide)\b", action, re.I):
+                        locator = _semantic_locator_expr(field)
+                        expr = _resolve_fill_value_expr(field, value)
+                    translated = assertion_lines(expected, action=action, locator=locator, value=expr)
                     body_lines.append(f"    # Expected: {expected}")
-                    assertion_lines = _expected_result_to_assertion_lines(expected)
-                    if assertion_lines:
-                        body_lines.extend(assertion_lines)
+                    body_lines.extend(translated)
+                    if not translated:
+                        body_lines.append("    # [NEEDS MANUAL REVIEW] Expected result lacks executable evidence")
+                        body_lines.append(f"    pytest.skip({('Untranslated expected result for step ' + str(step_num))!r})")
                 if test_data:
                     body_lines.append(f"    # Test data: {test_data}")
                 body_lines.append("")  # Empty line for readability
@@ -2569,8 +2403,17 @@ class TestGeneratorAgent(BaseAgent):
             # CRITICAL FIX: Even without steps, generate basic functional code
             logger.warning("No manual steps provided, generating basic navigation test")
             body_lines.append("    # No manual steps provided - basic navigation test")
-            body_lines.append("    page.wait_for_timeout(1000)  # Basic wait")
+            body_lines.append("    pytest.skip('No manual steps supplied')")
             body_lines.append("    # TODO: Add specific test steps based on user story")
+
+        overall_expected = manual_test.get("expected_result", "")
+        if overall_expected:
+            overall_lines = assertion_lines(overall_expected)
+            if overall_lines:
+                body_lines.extend(overall_lines)
+            else:
+                body_lines.append("    # [NEEDS MANUAL REVIEW] Overall expected result requires explicit evidence")
+                body_lines.append("    pytest.skip('Overall expected result was not translated')")
 
         body = "\n".join(body_lines)
         test_func_name = self._derive_short_name(manual_test.get("name", "test"))
@@ -2578,6 +2421,7 @@ class TestGeneratorAgent(BaseAgent):
 
         script = (
             f'"""{description.replace(chr(34), chr(39))} — automated by Phoenix."""\n'
+            "import os\n"
             "import re\n"
             "import pytest\n"
             "from playwright.sync_api import Page, expect\n"
@@ -2602,7 +2446,7 @@ class TestGeneratorAgent(BaseAgent):
             raise ValueError("Single automation fallback requires application URL via --url parameter")
         body_lines: List[str] = [
             "    # Navigate to target URL",
-            f'    page.goto("{url}", timeout=300_000)',  # Increased timeout to 300s
+            f"    page.goto({url!r}, timeout=NAVIGATION_TIMEOUT_MS)",  # Increased timeout to 300s
             '    page.wait_for_load_state("domcontentloaded")',
             "",
         ]
@@ -2614,6 +2458,7 @@ class TestGeneratorAgent(BaseAgent):
 
         script_code = (
             "# WARNING: No manual tests — heuristic fallback from acceptance criteria.\n"
+            "import os\n"
             "import re\n"
             "import pytest\n"
             "from playwright.sync_api import Page, expect\n"
@@ -2652,57 +2497,8 @@ class TestGeneratorAgent(BaseAgent):
         return results[0]["script_code"] if results else ""
 
     def _count_implemented_steps(self, script: str, manual_steps: List[Dict[str, Any]]) -> int:
-        """Count how many manual test steps are actually implemented in the generated script.
-        
-        This ensures complete business flow generation by validating that every manual step
-        has corresponding automation code.
-        """
-        if not manual_steps:
-            return 0
-        
-        implemented_count = 0
-        script_lower = script.lower()
-        
-        for step in manual_steps:
-            step_text = (step.get("action") or step.get("step") or "") if isinstance(step, dict) else str(step)
-            step_lower = step_text.lower()
-            
-            # Check if step is implemented by looking for key action keywords
-            action_keywords = [
-                "click", "fill", "type", "select", "check", "uncheck",
-                "goto", "navigate", "wait", "expect", "assert", "verify"
-            ]
-            
-            # Check if any action keyword appears near step-related content
-            step_implemented = False
-            for keyword in action_keywords:
-                if keyword in script_lower:
-                    # Additional check: see if step context is present
-                    # Extract key terms from step (ignore common words)
-                    step_terms = [word for word in step_lower.split() 
-                                 if len(word) > 3 and word not in 
-                                 ["the", "and", "with", "from", "into", "to", "for", "on"]]
-                    
-                    # If any step term appears near the action keyword, consider it implemented
-                    if any(term in script_lower for term in step_terms[:3]):  # Check first 3 meaningful terms
-                        step_implemented = True
-                        break
-            
-            if step_implemented:
-                implemented_count += 1
-            else:
-                # Check for page object method calls that might implement the step
-                if "page." in script_lower or "self." in script_lower:
-                    # Look for method calls that might correspond to the step
-                    for term in step_lower.split():
-                        if len(term) > 4 and term in script_lower:
-                            step_implemented = True
-                            break
-                
-                if step_implemented:
-                    implemented_count += 1
-        
-        return implemented_count
+        """Count executable translation evidence, never comments or helper text."""
+        return step_coverage(script, manual_steps)["implemented_steps"]
 
     @staticmethod
     def _format_manual_steps_for_prompt(manual_test: Dict[str, Any]) -> str:
@@ -2768,6 +2564,14 @@ class TestGeneratorAgent(BaseAgent):
                 ) if part
             )
 
+        domain_knowledge = "\n\n".join((
+            "Generic translation requirements: use only the supplied application URL, "
+            "test data, preconditions, expected results, and page/locator evidence. "
+            "Never invent credential variable names, selectors, routes, messages, or "
+            "authentication indicators. Preserve invalid and empty input values. "
+            "Mark missing evidence or unsupported steps for manual review.",
+            domain_knowledge,
+        ))
         knowledge_context = self.get_knowledge_context(query="playwright automation")
 
         # Phase D — best-effort grounding: never block on MCP failure
@@ -2909,6 +2713,7 @@ class TestGeneratorAgent(BaseAgent):
                     test_name,
                     preconditions=manual_test.get("preconditions", ""),
                     human_name=manual_test.get("name", ""),
+                    description=manual_test.get("description", ""),
                 )
                 results.append(
                     {
@@ -2963,7 +2768,35 @@ class TestGeneratorAgent(BaseAgent):
                 )
                 logger.info("Automated manual test: %s", manual_test.get("name", ""))
 
-        return {"automation_tests": results}
+        for result, source in zip(results, manual_tests):
+            result["script_code"] = resolve_script_environment_values(result.get("script_code", ""))
+
+            steps = source.get("steps", [])
+            coverage = step_coverage(result["script_code"], steps)
+            requires_review = bool(coverage["unresolved_steps"] or not steps or "pytest.skip(" in result["script_code"])
+            result["generation_quality"] = {
+                "manual_steps": len(steps), **coverage,
+                "requires_manual_review": requires_review,
+                "missing_steps": len(coverage["unresolved_steps"]),
+                "completeness_ratio": coverage["implemented_steps"] / len(steps) if steps else 0.0,
+                "status": "partial" if requires_review else "translated",
+            }
+            if requires_review:
+                result.setdefault("warnings", []).append("Manual review required: incomplete automation translation")
+            if coverage["unresolved_steps"]:
+                result.setdefault("recommendations", []).append(
+                    "Untranslated or unverified manual steps: " + ", ".join(map(str, coverage["unresolved_steps"]))
+                )
+            for bundle_key in ("pom_bundle", "bdd_bundle"):
+                bundle = result.get(bundle_key) or {}
+                for section in ("page_objects", "steps"):
+                    for node in bundle.get(section, []):
+                        if node.get("code"):
+                            node["code"] = resolve_script_environment_values(node["code"])
+        return {"automation_tests": results, "metadata": {
+            "translation_status": "partial" if any(r["generation_quality"]["status"] == "partial" for r in results) else "translated",
+            "browser_validated": False,
+        }}
 
     # ------------------------------------------------------------------
     # Phase C — BDD generation

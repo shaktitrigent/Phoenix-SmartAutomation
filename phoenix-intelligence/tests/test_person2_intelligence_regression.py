@@ -55,14 +55,14 @@ def test_semantic_locator_expr_does_not_generate_hash_for_plain_labels():
 
 def test_resolve_fill_value_expr():
     # Environment variable tokens
-    assert _resolve_fill_value_expr("Username", "TEST_USERNAME") == 'os.environ["TEST_USERNAME"]'
-    assert _resolve_fill_value_expr("Password", "$TEST_PASSWORD") == 'os.environ["TEST_PASSWORD"]'
-    assert _resolve_fill_value_expr("Username", "from environment") == 'os.environ["TEST_USERNAME"]'
-    assert _resolve_fill_value_expr("Password", "valid credentials") == 'os.environ["TEST_PASSWORD"]'
+    assert _resolve_fill_value_expr("Username", "TEST_USERNAME") == "os.environ['TEST_USERNAME']"
+    assert _resolve_fill_value_expr("Password", "$TEST_PASSWORD") == "os.environ['TEST_PASSWORD']"
+    assert _resolve_fill_value_expr("Username", "from environment") == repr("from environment")
+    assert _resolve_fill_value_expr("Password", "valid credentials") == repr("valid credentials")
 
     # Plain string literals
-    assert _resolve_fill_value_expr("Email", "user@example.com") == '"user@example.com"'
-    assert _resolve_fill_value_expr("Search", "laptop") == '"laptop"'
+    assert _resolve_fill_value_expr("Email", "user@example.com") == repr("user@example.com")
+    assert _resolve_fill_value_expr("Search", "laptop") == repr("laptop")
 
 
 def test_split_compound_actions():
@@ -83,8 +83,8 @@ def test_criterion_to_playwright_lines_handles_compound_and_env():
     compound = "Enter username TEST_USERNAME and enter password TEST_PASSWORD and click the Login button"
     lines = _criterion_to_playwright_lines(compound, 1, "https://example.com")
     joined = "\n".join(lines)
-    assert 'os.environ["TEST_USERNAME"]' in joined
-    assert 'os.environ["TEST_PASSWORD"]' in joined
+    assert "os.environ['TEST_USERNAME']" in joined
+    assert "os.environ['TEST_PASSWORD']" in joined
     assert "click_ready" in joined
 
 

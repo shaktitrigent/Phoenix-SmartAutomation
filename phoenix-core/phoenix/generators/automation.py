@@ -23,6 +23,7 @@ Anti-pattern scanner (Layer 3):
 from __future__ import annotations
 
 import ast
+from phoenix_shared.automation_translation import select_page_fixture
 import re as re_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -131,20 +132,12 @@ def _swap_fixtures_by_preconditions(
     needs_auth = _needs_authenticated_page(preconditions, name=name, description=description)
     target_fixture = "authenticated_page" if needs_auth else "page"
 
-    return re_module.sub(
-        r"(def test_\w+\s*\()(?:page|intelligent_page|authenticated_page)(\s*:\s*Page)",
-        rf"\1{target_fixture}\2",
-        code,
-    )
+    return select_page_fixture(code, target_fixture)
 
 
 def _swap_to_authenticated_fixture(code: str) -> str:
     """Replace ``page: Page`` with ``authenticated_page: Page`` in test_* signatures."""
-    return re_module.sub(
-        r"(def test_\w+\s*\()(?:page|intelligent_page)(\s*:\s*Page)",
-        r"\1authenticated_page\2",
-        code,
-    )
+    return select_page_fixture(code, "authenticated_page")
 
 
 def _swap_to_intelligent_fixture(

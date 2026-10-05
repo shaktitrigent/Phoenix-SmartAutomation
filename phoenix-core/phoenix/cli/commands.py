@@ -1065,7 +1065,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             application_url=application_url,
             page=smartlocator_page,
             scan=smartlocator_scan,
-            discover=intelligence_discoverer(intel_client),
+            discover=intelligence_discoverer(intel_client, project_context),
             validate=live_locator_validator(application_url),
         )
         print_info(

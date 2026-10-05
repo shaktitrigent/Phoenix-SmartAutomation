@@ -424,56 +424,76 @@ def automate_from_manual(payload: AutomateRequest):
     
     # Extract MCP configuration from payload if provided
     mcp_config = getattr(payload, "mcp_config", None)
-    if mcp_config and mcp_config.get("enabled"):
-        # Temporarily update MCP settings for this request
-        from services.config import MCPSettings
-        original_enabled = _mcp_settings.enabled
-        original_command = _mcp_settings.command
-        original_args = _mcp_settings.args
-        original_timeout = _mcp_settings.timeout
-        
-        _mcp_settings.enabled = mcp_config.get("enabled", True)
-        _mcp_settings.command = mcp_config.get("command", "npx")
-        _mcp_settings.args = mcp_config.get("args", "@playwright/mcp@latest")
-        _mcp_settings.timeout = mcp_config.get("timeout", 60)
-        
-        # Reinitialize MCP client with new settings
-        if _mcp_settings.enabled:
-            from services.mcp.client import MCPClient
-            _mcp_client = MCPClient(
-                settings=_mcp_settings,
-                artifacts_manager=_artifacts_manager,
-                dom_snapshot_manager=_dom_snapshot_manager
-            )
-            logger.info(f"MCP client reconfigured from request: command={_mcp_settings.command} args={_mcp_settings.args}")
-        
-        # Update agent registry with new MCP client
-        _agent_registry._mcp_client = _mcp_client
+    original_mcp_settings = None
+    original_mcp_client = None
     
-    context_kwargs = {}
-    if payload.project_context is not None:
-        context_kwargs["project_context"] = payload.project_context.model_dump()
-        context_kwargs["request_config"] = load_request_config(payload.project_context)
-    result = _agent_registry.automate_from_manual(
-        manual_tests=payload.manual_tests,
-        application_url=payload.application_url,
-        domain_knowledge=payload.domain_knowledge or "",
-        manifest=payload.manifest or "",
-        use_pom=payload.use_pom,
-        use_bdd=payload.use_bdd,
-        keywords=payload.keywords or "",
-        locator_bundles=payload.locator_bundles,
-        **context_kwargs,
-    )
+    try:
+        if mcp_config and mcp_config.get("enabled"):
+            # Temporarily update MCP settings for this request
+            from services.config import MCPSettings
+            original_mcp_settings = {
+                "enabled": _mcp_settings.enabled,
+                "command": _mcp_settings.command,
+                "args": _mcp_settings.args,
+                "timeout": _mcp_settings.timeout,
+            }
+            original_mcp_client = _mcp_client
+            
+            _mcp_settings.enabled = mcp_config.get("enabled", True)
+            _mcp_settings.command = mcp_config.get("command", "npx")
+            _mcp_settings.args = mcp_config.get("args", "@playwright/mcp@latest")
+            _mcp_settings.timeout = mcp_config.get("timeout", 60)
+            
+            # Reinitialize MCP client with new settings
+            if _mcp_settings.enabled:
+                from services.mcp.client import MCPClient
+                try:
+                    _mcp_client = MCPClient(
+                        settings=_mcp_settings,
+                        artifacts_manager=_artifacts_manager,
+                        dom_snapshot_manager=_dom_snapshot_manager
+                    )
+                    logger.info(f"MCP client reconfigured from request: command={_mcp_settings.command} args={_mcp_settings.args}")
+                    
+                    # Update agent registry with new MCP client
+                    _agent_registry._mcp_client = _mcp_client
+                except Exception as exc:
+                    logger.error(f"Failed to reinitialize MCP client: {exc}")
+                    # Fall back to original client
+                    _mcp_client = original_mcp_client
+                    _agent_registry._mcp_client = original_mcp_client
+        
+        context_kwargs = {}
+        if payload.project_context is not None:
+            context_kwargs["project_context"] = payload.project_context.model_dump()
+            context_kwargs["request_config"] = load_request_config(payload.project_context)
+        result = _agent_registry.automate_from_manual(
+            manual_tests=payload.manual_tests,
+            application_url=payload.application_url,
+            domain_knowledge=payload.domain_knowledge or "",
+            manifest=payload.manifest or "",
+            use_pom=payload.use_pom,
+            use_bdd=payload.use_bdd,
+            keywords=payload.keywords or "",
+            locator_bundles=payload.locator_bundles,
+            **context_kwargs,
+        )
+        
+        return _decorate_metadata(result)
     
-    # Restore original MCP settings
-    if mcp_config:
-        _mcp_settings.enabled = original_enabled
-        _mcp_settings.command = original_command
-        _mcp_settings.args = original_args
-        _mcp_settings.timeout = original_timeout
-    
-    return _decorate_metadata(result)
+    finally:
+        # Restore original MCP settings even on error
+        if mcp_config and original_mcp_settings:
+            _mcp_settings.enabled = original_mcp_settings["enabled"]
+            _mcp_settings.command = original_mcp_settings["command"]
+            _mcp_settings.args = original_mcp_settings["args"]
+            _mcp_settings.timeout = original_mcp_settings["timeout"]
+            
+            # Restore original MCP client
+            if original_mcp_client:
+                _mcp_client = original_mcp_client
+                _agent_registry._mcp_client = original_mcp_client
+                logger.info("Original MCP settings restored")
 
 
 @app.post("/api/v1/tests/fix", response_model=ScriptFixResponse)

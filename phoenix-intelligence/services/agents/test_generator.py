@@ -1192,6 +1192,70 @@ def _parse_attr(attrs_str: str, attr_name: str, default: str = "") -> str:
     return m.group(1) if m else default
 
 
+def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, Any]]) -> List[str]:
+    """Detect signs of truncated or incomplete generated automation.
+
+    Returns a list of warning messages describing detected issues.
+    """
+    warnings = []
+    
+    if not script_code or not script_code.strip():
+        warnings.append("Generated script is empty")
+        return warnings
+    
+    # Check for common truncation markers
+    truncation_markers = [
+        "...",
+        "[TRUNCATED]",
+        "[INCOMPLETE]",
+        "[TODO]",
+        "# TODO:",
+        "# FIXME:",
+        "# PLACEHOLDER",
+    ]
+    
+    for marker in truncation_markers:
+        if marker in script_code:
+            warnings.append(f"Script contains truncation marker: {marker}")
+    
+    # Check if script ends abruptly (without proper closing)
+    lines = script_code.strip().splitlines()
+    if lines:
+        last_line = lines[-1].strip()
+        # A complete script should end with a closing brace or be empty
+        if last_line and not last_line.endswith((")", "]", "}", "'", '"')) and not last_line.startswith("#"):
+            # Not a definitive sign, but suspicious
+            if len(lines) < 10:  # Very short scripts might be incomplete
+                warnings.append("Script may be incomplete (very short length)")
+    
+    # Check for missing imports on generated code
+    if "from playwright.sync_api import" not in script_code and "page." in script_code:
+        warnings.append("Script uses Playwright API but missing imports")
+    
+    # Check for undefined helper functions
+    helpers_used = set()
+    for helper in ["fill_ready", "click_ready", "configure_page", "dismiss_known_overlays", "unique_visible"]:
+        if f"{helper}(" in script_code:
+            helpers_used.add(helper)
+    
+    # Check if helpers are defined
+    has_helper_definitions = any(f"def {helper}(" in script_code for helper in helpers_used)
+    if helpers_used and not has_helper_definitions:
+        warnings.append(f"Script uses helper functions but they are not defined: {', '.join(helpers_used)}")
+    
+    # Check step coverage ratio
+    if manual_steps:
+        from phoenix_shared.automation_translation import step_coverage
+        coverage = step_coverage(script_code, manual_steps)
+        ratio = coverage["implemented_steps"] / len(manual_steps) if manual_steps else 0.0
+        if ratio < 0.5:
+            warnings.append(f"Low step coverage: {ratio:.1%} of manual steps implemented")
+        if coverage["unresolved_steps"]:
+            warnings.append(f"Unresolved manual steps: {len(coverage['unresolved_steps'])} of {len(manual_steps)}")
+    
+    return warnings
+
+
 def _parse_bdd_bundle_output(raw: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
     """Parse an ``<automation_bundle>`` XML response (from ``3.0_bdd.md`` prompt).
 
@@ -2773,7 +2837,18 @@ class TestGeneratorAgent(BaseAgent):
 
             steps = source.get("steps", [])
             coverage = step_coverage(result["script_code"], steps)
-            requires_review = bool(coverage["unresolved_steps"] or not steps or "pytest.skip(" in result["script_code"])
+            
+            # Detect truncation/incomplete generation
+            truncation_warnings = _detect_truncated_generation(result["script_code"], steps)
+            if truncation_warnings:
+                result.setdefault("warnings", []).extend(truncation_warnings)
+            
+            requires_review = bool(
+                coverage["unresolved_steps"] 
+                or not steps 
+                or "pytest.skip(" in result["script_code"]
+                or truncation_warnings  # Truncation also requires review
+            )
             result["generation_quality"] = {
                 "manual_steps": len(steps), **coverage,
                 "requires_manual_review": requires_review,

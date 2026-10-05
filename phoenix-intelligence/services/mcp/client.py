@@ -321,7 +321,12 @@ class MCPClient:
                 )
 
             logger.info("MCP: DOM captured successfully")
-            await session.call_tool("browser_close", {})
+            # Ensure browser_close is called even if it fails
+            try:
+                await session.call_tool("browser_close", {})
+            except Exception as e:
+                logger.warning(f"MCP: browser_close failed: {e}")
+            
             return text
 
     @staticmethod

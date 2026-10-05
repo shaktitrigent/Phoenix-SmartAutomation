@@ -206,42 +206,59 @@ _agent_registry = AgentRegistry(
 
 
 def _decorate_metadata(result: dict) -> dict:
-    result.setdefault("metadata", {})
-    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
-    result["metadata"]["version"] = "2.0.0"
-    result["metadata"]["llm_configured"] = _llm_settings.is_configured()
-    result["metadata"]["prompt_hot_reload"] = True
+    metadata = result.setdefault("metadata", {})
+    metadata["generated_at"] = datetime.now(timezone.utc).isoformat()
+    metadata["version"] = "2.0.0"
+    metadata["llm_configured"] = _llm_settings.is_configured()
+    metadata["prompt_hot_reload"] = True
 
-    warnings = list(result["metadata"].get("warnings", []))
-    for test in result.get("automation_tests", []):
+    tests = result.get("automation_tests", [])
+    manual_tests = result.get("manual_tests", [])
+    warnings = list(metadata.get("warnings", []))
+    reasons = []
+
+    for test in tests:
         warnings.extend(test.get("warnings", []))
+
+        for recommendation in test.get("recommendations", []):
+            if not isinstance(recommendation, str):
+                continue
+
+            if recommendation.startswith("Invalid locators rejected:"):
+                details = recommendation.split(":", 1)[1].strip()
+                candidates = [
+                    line.strip().lstrip("- ")
+                    for line in details.splitlines()
+                ]
+            elif (
+                "rejected" in recommendation.lower()
+                or "invalid locator" in recommendation.lower()
+            ):
+                candidates = [recommendation]
+            else:
+                continue
+
+            for reason in candidates:
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+
     if warnings:
         deduped = []
         for warning in warnings:
             if warning not in deduped:
                 deduped.append(warning)
-        result["metadata"]["warnings"] = deduped
+        metadata["warnings"] = deduped
+
     # These counts describe generated outputs, not browser-passing tests.
-    tests = result.get("automation_tests", [])
-    manual_tests = result.get("manual_tests", [])
-    reasons = []
-
-    for test in tests:
-        for recommendation in test.get("recommendations", []):
-            if isinstance(recommendation, str) and recommendation.startswith("Invalid locators rejected:"):
-                details = recommendation.split(":", 1)[1].strip()
-                for line in details.splitlines():
-                    reason = line.strip().lstrip("- ")
-                    if reason and reason not in reasons:
-                        reasons.append(reason)
-
-    metadata = result["metadata"]
-    metadata["accepted_count"] = len(tests) + len(manual_tests)
-    metadata["rejected_count"] = len(reasons)
-    metadata["rejection_reasons"] = reasons
-
+    valid_auto_count = sum(
+        1 for test in tests
+        if test.get("script_code") or test.get("pom_bundle") or test.get("bdd_bundle")
+    )
+    rejected_auto_count = len(tests) - valid_auto_count
+    accepted_count = valid_auto_count if tests else len(manual_tests)
     partial = (
-        bool(reasons)
+        bool(rejected_auto_count)
+        or bool(reasons)
         or metadata.get("translation_status") == "partial"
         or any(
             (test.get("generation_quality") or {}).get("status") == "partial"
@@ -249,11 +266,17 @@ def _decorate_metadata(result: dict) -> dict:
             for test in tests
         )
     )
-    metadata["status"] = (
-        "failed" if not metadata["accepted_count"]
+    status = (
+        "failed" if not accepted_count
         else "partial" if partial
         else "success"
     )
+
+    metadata["status"] = status
+    metadata["accepted_count"] = accepted_count
+    metadata["rejected_count"] = rejected_auto_count + len(reasons)
+    metadata["rejection_reasons"] = reasons
+    result.setdefault("status", status)
     return result
 
 

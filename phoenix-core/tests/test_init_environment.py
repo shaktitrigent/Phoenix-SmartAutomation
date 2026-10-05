@@ -80,7 +80,8 @@ for key, value in expected.items():
     assert os.environ[key] == value, key
 # This module reads APP_URL at import time, so it must see the loaded value too.
 import fixtures.auth
-assert fixtures.auth._BASE_URL == config["BASE_URL"]
+assert not hasattr(fixtures.auth, "_BASE_URL")
+assert "TEST_USERNAME" not in (project / "fixtures/auth.py").read_text()
 """
     loaded = subprocess.run(
         [sys.executable, "-c", script, str(project), json.dumps(expected)],

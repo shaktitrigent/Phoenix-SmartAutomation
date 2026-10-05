@@ -127,7 +127,7 @@ class LocatorRegistry:
     """In-memory registry of LocatorBundles, backed by per-page JSON files."""
 
     def __init__(self) -> None:
-        self._bundles: Dict[str, LocatorBundle] = {}  # keyed by element_name
+        self._bundles: Dict[tuple[str, str], LocatorBundle] = {}  # keyed by (page, element_name)
 
     # ------------------------------------------------------------------
     # Loading
@@ -160,7 +160,7 @@ class LocatorRegistry:
                 try:
                     item = _normalise_raw_bundle(item)
                     bundle = LocatorBundle.from_dict(item)
-                    self._bundles[bundle.element_name] = bundle
+                    self._bundles[(bundle.page, bundle.element_name)] = bundle
                 except Exception as e:
                     logger.warning(f"Failed to load locator bundle from {path}: {e}")
                     logger.debug(f"Failed item data: {item}")
@@ -171,18 +171,31 @@ class LocatorRegistry:
     # Querying
     # ------------------------------------------------------------------
 
-    def get(self, element_name: str) -> Optional[LocatorBundle]:
-        """Return the bundle for *element_name*, or None if not found."""
-        return self._bundles.get(element_name)
+    def get(self, element_name: str, page: Optional[str] = None) -> Optional[LocatorBundle]:
+        """Find a page-scoped bundle, or an unambiguous legacy name.
 
-    def require(self, element_name: str) -> LocatorBundle:
-        """Return the bundle for *element_name*, raising KeyError if absent."""
-        bundle = self._bundles.get(element_name)
+        Without a page, duplicate names return None rather than selecting
+        a locator from an unrelated page.
+        """
+        if page is not None:
+            return self._bundles.get((page, element_name))
+        matches = [b for b in self._bundles.values() if b.element_name == element_name]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning("Ambiguous locator name %r; specify page (candidates: %s)",
+                           element_name, sorted(b.page for b in matches))
+        return None
+
+    def require(self, element_name: str, page: Optional[str] = None) -> LocatorBundle:
+        """Require a bundle; ambiguous legacy names must specify a page."""
+        bundle = self.get(element_name, page=page)
         if bundle is None:
             available = sorted(self._bundles.keys())
             raise KeyError(
-                f"element_id={element_name!r} not found in locators registry. "
-                f"Available element_ids: {available}"
+                f"element_id={element_name!r}, page={page!r} not found or ambiguous "
+                f"in locators registry. Specify page for duplicate names. "
+                f"Available (page, element_id): {available}"
             )
         return bundle
 
@@ -201,12 +214,15 @@ class LocatorRegistry:
     # ------------------------------------------------------------------
 
     def upsert(self, bundle: LocatorBundle) -> None:
-        """Add or replace a bundle by element_name."""
-        self._bundles[bundle.element_name] = bundle
+        """Add or replace a bundle by (page, element_name)."""
+        self._bundles[(bundle.page, bundle.element_name)] = bundle
 
-    def remove(self, element_name: str) -> bool:
-        """Remove a bundle. Returns True if it existed."""
-        return self._bundles.pop(element_name, None) is not None
+    def remove(self, element_name: str, page: Optional[str] = None) -> bool:
+        """Remove one scoped bundle; ambiguous names leave all pages intact."""
+        bundle = self.get(element_name, page=page)
+        if bundle is None:
+            return False
+        return self._bundles.pop((bundle.page, bundle.element_name), None) is not None
 
     # ------------------------------------------------------------------
     # Persistence

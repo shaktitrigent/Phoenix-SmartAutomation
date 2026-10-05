@@ -3,6 +3,7 @@
 import ast
 from phoenix_shared.automation_translation import (
     assertion_lines, bind_page_object_body, fill_value_expression, resolve_script_environment_values, step_coverage,
+    explicit_step_data, fill_operation_evidence,
 )
 import json
 import logging
@@ -409,16 +410,10 @@ def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
     field_lower = field.lower()
     
     if kind == "button":
-        # For buttons, try multiple strategies
-        return (
-            f'page.get_by_test_id("{token}")'
-            f'.or_(page.locator("[data-test=\'{token}\'], [data-testid=\'{token}\'], #{css_token}, input[name=\'{css_token}\']"))'
-            f'.or_(page.get_by_role("button", name=re.compile(r"^{label}$", re.IGNORECASE)))'
-            f'.or_(page.get_by_role("button", name=re.compile(r"{label}", re.IGNORECASE)))'  # Partial match
-            f'.or_(page.locator("input[type=\'submit\'][value=\'{label}\']"))'
-            f'.or_(page.locator("button[type=\'submit\']"))'  # Generic submit button
-        )
-    
+        # The supplied target text does not establish an ID or even a role.
+        # Use its exact accessible text; stored evidence can refine this target.
+        return f"page.get_by_text({field.strip().rstrip('.')!r}, exact=True)"
+
     # Enhanced input field locators with type-specific fallbacks
     if "username" in field_lower or "email" in field_lower or "user" in field_lower:
         return (
@@ -2356,11 +2351,14 @@ class TestGeneratorAgent(BaseAgent):
 
         body_lines: List[str] = []
 
-        # Always start with navigation (this will be preserved in POM mode)
-        body_lines.append(f"    page.goto({url!r}, timeout=NAVIGATION_TIMEOUT_MS)")  # Increased timeout to 300s
-        body_lines.append('    page.wait_for_load_state("domcontentloaded")')
-        body_lines.append('    expect(page.locator("body")).to_be_visible()')
-        body_lines.append("")  # Empty line for readability
+        # Do not navigate twice when the first manual action already navigates.
+        starts_with_navigation = bool(steps and re.match(
+            r"(?:navigate|visit|go)\b", steps[0].get("action", ""), re.I))
+        if not starts_with_navigation:
+            body_lines.append(f"    page.goto({url!r}, timeout=NAVIGATION_TIMEOUT_MS)")  # Increased timeout to 300s
+            body_lines.append('    page.wait_for_load_state("domcontentloaded")')
+            body_lines.append('    expect(page.locator("body")).to_be_visible()')
+            body_lines.append("")  # Empty line for readability
 
         if steps:
             for step in steps:
@@ -2368,7 +2366,8 @@ class TestGeneratorAgent(BaseAgent):
                 step_num = step.get("step_number", 1)
                 expected = step.get("expected_result", "")
                 test_data = step.get("test_data", "")
-                
+                action = explicit_step_data(action, test_data)
+
                 body_lines.append(f"    # --- Step {step_num}: {action} ---")
                 
                 field, value = _extract_fill_target_and_value(action)
@@ -2388,8 +2387,7 @@ class TestGeneratorAgent(BaseAgent):
                     locator = None
                     expr = None
                     if re.match(r"(?:enter|type|fill|input|provide)\b", action, re.I):
-                        locator = _semantic_locator_expr(field)
-                        expr = _resolve_fill_value_expr(field, value)
+                        locator, expr = fill_operation_evidence(playwright_lines)
                     translated = assertion_lines(expected, action=action, locator=locator, value=expr)
                     body_lines.append(f"    # Expected: {expected}")
                     body_lines.extend(translated)

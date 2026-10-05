@@ -19,8 +19,9 @@ from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env.local", override=True)
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
-BASE_URL = os.environ.get("APP_URL", "{{ base_url }}")
+BASE_URL = os.environ.get("APP_URL", "")
 DEFAULT_BROWSER = os.environ.get("PHOENIX_BROWSER", "{{ browser }}")
 ACTION_TIMEOUT_MS = 30_000
 NAVIGATION_TIMEOUT_MS = 60_000
@@ -73,7 +74,10 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def base_url(request) -> str:
-    return request.config.getoption("--base-url", default=None) or BASE_URL
+    value = request.config.getoption("--base-url", default=None) or BASE_URL
+    if not value or not value.strip():
+        raise pytest.UsageError("Supply APP_URL or --base-url explicitly")
+    return value
 
 
 @pytest.fixture(scope="session")

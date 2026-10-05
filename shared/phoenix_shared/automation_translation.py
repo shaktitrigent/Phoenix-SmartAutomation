@@ -155,6 +155,10 @@ def assertion_lines(expected: str, *, action: str = "", locator: str | None = No
     low = text.lower()
     if not text:
         return []
+    if locator and value is not None and re.fullmatch(
+            r"The password field contains the supplied value and masks its display\.?", text, re.I):
+        return [f"    expect({locator}).to_have_value({value}, timeout=ASSERTION_TIMEOUT_MS)",
+                f"    expect({locator}).to_have_attribute('type', 'password', timeout=ASSERTION_TIMEOUT_MS)"]
     # A compound expected result needs separate checks; never verify only half.
     unquoted = re.sub(r"`[^`]*`|\"[^\"]*\"|'[^']*'", "", text)
     if re.search(r"\b(?:and|followed by)\b", unquoted, re.IGNORECASE):
@@ -277,3 +281,48 @@ def step_coverage(script: str, steps: list) -> dict:
         else:
             unresolved.append(index)
     return {"implemented_steps": len(steps) - len(unresolved), "unresolved_steps": unresolved}
+
+
+def explicit_step_data(action: str, test_data) -> str:
+    """Bind a single fill action to its supplied scalar data, without guessing.
+
+    Multi-field prose remains unresolved. A quoted empty string is explicit data.
+    """
+    if not isinstance(test_data, str) or not test_data.strip():
+        return action
+    if not re.match(r"(?:enter|type|fill|input|provide)\b", action, re.I):
+        return action
+    if re.search(r"\b(?:and|then)\b", action, re.I):
+        return action
+    target = re.search(r"\b(?:in|into)\s+(?:the\s+)?(.+?)\s+(?:field|input)\.?$", action, re.I)
+    if not target:
+        return action
+    data = test_data.strip()
+    if data.startswith("`") and data.endswith("`"):
+        data = data[1:-1]
+    elif data.startswith(('"', "'")):
+        try:
+            literal = ast.literal_eval(data)
+        except (SyntaxError, ValueError):
+            return action
+        if not isinstance(literal, str):
+            return action
+        data = literal
+    # A structured/multiple-value cell cannot safely bind to one field.
+    if not environment_reference(data) and re.search(r"[;\n]|\$\{.*\}.*\$\{", data):
+        return action
+    return f"Enter {data!r} in the {target.group(1)} field"
+
+
+def fill_operation_evidence(lines: list[str]) -> tuple[str | None, str | None]:
+    """Use the actual fill target/value for its corresponding assertion."""
+    try:
+        tree = ast.parse("\n".join(line.strip() for line in lines))
+    except SyntaxError:
+        return None, None
+    fills = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "fill_ready"
+             and len(n.args) >= 3]
+    if len(fills) != 1:
+        return None, None
+    return ast.unparse(fills[0].args[1]), ast.unparse(fills[0].args[2])

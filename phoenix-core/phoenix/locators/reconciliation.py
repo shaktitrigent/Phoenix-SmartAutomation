@@ -212,6 +212,7 @@ def match_locator_bundle(
     bundles: Iterable[dict[str, Any]],
     *,
     context: str = "",
+    page: str | None = None,
 ) -> dict[str, Any] | None:
     """Match a generated element label to one unambiguous validated bundle."""
     query_tokens = _semantic_tokens(label) - _ROLE_TOKENS
@@ -219,6 +220,8 @@ def match_locator_bundle(
         return None
     matches = []
     for order, bundle in enumerate(bundles):
+        if page is not None and str(bundle.get("page", "")) != page:
+            continue
         metadata = bundle.get("metadata") or {}
         score = _bundle_match_score(label, bundle, context=context)
         if score is None:
@@ -243,7 +246,7 @@ def match_locator_bundle(
             ):
                 usable.append(candidate)
         if usable:
-            identity = metadata.get("element_identity")
+            identity = (str(bundle.get("page", "")), metadata["element_identity"]) if metadata.get("element_identity") else None
             matches.append((score, order, identity, bundle, usable))
 
     if not matches:
@@ -254,7 +257,17 @@ def match_locator_bundle(
     if len(matches) > 1 and (
         len(identities) != 1 or any(identity is None for _, _, identity, _, _ in matches)
     ):
-        return None
+        # Identical physical evidence and selector may be reusable on several
+        # pages (e.g. a shared navigation link). Record every page instead of
+        # treating that safe reuse as a new LocatorExpert target.
+        physical_ids = {identity[1] for _, _, identity, _, _ in matches if identity}
+        selections = {
+            (str(usable[0].get("strategy", "css")),
+             str(usable[0].get("value") or usable[0].get("selector") or ""))
+            for _, _, _, _, usable in matches
+        }
+        if len(physical_ids) != 1 or any(identity is None for _, _, identity, _, _ in matches) or len(selections) != 1:
+            return None
     _, _, _, bundle, usable = matches[0]
     primary = bundle.get("primary")
     selected = next((item for item in usable if item is primary), None)
@@ -284,6 +297,7 @@ def match_locator_bundle(
     result = dict(bundle)
     result_metadata = dict(metadata)
     result_metadata["locator_source"] = source
+    result_metadata["matched_pages"] = sorted({str(item[3].get("page", "")) for item in matches})
     result["metadata"] = result_metadata
     result_primary = dict(selected)
     result_primary["metadata"] = {
@@ -346,6 +360,8 @@ def _render_for_root(bundle: dict[str, Any], root: ast.expr) -> str:
 def reconcile_generated_code(
     source: str,
     bundles: Iterable[dict[str, Any]],
+    *,
+    page: str | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Replace generated locator expressions with validated bundle selectors.
 
@@ -364,7 +380,7 @@ def reconcile_generated_code(
     edits: list[tuple[int, int, bytes]] = []
     used: list[dict[str, Any]] = []
     unresolved: list[str] = []
-    seen_used: set[tuple[str, str]] = set()
+    seen_used: set[tuple[str, str, str]] = set()
 
     def span(node: ast.AST) -> tuple[int, int]:
         start = byte_offsets[node.lineno - 1] + node.col_offset
@@ -373,7 +389,7 @@ def reconcile_generated_code(
 
     def process_target(target: ast.expr, label: str) -> None:
         context = _preceding_step_context(target, lines)
-        selected = match_locator_bundle(label, bundle_list, context=context)
+        selected = match_locator_bundle(label, bundle_list, context=context, page=page)
         if selected is None:
             unresolved.append(label)
             return
@@ -382,7 +398,7 @@ def reconcile_generated_code(
         start, end = span(target)
         edits.append((start, end, rendered))
         primary = selected["primary"]
-        identity = (str(selected.get("element_name", "")), str(primary.get("value", "")))
+        identity = (str(selected.get("page", "")), str(selected.get("element_name", "")), str(primary.get("value", "")))
         if identity not in seen_used:
             seen_used.add(identity)
             used.append(selected)
@@ -397,12 +413,24 @@ def reconcile_generated_code(
                     for arg in node.args[2:]:
                         self.visit(arg)
                     return
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                "get_by_role", "get_by_label", "get_by_placeholder", "get_by_test_id",
+                "get_by_text", "get_by_alt_text", "get_by_title",
+            }:
+                method = node.func.attr
+                label_node = next((kw.value for kw in node.keywords if kw.arg == "name"), None) if method == "get_by_role" else (node.args[0] if node.args else None)
+                if isinstance(label_node, ast.Constant) and isinstance(label_node.value, str):
+                    label = label_node.value.strip()
+                    if method == "get_by_role" and node.args and isinstance(node.args[0], ast.Constant):
+                        label += " " + str(node.args[0].value)
+                    process_target(node, label)
+                    return
             if isinstance(node.func, ast.Attribute) and node.func.attr == "locator" and node.args:
                 selector = node.args[0]
                 if isinstance(selector, ast.Constant) and isinstance(selector.value, str):
                     raw = selector.value.strip()
                     label = raw.lstrip("#.").replace("-", " ").replace("_", " ")
-                    selected = match_locator_bundle(label, bundle_list)
+                    selected = match_locator_bundle(label, bundle_list, context=_preceding_step_context(node, lines), page=page)
                     if selected is not None:
                         process_target(node, label)
                         return

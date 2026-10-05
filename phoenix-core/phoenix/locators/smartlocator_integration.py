@@ -178,6 +178,17 @@ def validated_locator_bundles(
                 "alternates": alternates,
                 "metadata": metadata,
             }))
+    # Scenario output can repeat a stored page bundle. Keep its page identity,
+    # but do not send identical evidence twice to matching or to the prompt.
+    deduplicated = []
+    seen_evidence = set()
+    for bundle in result:
+        key = (bundle.page, bundle.element_name, bundle.primary.strategy.value,
+               bundle.primary.value, json.dumps(bundle.metadata or {}, sort_keys=True, default=str))
+        if key not in seen_evidence:
+            seen_evidence.add(key)
+            deduplicated.append(bundle)
+    result = deduplicated
     logger.info("Discovered %d validated stored locator bundle(s) for automation", len(result))
     return result
 
@@ -348,11 +359,11 @@ def reconcile_automation_tests_with_bundles(
             test_used.extend(selected)
             unresolved.extend(missing)
 
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         selected_for_test = []
         for bundle in test_used:
             selector = str((bundle.get("primary") or {}).get("value", ""))
-            key = (str(bundle.get("element_name", "")), selector)
+            key = (str(bundle.get("page", "")), str(bundle.get("element_name", "")), selector)
             if key not in seen:
                 seen.add(key)
                 selected_for_test.append(bundle)
@@ -362,19 +373,21 @@ def reconcile_automation_tests_with_bundles(
             existing = existing if isinstance(existing, list) else []
             combined = selected_for_test + existing
             deduplicated = []
-            seen_locators: set[tuple[str, str]] = set()
+            seen_locators: set[tuple[str, str, str]] = set()
             for bundle in combined:
                 if not isinstance(bundle, dict):
                     continue
                 selector = (bundle.get("primary") or {}).get("value")
                 identity = str(bundle.get("element_name") or bundle.get("element_id") or "")
-                key = (identity, str(selector or ""))
+                key = (str(bundle.get("page", "")), identity, str(selector or ""))
                 if key not in seen_locators:
                     seen_locators.add(key)
                     deduplicated.append(bundle)
             test["locators"] = deduplicated
             test["locator_provenance"] = [
                 {
+                    "page": bundle.get("page"),
+                    "matched_pages": (bundle.get("metadata") or {}).get("matched_pages", [bundle.get("page")]),
                     "element_name": bundle.get("element_name"),
                     "selector": (bundle.get("primary") or {}).get("value"),
                     "source": (bundle.get("metadata") or {}).get("locator_source", "unresolved"),

@@ -63,7 +63,8 @@ def test_cli_context_reaches_sdk_and_api_model(
     if override_url:
         args += ["--url", "https://override.example/login"]
     result = CliRunner().invoke(main, args)
-    assert result.exit_code == 0, result.output
+    # The mocked API returns no automation; the CLI must report failure.
+    assert result.exit_code == 1, result.output
     expected_url = "https://override.example/login" if override_url else "https://configured.example/login"
     assert captured["application_url"] == expected_url
     assert captured["project_context"] == {

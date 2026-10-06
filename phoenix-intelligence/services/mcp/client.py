@@ -23,6 +23,9 @@ def _redact_and_bound(text: str, max_chars: int = 2000) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    # Ensure we don't return empty string if original had content
+    if not redacted.strip() and text.strip():
+        redacted = "[error details redacted]"
     if len(redacted) > max_chars:
         return redacted[:max_chars] + f"... [truncated {len(redacted) - max_chars} chars]"
     return redacted
@@ -152,12 +155,12 @@ class MCPClient:
                     if reuse_decision.mcp_skipped:
                         logger.info(f"[PHOENIX MCP] DOM reused from storage - MCP call skipped")
                         logger.info(f"[PHOENIX MCP] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
-                        print(f"[PHOENIX MCP] ✓ DOM REUSED from storage")
-                        print(f"[PHOENIX MCP] ✓ MCP call SKIPPED")
-                        print(f"[PHOENIX MCP] ✓ Time saved: {reuse_decision.time_saved_ms:.2f}ms")
+                        print(f"[PHOENIX MCP] [OK] DOM REUSED from storage")
+                        print(f"[PHOENIX MCP] [OK] MCP call SKIPPED")
+                        print(f"[PHOENIX MCP] [OK] Time saved: {reuse_decision.time_saved_ms:.2f}ms")
                     else:
                         logger.info(f"[PHOENIX MCP] New DOM captured via MCP")
-                        print(f"[PHOENIX MCP] ✓ New DOM captured via MCP")
+                        print(f"[PHOENIX MCP] [OK] New DOM captured via MCP")
                 
                 print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
                 print(f"[PHOENIX MCP] DOM size: {len(dom_content)} chars")
@@ -182,7 +185,7 @@ class MCPClient:
             print(f"[PHOENIX MCP] Snapshot size: {len(result) if result else 0} chars")
 
             if not result or not result.strip():
-                print(f"[PHOENIX MCP] ✗ Empty DOM snapshot received")
+                print(f"[PHOENIX MCP] [FAIL] Empty DOM snapshot received")
                 raise InspectionFailedError(
                     f"MCP inspection of {url!r} returned an empty DOM snapshot. "
                     "The page may require authentication or JavaScript to render content. "
@@ -201,7 +204,7 @@ class MCPClient:
                 )
                 self.artifacts_manager.save_mcp_response(mcp_record)
                 logger.info(f"[PHOENIX MCP] Snapshot saved to artifacts: {len(result)} chars in {duration:.2f}s")
-                print(f"[PHOENIX MCP] ✓ Snapshot saved to artifacts")
+                print(f"[PHOENIX MCP] [OK] Snapshot saved to artifacts")
             
             print(f"[PHOENIX MCP] === MCP INSPECTION COMPLETED ===")
             return result
@@ -209,8 +212,10 @@ class MCPClient:
             raise
         except Exception as exc:
             duration = time.time() - start_time
-            safe_err = _redact_and_bound(str(exc))
-            print(f"[PHOENIX MCP] ✗ MCP call FAILED after {duration:.2f}s: {safe_err}")
+            raw_err = f"{type(exc).__name__}: {str(exc)}" if str(exc) else f"{type(exc).__name__}"
+            safe_err = _redact_and_bound(raw_err)
+            print(f"[PHOENIX MCP] [FAIL] MCP call FAILED after {duration:.2f}s: {safe_err}")
+            logger.error(f"[PHOENIX MCP] Raw exception: {raw_err}", exc_info=True)
             
             # Store failed MCP response artifact
             if self.artifacts_manager:
@@ -326,6 +331,8 @@ class MCPClient:
                 await session.call_tool("browser_close", {})
             except Exception as e:
                 logger.warning(f"MCP: browser_close failed: {e}")
+                # browser_close failure is not critical - we have the snapshot
+                pass
             
             return text
 

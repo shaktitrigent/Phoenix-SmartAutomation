@@ -75,7 +75,6 @@ class AnthropicProvider:
             message = client.messages.create(
                 model=self._settings.model,
                 max_tokens=self._settings.max_tokens,
-                temperature=self._settings.temperature,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 timeout=180.0,  # 3 minute timeout for LLM generation
@@ -89,6 +88,7 @@ class AnthropicProvider:
             )
             return _strip_code_fences(text)
         except Exception as e:
+            logger.exception("Anthropic call traceback")
             logger.error(
                 "Anthropic API call failed: %s (type: %s)",
                 str(e),

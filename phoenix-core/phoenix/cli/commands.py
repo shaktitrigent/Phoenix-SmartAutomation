@@ -1087,6 +1087,15 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
     for test in automation_tests:
         for warning in test.get("warnings", []):
             print_warning(f"{test.get('name', 'automation_test')}: {warning}")
+    
+    # Check metadata status for CLI exit code mapping
+    metadata = result.get("metadata", {})
+    status = metadata.get("status", "")
+    if status == "failed":
+        print_error("Generation failed: no valid automation produced")
+        raise click.Abort()
+    elif status == "partial":
+        print_warning("Generation partial: some tests could not be fully automated")
 
     # BDD mode: apply BDD delta bundles and register keywords
     if _use_bdd:

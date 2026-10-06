@@ -85,6 +85,7 @@ def test_real_registry_boundary_has_no_context_side_effects(
     generator.automate_from_manual_tests.assert_called_once_with(
         manual_tests=[], application_url=context["application_url"],
         domain_knowledge="", manifest="", use_pom=True, use_bdd=False, keywords="",
+        locator_bundles=[],
     )
     assert len(generator.mock_calls) == 1
     registry._llm_client.assert_not_called()

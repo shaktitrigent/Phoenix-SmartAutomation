@@ -156,7 +156,7 @@ class TestRunner:
             self._save_execution_context(execution_id, test_name, project_name or self.project_name)
 
         # Build pytest command
-        cmd = ["pytest", "-v", "--tb=short"]
+        cmd = [sys.executable, "-m", "pytest", "-p", "phoenix.execution.reporting_plugin", "-v", "--tb=short"]
 
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         json_report_path = self.test_output_dir / f"report_{ts}.json"
@@ -444,7 +444,7 @@ class TestRunner:
                         test_name = test.get("name", "unknown")
                     
                     outcome = test.get("outcome", "unknown")
-                    duration = test.get("duration", 0.0)
+                    duration = sum(float(test.get(phase, {}).get("duration", 0.0)) for phase in ("setup", "call", "teardown"))
                     
                     status = "passed" if outcome == "passed" else "failed" if outcome in ("failed", "error") else "skipped"
                     error_type = None
@@ -452,8 +452,8 @@ class TestRunner:
                     
                     if status == "failed":
                         # Extract error information
-                        if "call" in test.get("setup", {}):
-                            error_info = test["setup"]["call"]
+                        if test.get("setup", {}).get("outcome") == "failed":
+                            error_info = test["setup"]
                         elif "call" in test:
                             error_info = test["call"]
                         else:
@@ -467,12 +467,16 @@ class TestRunner:
                         # Classify error type based on error message content
                         if error_message:
                             error_message_lower = error_message.lower()
-                            if any(keyword in error_message_lower for keyword in ["locator", "count", "resolved to 0 elements", "to_have_count", "timeout", "not found"]):
-                                error_type = "locator_not_found"
-                            elif "assertion" in error_message_lower:
+                            if "page.goto" in error_message_lower and "timeout" in error_message_lower:
+                                error_type = "navigation_timeout"
+                            elif "assertionerror" in error_message_lower or "page url expected" in error_message_lower:
                                 error_type = "assertion_failure"
+                            elif any(keyword in error_message_lower for keyword in ["resolved to 0 elements", "to_have_count", "strict mode violation", "locator not found"]):
+                                error_type = "locator_not_found"
                             elif "timeout" in error_message_lower:
                                 error_type = "timeout"
+                            elif "assertion" in error_message_lower:
+                                error_type = "assertion_failure"
                     
                     attempt_record = AttemptRecord(
                         run_id=run_id,
@@ -482,6 +486,7 @@ class TestRunner:
                         status=status,
                         error_type=error_type,
                         error_message=error_message,
+                        screenshot_path=(test.get("metadata") or {}).get("screenshot_path"),
                         duration_seconds=duration,
                     )
                     self.execution_logger.record_attempt(attempt_record)

@@ -171,7 +171,9 @@ class AgentRegistry:
         project_context: Optional[Dict[str, Any]] = None,
         request_config: Optional[RequestConfig] = None,
         locator_bundles: Optional[List[Dict[str, Any]]] = None,
+        mcp_client=...,
     ) -> Dict[str, Any]:
+        selected_mcp = self._mcp_client if mcp_client is ... else mcp_client
         llm_client = self._llm_client
         llm_reason = None
         if request_config is not None:
@@ -185,11 +187,11 @@ class AgentRegistry:
             # never stored on the registry or reused by another request.
             agent = TestGeneratorAgent(
                 self.knowledge_base, self.cache,
-                mcp_client=self._mcp_client, llm_client=llm_client,
+                mcp_client=selected_mcp, llm_client=llm_client,
             )
             LocatorExpertAgent(
                 self.knowledge_base, self.cache,
-                mcp_client=self._mcp_client, llm_client=llm_client,
+                mcp_client=selected_mcp, llm_client=llm_client,
             )
         else:
             # Preserve compatibility with lightweight/embedded registries and

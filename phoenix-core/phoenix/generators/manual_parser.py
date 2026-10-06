@@ -70,7 +70,7 @@ def _parse_table_rows(block: str) -> List[List[str]]:
         line = line.strip()
         if not line.startswith("|"):
             continue
-        cells = [_strip_md_cell(c) for c in line.strip("|").split("|")]
+        cells = [_strip_md_cell(c).replace(r"\|", "|").replace("<br>", "\n") for c in re.split(r"(?<!\\)\|", line.strip("|"))]
         if not cells:
             continue
         # Skip separator rows like |---|---|

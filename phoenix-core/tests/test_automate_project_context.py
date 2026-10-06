@@ -147,7 +147,8 @@ def test_cli_locator_expert_discovery_reuses_project_context(tmp_path, monkeypat
 
     result = CliRunner().invoke(main, ["automate", "--url", "https://configured.example/login"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
+    assert "Aborted!" in result.output
     discovery = next(
         payload for url, payload in captured_requests
         if url.endswith("/api/v1/locators/discover")

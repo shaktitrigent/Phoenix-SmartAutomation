@@ -4,6 +4,7 @@ This module provides post-processing to detect and fix obvious field mapping err
 where the LLM generates locators for the wrong field types.
 """
 
+import ast
 import logging
 import re
 from typing import Dict, List, Optional, Tuple
@@ -107,26 +108,9 @@ class LocatorCorrector:
             if corrected:
                 return corrected
         
-        # Fallback to priority locators
-        priorities = self.FIELD_LOCATOR_PRIORITIES.get(intended_field, [])
-        for priority in priorities:
-            # Convert priority to actual locator syntax
-            if 'name=' in priority:
-                attr_value = priority.split('=')[1].strip('"\'')
-                return f'page.locator("input[name=\'{attr_value}\']")'
-            elif 'placeholder=' in priority:
-                attr_value = priority.split('=')[1].strip('"\'')
-                return f'page.get_by_placeholder("{attr_value}")'
-            elif 'type=' in priority:
-                attr_value = priority.split('=')[1].strip('"\'')
-                return f'page.locator("input[type=\'{attr_value}\']")'
-            elif 'data-testid=' in priority:
-                attr_value = priority.split('=')[1].strip('"\'')
-                return f'page.locator("[data-testid=\'{attr_value}\']")'
-        
-        # Ultimate fallback - keep original but add warning
+        # No attribute evidence: preserve the candidate, do not invent a correction.
         return original_locator
-    
+
     def _find_locator_in_dom(self, field_type: str) -> Optional[str]:
         """Find a suitable locator for the field type in the DOM snapshot."""
         if not self.dom_snapshot:
@@ -237,39 +221,32 @@ class LocatorCorrector:
         target the wrong field type (e.g., filling username value into password field).
         """
         corrections = []
-        corrected_script = script
-        
-        # Pattern to find fill operations with comments
-        fill_pattern = r'fill_ready\(page,\s*([^,]+),\s*"([^"]+)",\s*"([^"]+)"\)'
-        
-        for match in re.finditer(fill_pattern, script):
-            locator = match.group(1)
-            value = match.group(2)
-            description = match.group(3)
-            
-            # Check if this is a field mapping error
-            error = self.detect_field_mapping_error(description, locator)
-            if error:
-                intended_field, actual_field, correction = error
-                
-                logger.info(
-                    f"Correcting fill operation: {description} "
-                    f"(locator: {locator} -> {correction})"
-                )
-                
-                # Replace the locator in the fill operation
-                old_fill = match.group(0)
-                new_fill = old_fill.replace(locator, correction)
-                corrected_script = corrected_script.replace(old_fill, new_fill)
-                
-                corrections.append({
-                    'description': description,
-                    'value': value,
-                    'original_locator': locator,
-                    'corrected_locator': correction,
-                    'intended_field': intended_field,
-                    'actual_field': actual_field,
-                })
-        
-        self.corrections_made = corrections
-        return corrected_script, corrections
+        try:
+            tree = ast.parse(script)
+        except SyntaxError:
+            return script, corrections
+        raw = script.encode("utf-8")
+        offsets = []
+        total = 0
+        for line in script.splitlines(keepends=True):
+            offsets.append(total)
+            total += len(line.encode("utf-8"))
+        edits = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "fill_ready" or len(node.args) < 4:
+                continue
+            target, description = node.args[1], node.args[3]
+            if not isinstance(description, ast.Constant) or not isinstance(description.value, str): continue
+            original = ast.get_source_segment(script, target)
+            error = self.detect_field_mapping_error(description.value, original)
+            if not error: continue
+            intended, actual, correction = error
+            if correction == original: continue
+            start = offsets[target.lineno - 1] + target.col_offset
+            end = offsets[target.end_lineno - 1] + target.end_col_offset
+            edits.append((start,end,correction.encode("utf-8")))
+            corrections.append({"description": description.value, "original_locator": original,
+                                "corrected_locator": correction, "intended_field": intended})
+        for start,end,replacement in sorted(edits, reverse=True):
+            raw = raw[:start] + replacement + raw[end:]
+        return raw.decode("utf-8"), corrections

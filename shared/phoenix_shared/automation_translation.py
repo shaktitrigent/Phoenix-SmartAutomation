@@ -167,40 +167,15 @@ def assertion_lines(expected: str, *, action: str = "", locator: str | None = No
     quoted = re.findall(r"`([^`]*)`|\"([^\"]*)\"|'([^']*)'", text)
     values = [next((v for v in group if v), "") for group in quoted]
     
-    # Cart arithmetic: price × quantity, subtotal, total calculations
-    cart_keywords = {"cart", "total", "subtotal", "price", "quantity", "amount", "sum", "calculate", "×", "*"}
-    if any(kw in low for kw in cart_keywords):
-        # Detect numerical comparison requirements
-        if any(word in low for word in ("equals", "is", "should be", "matches", "match", "calculated")):
-            # Require explicit locator for cart arithmetic - no hardcoded defaults
-            if not locator:
-                return []  # Cannot generate safe assertion without validated locator
-            
-            # Generate numerical comparison assertion
-            # Extract numeric values from the expected result
-            numbers = re.findall(r'[\d,]+\.?\d*', text)
-            lines = [
-                "    # Cart arithmetic: read displayed value and perform calculation",
-                f"    displayed_text = {locator}.inner_text()",
-                "    displayed_value = float(displayed_text.replace('$', '').replace(',', '').strip())",
-            ]
-            # Add calculation if arithmetic is mentioned
-            if "multiply" in low or "×" in text or "*" in text:
-                lines.append("    calculated_value = quantity * price")
-            elif "sum" in low or "add" in low:
-                lines.append("    calculated_value = sum(item_prices)")
-            elif numbers:
-                lines.append(f"    calculated_value = float({numbers[0]})")
-            else:
-                lines.append("    calculated_value = expected_total  # Replace with actual expected value")
-            
-            comparison = "!=" if negative else "=="
-            if numbers:
-                lines.append(f"    assert displayed_value {comparison} calculated_value, f\"Cart arithmetic failed: expected {numbers[0]}, got {{displayed_value}}\"")
-            else:
-                lines.append(f"    assert displayed_value {comparison} calculated_value, \"Cart arithmetic failed\"")
-            return lines
-    
+    # Arithmetic needs explicitly bound operands. Do not invent price/quantity variables.
+    if locator and re.search(r"\b(?:total|subtotal|quantity|amount)\b", low):
+        match = re.search(r"\b(?:equals|is exactly|should be)\s+(-?\d+(?:\.\d+)?)\b", text, re.I)
+        if match:
+            method = "not_to_have_text" if negative else "to_have_text"
+            return [f"    expect({locator}).{method}({match.group(1)!r}, timeout=ASSERTION_TIMEOUT_MS)"]
+        if re.search(r"multiply|calculate|sum|×|\*", low):
+            return []
+
     # Address comparison: validate address details match expected values
     address_keywords = {"address", "street", "city", "state", "zip", "postal", "country", "billing", "shipping"}
     if any(kw in low for kw in address_keywords):

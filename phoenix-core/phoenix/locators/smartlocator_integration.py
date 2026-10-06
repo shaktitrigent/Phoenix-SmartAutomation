@@ -352,7 +352,9 @@ def reconcile_automation_tests_with_bundles(
             )
         for target, key in code_targets:
             try:
-                final_code, selected, missing = reconcile_generated_code(target[key], evidence)
+                final_code, selected, missing = reconcile_generated_code(
+                    target[key], evidence, page=target.get("page_name") or test.get("page_name")
+                )
             except (SyntaxError, ValueError, TypeError) as exc:
                 raise ValueError("generated source could not be reconciled safely") from exc
             target[key] = final_code

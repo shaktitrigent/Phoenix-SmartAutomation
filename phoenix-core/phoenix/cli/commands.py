@@ -1083,6 +1083,10 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         )
         raise click.Abort() from _exc
 
+    if resolution["unresolved"]:
+        print_error("Generation unresolved: validated locator evidence is missing for required operations")
+        raise click.Abort()
+
     _print_intelligence_metadata_warnings(result.get("metadata"))
     for test in automation_tests:
         for warning in test.get("warnings", []):
@@ -1095,7 +1099,8 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         print_error("Generation failed: no valid automation produced")
         raise click.Abort()
     elif status == "partial":
-        print_warning("Generation partial: some tests could not be fully automated")
+        print_error("Generation partial: review incomplete tests before writing automation")
+        raise click.Abort()
 
     # BDD mode: apply BDD delta bundles and register keywords
     if _use_bdd:
@@ -3030,3 +3035,22 @@ def jira_show(ctx, issue_key: str):
 
     click.echo("")
     click.echo(f"To generate tests: phoenix generate --jira {issue_key} --url https://your-app.com")
+
+
+@locators.command("scan-states")
+@click.option("--url", "application_url", required=True)
+@click.option("--states-file", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--storage-state", default=None, type=click.Path(exists=True, dir_okay=False))
+@click.option("--output", default="smartlocator_raw/states", type=click.Path())
+@click.option("--locators-dir", default="locators", type=click.Path())
+def scan_locator_states(application_url, states_file, storage_state, output, locators_dir):
+    """Capture an explicit journey in one session; never guess routes or credentials."""
+    from dotenv import dotenv_values
+    from phoenix.locators.journey import capture_journey
+    values = {**dotenv_values(".env"), **os.environ, **dotenv_values(".env.local")}
+    try:
+        result = capture_journey(application_url, states_file, output, locators_dir,
+                                 values=values, storage_state=storage_state)
+    except Exception as exc:
+        raise click.ClickException(f"Journey capture failed ({type(exc).__name__}); check supplied states and runtime diagnostics") from exc
+    print_success(f"Captured and persisted {len(result['states'])} explicit page/state(s)")

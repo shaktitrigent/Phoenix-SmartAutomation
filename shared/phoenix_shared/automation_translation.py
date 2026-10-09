@@ -2,6 +2,7 @@
 
 import ast
 import re
+from phoenix_shared.manual_semantics import negative_expectation
 
 
 def environment_reference(value: str) -> str | None:
@@ -155,6 +156,8 @@ def assertion_lines(expected: str, *, action: str = "", locator: str | None = No
     low = text.lower()
     if not text:
         return []
+    if locator and re.search(r'\b(?:contains|remains?|is)\b.*\bempty (?:value|string)|\bremains? empty\b', text, re.I):
+        return [f"    expect({locator}).to_have_value('', timeout=ASSERTION_TIMEOUT_MS)"]
     if locator and value is not None and re.fullmatch(
             r"The password field contains the supplied value and masks its display\.?", text, re.I):
         return [f"    expect({locator}).to_have_value({value}, timeout=ASSERTION_TIMEOUT_MS)",
@@ -163,7 +166,7 @@ def assertion_lines(expected: str, *, action: str = "", locator: str | None = No
     unquoted = re.sub(r"`[^`]*`|\"[^\"]*\"|'[^']*'", "", text)
     if re.search(r"\b(?:and|followed by)\b", unquoted, re.IGNORECASE):
         return []
-    negative = bool(re.search(r"\b(?:not|no longer|never)\b", low))
+    negative = negative_expectation(text)
     quoted = re.findall(r"`([^`]*)`|\"([^\"]*)\"|'([^']*)'", text)
     values = [next((v for v in group if v), "") for group in quoted]
     
@@ -203,6 +206,12 @@ def assertion_lines(expected: str, *, action: str = "", locator: str | None = No
                 return lines
     
     if "url" in low:
+        key=environment_reference(values[0]) if values else None
+        if key:
+            argument=f"os.environ[{key!r}]"
+            if re.search(r"\bcontains\b",low):argument=f"re.compile(re.escape({argument}))"
+            method="not_to_have_url" if negative else "to_have_url"
+            return [f"    expect(page).{method}({argument}, timeout=ASSERTION_TIMEOUT_MS)"]
         match = re.search(r"https?://[^\s`\"']+|(?<!\w)/[\w/?=&.%#~-]+", text)
         if not match:
             return []
@@ -263,8 +272,11 @@ def step_coverage(script: str, steps: list) -> dict:
     except SyntaxError:
         return {"implemented_steps": 0, "unresolved_steps": list(range(1, len(steps) + 1))}
     operations = []
+    first_blocking_line = None
+    unreachable_operations = 0
     tests = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")]
     for fn in tests:
+        blocked = False
         for statement in fn.body:
             # Do not count a nested helper's implementation or a docstring.
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -272,17 +284,23 @@ def step_coverage(script: str, steps: list) -> dict:
             if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                    and isinstance(n.func.value, ast.Name) and n.func.value.id == "pytest"
                    and n.func.attr in {"skip", "fail"} for n in ast.walk(statement)):
-                break
+                blocked = True
+                if first_blocking_line is None:
+                    first_blocking_line = statement.lineno
+                continue
             for node in ast.walk(statement):
                 if not isinstance(node, ast.Call):
                     continue
                 name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-                kind = {"fill_ready": "fill", "click_ready": "click"}.get(name, name)
+                kind = {"fill_ready": "fill", "click_ready": "click", "assert_contract": "expect"}.get(name, name)
                 if name.startswith(("to_", "not_to_")):
                     kind = "expect"
                 if kind not in _ACTIONS:
                     continue
-                if kind == "expect" and (name == "expect" or "locator('body')" in ast.unparse(node) or 'locator("body")' in ast.unparse(node)):
+                if kind == "expect" and name != "assert_contract" and (name == "expect" or "locator('body')" in ast.unparse(node) or 'locator("body")' in ast.unparse(node)):
+                    continue
+                if blocked:
+                    unreachable_operations += 1
                     continue
                 tokens = set(re.findall(r"[a-z0-9]+", ast.unparse(node).lower())) - _FILLER
                 operations.append((kind, tokens))
@@ -316,7 +334,8 @@ def step_coverage(script: str, steps: list) -> dict:
             consumed.update(pending)
         else:
             unresolved.append(index)
-    return {"implemented_steps": len(steps) - len(unresolved), "unresolved_steps": unresolved}
+    return {"implemented_steps": len(steps) - len(unresolved), "unresolved_steps": unresolved,
+            "first_blocking_line": first_blocking_line, "unreachable_operations": unreachable_operations}
 
 
 def explicit_step_data(action: str, test_data) -> str:

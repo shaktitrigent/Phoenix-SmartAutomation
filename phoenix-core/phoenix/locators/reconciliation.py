@@ -165,10 +165,21 @@ def _bundle_role(bundle: dict[str, Any]) -> str | None:
     return None
 
 
-def _role_compatible(label: str, bundle: dict[str, Any]) -> bool:
+def _role_compatible(label: str, bundle: dict[str, Any], context: str = "") -> bool:
     words = set(normalize_element_name(label).split())
     requested = {role for role, aliases in _ROLE_WORDS.items() if words & aliases}
     actual = _bundle_role(bundle)
+    first_action=context.splitlines()[0] if context else ''
+    applies=bool((_semantic_tokens(label)-_ROLE_TOKENS) <= _semantic_tokens(first_action))
+    if applies and re.match(r'\s*(?:enter|fill|type|clear|leave)\b',first_action,re.I):
+        data=(bundle.get('metadata') or {}).get('element_data') or {}
+        if not data.get('tag') and not data.get('role'):return not requested or actual is None or actual in requested
+        return (data.get('tag')=='textarea' or (data.get('tag')=='input' and str(data.get('type') or 'text').lower() not in {'button','submit','reset','image','checkbox','radio','file','hidden'}))
+    if applies and re.match(r'\s*(?:click|press|tap)\b',first_action,re.I):
+        data=(bundle.get('metadata') or {}).get('element_data') or {}
+        if not data.get('tag') and not data.get('role'):return not requested or actual is None or actual in requested
+        if not (actual in {'button','link'} or data.get('role')=='menuitem' or (data.get('interaction_evidence') or {}).get('event')=='click'):
+            return False
     return not requested or actual is None or actual in requested
 
 
@@ -188,7 +199,7 @@ def _bundle_match_score(
     context: str = "",
 ) -> tuple[int, int, int] | None:
     query = _semantic_tokens(label) - _ROLE_TOKENS
-    if not query or not _role_compatible(label, bundle):
+    if not query or not _role_compatible(label, bundle,context):
         return None
     context_tokens = (_semantic_tokens(context) - _ROLE_TOKENS) - query
     matching = [
@@ -215,6 +226,8 @@ def match_locator_bundle(
     page: str | None = None,
 ) -> dict[str, Any] | None:
     """Match a generated element label to one unambiguous validated bundle."""
+    from phoenix_shared.state_evidence import group_state_evidence
+    bundles = group_state_evidence(bundles)
     query_tokens = _semantic_tokens(label) - _ROLE_TOKENS
     if not query_tokens:
         return None
@@ -237,7 +250,7 @@ def match_locator_bundle(
 
             if (
                 isinstance(value, str) and value.strip()
-                and candidate.get("verified_in_snapshot") is True
+                and __import__("phoenix_shared.locator_policy", fromlist=["locator_accepted"]).locator_accepted(candidate, metadata)
                 and not candidate.get("broken") and not candidate.get("unresolved")
                 and not metadata.get("broken") and not metadata.get("unresolved")
                 and not candidate_metadata.get("broken") and not candidate_metadata.get("unresolved")
@@ -278,7 +291,7 @@ def match_locator_bundle(
         or metadata.get("locator_source")
         or ("stored_primary" if primary is selected else "stored_alternate")
     )
-    strategy = str(selected.get("strategy", "css")).casefold()
+    strategy = str(getattr(selected.get("strategy", "css"), "value", selected.get("strategy", "css"))).casefold()
     value = str(selected.get("value") or selected.get("selector") or "").strip()
     try:
         from phoenix_shared.models.locator import Locator, LocatorStrategy
@@ -327,7 +340,7 @@ def _root_expression(node: ast.expr) -> ast.expr:
         if current.attr == "_page":
             return current
         current = current.value
-    if isinstance(current, ast.Name) and current.id == "page":
+    if isinstance(current, ast.Name) and current.id in {"page", "authenticated_page", "intelligent_page"}:
         return current
     return ast.Name(id="page", ctx=ast.Load())
 
@@ -346,7 +359,7 @@ def _render_for_root(bundle: dict[str, Any], root: ast.expr) -> str:
     from phoenix_shared.models.locator import Locator, LocatorStrategy
 
     primary = bundle["primary"]
-    strategy = LocatorStrategy(str(primary.get("strategy", "css")).casefold())
+    strategy = LocatorStrategy(str(getattr(primary.get("strategy", "css"), "value", primary.get("strategy", "css"))).casefold())
     locator = Locator(
         element_name=str(bundle.get("element_name", "element")),
         strategy=strategy,
@@ -362,6 +375,7 @@ def reconcile_generated_code(
     bundles: Iterable[dict[str, Any]],
     *,
     page: str | None = None,
+    assertion_contracts: Iterable[dict[str, Any]] = (),
 ) -> tuple[str, list[dict[str, Any]], list[str]]:
     """Replace generated locator expressions with validated bundle selectors.
 
@@ -369,6 +383,20 @@ def reconcile_generated_code(
     interaction values and comments, is preserved byte-for-byte.
     """
     tree = ast.parse(source)
+    contracts = list(assertion_contracts)
+    imported_contract = any(isinstance(node, ast.ImportFrom) and node.module == "phoenix_shared.assertion_runtime"
+        and any(alias.name == "assert_contract" and alias.asname in {None, "assert_contract"} for alias in node.names)
+        for node in tree.body)
+    for statement in tree.body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for alias in statement.names:
+                if (alias.asname or alias.name.split(".")[0]) == "assert_contract" and not (
+                    isinstance(statement, ast.ImportFrom) and statement.module == "phoenix_shared.assertion_runtime"
+                    and alias.name == "assert_contract"):
+                    imported_contract = False
+    if any((isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "assert_contract") or
+           (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == "assert_contract") for node in ast.walk(tree)):
+        imported_contract = False
     bundle_list = list(bundles)
     lines = source.splitlines(keepends=True)
     byte_offsets = []
@@ -381,6 +409,8 @@ def reconcile_generated_code(
     used: list[dict[str, Any]] = []
     unresolved: list[str] = []
     seen_used: set[tuple[str, str, str]] = set()
+    expression_bindings = {}
+    requested_expressions = {}
 
     def span(node: ast.AST) -> tuple[int, int]:
         start = byte_offsets[node.lineno - 1] + node.col_offset
@@ -391,8 +421,10 @@ def reconcile_generated_code(
         context = _preceding_step_context(target, lines)
         selected = match_locator_bundle(label, bundle_list, context=context, page=page)
         if selected is None:
+            requested_expressions[ast.unparse(target)] = label
             unresolved.append(label)
             return
+        expression_bindings[ast.unparse(target)] = selected
         root = _root_expression(target)
         rendered = _render_for_root(selected, root).encode("utf-8")
         start, end = span(target)
@@ -403,37 +435,211 @@ def reconcile_generated_code(
             seen_used.add(identity)
             used.append(selected)
 
+    semantic_methods = {"get_by_role", "get_by_label", "get_by_placeholder", "get_by_test_id",
+                        "get_by_text", "get_by_alt_text", "get_by_title"}
+    selector_methods = semantic_methods | {"locator", "filter", "or_", "and_", "nth", "frame_locator"}
+    page_actions = {"click", "dblclick", "fill", "type", "press", "check", "uncheck", "select_option",
+                    "hover", "focus", "set_input_files", "wait_for_selector"}
+    bindings = {}
+    guards = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "unique_visible"]
+    identity_guard = False
+    if len(guards) == 1 and guards[0].args.args:
+        parameter = guards[0].args.args[0].arg
+        returns = [n for n in ast.walk(guards[0]) if isinstance(n, ast.Return)]
+        identity_guard = bool(returns) and all(isinstance(n.value, ast.Name) and n.value.id == parameter for n in returns)
+        identity_guard = identity_guard and not any(isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            and n.id == parameter for n in ast.walk(guards[0]))
+
+    def exact_bundle(target):
+        from phoenix_shared.locator_policy import locator_accepted
+        from phoenix_shared.models.locator import Locator
+        expression = ast.unparse(target)
+        root = _root_expression(target)
+        for bundle in bundle_list:
+            if page is not None and str(bundle.get("page", "")) != page:
+                continue
+            for candidate in [bundle.get("primary"), *(bundle.get("alternates") or [])]:
+                if not isinstance(candidate, dict) or not locator_accepted(candidate, bundle.get("metadata")):
+                    continue
+                try:
+                    rendered = ast.parse(Locator.model_validate({**candidate, 'element_name':candidate.get('element_name') or bundle.get('element_name')}).to_playwright(), mode="eval").body
+                    rendered = _PageRoot(root).visit(rendered)
+                    if ast.unparse(rendered) == expression:
+                        from phoenix.locators.smartlocator_fallback import has_positional_selector
+                        if has_positional_selector(candidate.get("value", "")):
+                            continue
+                        return {**bundle, "primary": candidate}
+                except (ValueError, SyntaxError, TypeError):
+                    continue
+        return None
+
+    def process_expression(target, hint=""):
+        if isinstance(target, ast.Name):
+            if target.id not in bindings:
+                unresolved.append("unsupported locator binding: " + target.id)
+            return
+        previous = expression_bindings.get(ast.unparse(target))
+        if previous is not None:
+            root = _root_expression(target)
+            start, end = span(target)
+            edits.append((start, end, _render_for_root(previous, root).encode("utf-8")))
+            used.append(previous)
+            return
+        exact = exact_bundle(target)
+        if exact is not None:
+            used.append(exact)
+            return
+        label = requested_expressions.get(ast.unparse(target)) or hint
+        if not label and isinstance(target, ast.Call) and isinstance(target.func, ast.Attribute):
+            method = target.func.attr
+            arg = next((k.value for k in target.keywords if k.arg == "name"), None) if method == "get_by_role" else (target.args[0] if target.args else None)
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                label = arg.value
+                if method == "get_by_role" and target.args and isinstance(target.args[0], ast.Constant):
+                    label += " " + str(target.args[0].value)
+                elif method == "locator":
+                    label = label.lstrip("#.").replace("-", " ").replace("_", " ")
+        if not label:
+            label = _preceding_step_context(target, lines)
+        if label:
+            process_target(target, label)
+        else:
+            unresolved.append("unsupported locator expression: " + ast.unparse(target))
+
     class Visitor(ast.NodeVisitor):
-        def visit_Call(self, node: ast.Call) -> None:
+        def visit_FunctionDef(self, node):
+            saved = dict(bindings)
+            saved_expressions = dict(expression_bindings)
+            saved_requests = dict(requested_expressions)
+            bindings.clear()
+            expression_bindings.clear()
+            requested_expressions.clear()
+            if node.name.endswith("_ready") or node.name == "unique_visible":
+                # These helper parameters receive the already checked call-site locator.
+                bindings.update({a.arg:None for a in node.args.args if a.arg in {"locator","target"}})
+            for statement in node.body:
+                self.visit(statement)
+            bindings.clear()
+            bindings.update(saved)
+            expression_bindings.clear()
+            expression_bindings.update(saved_expressions)
+            requested_expressions.clear()
+            requested_expressions.update(saved_requests)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Attribute(self, node):
+            if node.attr in {"first", "last"}:
+                unresolved.append("positional selector: " + ast.unparse(node))
+                return
+            self.generic_visit(node)
+
+        def visit_Assign(self, node):
+            if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id == "unique_visible" and node.value.args and identity_guard):
+                # The generated guard returns its checked locator unchanged. Its
+                # argument must already be a checked parameter/binding or evidence.
+                argument = node.value.args[0]
+                previous_failures = len(unresolved)
+                process_expression(argument)
+                if len(unresolved) == previous_failures:
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            bindings[target.id] = argument
+                return
+            if isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) and node.value.func.attr in selector_methods:
+                process_expression(node.value)
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        bindings[target.id] = node.value
+                return
+            if isinstance(node.value, ast.Name) and node.value.id in bindings:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        bindings[target.id]=bindings[node.value.id]
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id == "assert_contract":
+                try:
+                    spec = ast.literal_eval(node.args[1]) if len(node.args) == 2 else None
+                except (ValueError, TypeError):
+                    spec = None
+                keyword_valid = not node.keywords
+                if isinstance(spec, dict) and spec.get("kind") == "url_unchanged":
+                    binding = spec.get("reference_binding")
+                    references = [k for k in node.keywords if k.arg == "reference_url"]
+                    assignments = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == binding for t in n.targets)]
+                    stores = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+                        and isinstance(n.ctx, ast.Store) and n.id == binding]
+                    keyword_valid = bool(len(node.keywords) == len(references) == len(assignments) == len(stores) == 1
+                        and isinstance(references[0].value, ast.Name) and references[0].value.id == binding
+                        and ast.unparse(assignments[0].value) in {"page.url", "authenticated_page.url", "intelligent_page.url", "self.page.url", "self._page.url"}
+                        and assignments[0].lineno < node.lineno
+                        and any(isinstance(n, ast.Call) and assignments[0].lineno < n.lineno < node.lineno
+                            and ((isinstance(n.func, ast.Name) and n.func.id in {"click_ready", "fill_ready"})
+                                 or (isinstance(n.func, ast.Attribute) and n.func.attr in {"click", "fill", "check", "uncheck", "select_option"}))
+                            for n in ast.walk(tree)))
+                if (not imported_contract or spec is None or spec not in contracts or not keyword_valid
+                        or ast.unparse(node.args[0]) not in {"page", "authenticated_page", "intelligent_page", "self.page", "self._page"}):
+                    unresolved.append("unapproved assertion contract")
+                return
+            if (isinstance(node.func, ast.Attribute) and node.func.attr == "to_be_visible"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "expect"
+                    and len(node.func.value.args) == 1):
+                subject = node.func.value.args[0]
+                if (isinstance(subject, ast.Call) and isinstance(subject.func, ast.Attribute)
+                        and subject.func.attr == "locator" and len(subject.args) == 1
+                        and not subject.keywords and isinstance(subject.args[0], ast.Constant)
+                        and subject.args[0].value == "body"
+                        and ast.unparse(subject.func.value) in {
+                            "page", "authenticated_page", "intelligent_page", "self.page", "self._page"}):
+                    # Document readiness is infrastructure, not business-element
+                    # identity. This does not authorize actions on body or absence.
+                    for keyword in [*node.keywords, *node.func.value.keywords]:
+                        self.visit(keyword.value)
+                    return
             function_name = node.func.id if isinstance(node.func, ast.Name) else ""
             if function_name.endswith("_ready") and len(node.args) >= 2:
-                string_labels = [arg.value for arg in node.args[2:] if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
-                if string_labels:
-                    process_target(node.args[1], string_labels[-1])
-                    for arg in node.args[2:]:
-                        self.visit(arg)
-                    return
-            if isinstance(node.func, ast.Attribute) and node.func.attr in {
-                "get_by_role", "get_by_label", "get_by_placeholder", "get_by_test_id",
-                "get_by_text", "get_by_alt_text", "get_by_title",
-            }:
+                labels = [a.value for a in node.args[2:] if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+                process_expression(node.args[1], labels[-1] if labels else "")
+                return
+            if isinstance(node.func, ast.Attribute):
                 method = node.func.attr
-                label_node = next((kw.value for kw in node.keywords if kw.arg == "name"), None) if method == "get_by_role" else (node.args[0] if node.args else None)
-                if isinstance(label_node, ast.Constant) and isinstance(label_node.value, str):
-                    label = label_node.value.strip()
-                    if method == "get_by_role" and node.args and isinstance(node.args[0], ast.Constant):
-                        label += " " + str(node.args[0].value)
-                    process_target(node, label)
-                    return
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "locator" and node.args:
-                selector = node.args[0]
-                if isinstance(selector, ast.Constant) and isinstance(selector.value, str):
-                    raw = selector.value.strip()
-                    label = raw.lstrip("#.").replace("-", " ").replace("_", " ")
-                    selected = match_locator_bundle(label, bundle_list, context=_preceding_step_context(node, lines), page=page)
-                    if selected is not None:
-                        process_target(node, label)
+                if method == "goto":
+                    expression_bindings.clear()
+                if method in page_actions and isinstance(node.func.value, ast.Name) and node.func.value.id in {"page","authenticated_page","intelligent_page"}:
+                    if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+                        unresolved.append("unsupported dynamic page selector: " + method)
                         return
+                    # Convert direct page actions to locator actions only with evidence.
+                    synthetic = ast.Call(func=ast.Attribute(value=node.func.value,attr="locator",ctx=ast.Load()),
+                                         args=[node.args[0]],keywords=[])
+                    ast.copy_location(synthetic,node.args[0])
+                    synthetic.end_lineno=node.args[0].end_lineno
+                    synthetic.end_col_offset=node.args[0].end_col_offset
+                    selected = exact_bundle(synthetic)
+                    if selected is None:
+                        selected = match_locator_bundle(node.args[0].value.lstrip("#.").replace("-"," ").replace("_"," "),
+                            bundle_list,context=_preceding_step_context(node,lines),page=page)
+                    if selected is None:
+                        unresolved.append("unvalidated page selector: " + node.args[0].value)
+                        return
+                    expression = _render_for_root(selected,node.func.value)
+                    rest = [ast.unparse(a) for a in node.args[1:]] + [k.arg+"="+ast.unparse(k.value) for k in node.keywords if k.arg]
+                    start,end=span(node)
+                    edits.append((start,end,(expression+"."+method+"("+", ".join(rest)+")").encode()))
+                    used.append(selected)
+                    return
+                if method in selector_methods:
+                    process_expression(node)
+                    return
+                if method in page_actions and isinstance(node.func.value, ast.Name) and node.func.value.id not in bindings:
+                    # POM method calls (self.login()) do not belong to this set.
+                    unresolved.append("unsupported locator binding: " + node.func.value.id)
             self.generic_visit(node)
 
     Visitor().visit(tree)

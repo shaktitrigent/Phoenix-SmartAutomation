@@ -260,6 +260,7 @@ class AutomationTestGenerator:
             )
 
         code = self._normalise(script_code)
+        code = self._enforce_locator_evidence(code, test)
 
         # Select page or authenticated_page based on test preconditions
         code = _swap_to_intelligent_fixture(
@@ -309,6 +310,7 @@ class AutomationTestGenerator:
             code = self._repair_loop(code, err, test, "syntax_error", path)
 
         # ── Write to disk so file-based gates can run ─────────────────────────────
+        code = self._enforce_locator_evidence(code, test)
         path.write_text(code, encoding="utf-8")
 
         # ── py_compile gate ───────────────────────────────────────────────────────
@@ -325,6 +327,18 @@ class AutomationTestGenerator:
                 path.write_text(code, encoding="utf-8")
 
         return path
+
+    @staticmethod
+    def _enforce_locator_evidence(code, test):
+        if "locators" in test or test.get("locator_provenance"):
+            from phoenix.locators.reconciliation import reconcile_generated_code
+            code, _, missing = reconcile_generated_code(code, test.get("locators") or [],
+                assertion_contracts=test.get("assertion_contracts") or [])
+            from phoenix_shared.generation_contract import artifact_plan_issues
+            missing.extend(artifact_plan_issues({**test, "script_code": code}))
+            if missing:
+                raise RuntimeError("Final generated source lacks validated locator evidence or generation-plan fidelity: " + ", ".join(missing))
+        return code
 
     def _repair_loop(
         self,
@@ -352,7 +366,7 @@ class AutomationTestGenerator:
                     attempt, self._repair_attempts, path.name,
                 )
                 break
-            repaired = self._normalise(repaired)
+            repaired = self._enforce_locator_evidence(self._normalise(repaired), test)
             # Validate the repair before accepting it
             new_err = validate_syntax(repaired)
             if not new_err:
@@ -410,9 +424,10 @@ class AutomationTestGenerator:
         code = _fix_bare_assert(code)
 
         # --- New locator-quality fixes ---
-        code = _fix_ambiguous_get_by_text_in_assertion(code)
-        code = _fix_dynamic_person_name_in_locator(code)
-        code = _fix_get_by_text_click_strict_mode(code)
+        # Never force uniqueness by selecting the first match.
+        # Locator evidence is checked again after all transforms.
+
+
         code = _fix_dialog_on_to_once(code)
 
         # --- Import completion (must run after all code transforms) ---

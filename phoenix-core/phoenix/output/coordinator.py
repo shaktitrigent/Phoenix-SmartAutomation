@@ -108,8 +108,30 @@ def _splice_methods_into_class(existing_source: str, class_name: str, new_method
         None,
     )
 
-    if target_class is None or incoming_class is None:
-        return existing_source + "\n\n" + _extract_new_methods(new_methods_source, [])
+    if incoming_class is None:
+        raise ValueError('Incoming page object does not define its declared class')
+    if target_class is None:
+        # A new scenario may declare a different page class in the same module.
+        # Append the class itself, never detach its methods into another class.
+        additions = []
+        existing_symbols = {n.name for n in existing_tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        existing_statements = {ast.dump(n, include_attributes=False) for n in existing_tree.body}
+        for node in incoming_tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == '__future__':continue
+            if node is incoming_class:
+                additions.append(ast.get_source_segment(new_methods_source, node) or ast.unparse(node))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                if ast.dump(node, include_attributes=False) not in existing_statements:
+                    additions.append(ast.unparse(node))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in existing_symbols:
+                additions.append(ast.get_source_segment(new_methods_source, node) or ast.unparse(node))
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                assigned={n.id for n in ast.walk(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)}
+                defined={n.id for statement in existing_tree.body if isinstance(statement,(ast.Assign,ast.AnnAssign)) for n in ast.walk(statement) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)}
+                if not assigned & defined:additions.append(ast.unparse(node))
+        result=existing_source.rstrip()+'\n\n'+ '\n\n'.join(additions)+'\n'
+        compile(result, '<merged-page-object>', 'exec')
+        return result
 
     existing_lines = existing_source.splitlines(keepends=True)
     incoming_lines = new_methods_source.splitlines(keepends=True)

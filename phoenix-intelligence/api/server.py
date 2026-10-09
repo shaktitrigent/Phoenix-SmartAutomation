@@ -428,6 +428,8 @@ def automate_from_manual(payload: AutomateRequest):
     if payload.project_context is not None:
         context_kwargs["project_context"] = payload.project_context.model_dump()
         context_kwargs["request_config"] = load_request_config(payload.project_context)
+    if payload.dom_snapshot is not None:
+        context_kwargs["dom_snapshot"] = payload.dom_snapshot
     mcp_config = getattr(payload, "mcp_config", None)
     if mcp_config is not None:
         from services.config import MCPSettings

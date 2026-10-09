@@ -21,6 +21,7 @@ class LocatorStrategy(str, Enum):
 
 
 import re as _re
+import json as _json
 
 _ROLE_WITH_NAME_RE = _re.compile(r'^(\w[\w-]*)(?:\[name=(.+)\])?$')
 
@@ -82,28 +83,28 @@ class Locator(BaseModel):
             m = _ROLE_WITH_NAME_RE.match(self.value)
             if m and m.group(2):
                 role, name = m.group(1), m.group(2).strip('"\'')
-                return f'page.get_by_role("{role}", name="{name}")'
-            return f'page.get_by_role("{self.value}")'
+                return f'page.get_by_role({_json.dumps(role)}, name={_json.dumps(name)})'
+            return f'page.get_by_role({_json.dumps(self.value)})'
 
         if self.strategy == LocatorStrategy.XPATH:
             # Ensure the xpath= prefix is present so Playwright uses XPath mode
             value = self.value if self.value.startswith("xpath=") else f"xpath={self.value}"
-            return f'page.locator("{value}")'
+            return f'page.locator({_json.dumps(value)})'
 
         if self.strategy == LocatorStrategy.CONTEXT:
             return _context_to_playwright_python(self.value)
 
         strategy_map = {
-            LocatorStrategy.LABEL: lambda: f'page.get_by_label("{self.value}")',
-            LocatorStrategy.PLACEHOLDER: lambda: f'page.get_by_placeholder("{self.value}")',
-            LocatorStrategy.TEST_ID: lambda: f'page.get_by_test_id("{self.value}")',
-            LocatorStrategy.TEXT: lambda: f'page.get_by_text("{self.value}")',
-            LocatorStrategy.CSS: lambda: f'page.locator("{self.value}")',
-            LocatorStrategy.ALT_TEXT: lambda: f'page.get_by_alt_text("{self.value}")',
-            LocatorStrategy.TITLE: lambda: f'page.get_by_title("{self.value}")',
+            LocatorStrategy.LABEL: lambda: f'page.get_by_label({_json.dumps(self.value)})',
+            LocatorStrategy.PLACEHOLDER: lambda: f'page.get_by_placeholder({_json.dumps(self.value)})',
+            LocatorStrategy.TEST_ID: lambda: f'page.get_by_test_id({_json.dumps(self.value)})',
+            LocatorStrategy.TEXT: lambda: f'page.get_by_text({_json.dumps(self.value)})',
+            LocatorStrategy.CSS: lambda: f'page.locator({_json.dumps(self.value)})',
+            LocatorStrategy.ALT_TEXT: lambda: f'page.get_by_alt_text({_json.dumps(self.value)})',
+            LocatorStrategy.TITLE: lambda: f'page.get_by_title({_json.dumps(self.value)})',
         }
         fn = strategy_map.get(self.strategy)
-        return fn() if fn else f'page.locator("{self.value}")'
+        return fn() if fn else f'page.locator({_json.dumps(self.value)})'
 
 
 class LocatorBundle(BaseModel):

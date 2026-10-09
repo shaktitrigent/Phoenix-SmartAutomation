@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from phoenix_shared.models.locator import Locator, LocatorBundle, LocatorStrategy
+from phoenix_shared.locator_policy import acceptance_reasons, locator_accepted
 
 
 DiscoveryCallable = Callable[[Dict[str, Any]], Dict[str, Any]]
@@ -38,7 +39,7 @@ _STRATEGIES = {
 }
 
 _POSITIONAL_PATTERNS = (
-    re.compile(r"\.(?:first|last)\s*\(", re.IGNORECASE),
+    re.compile(r"\.(?:first|last)\b", re.IGNORECASE),
     re.compile(r"\.nth\s*\(", re.IGNORECASE),
     re.compile(r":nth-(?:child|of-type)\s*\(", re.IGNORECASE),
     re.compile(r"//[^\n]*\[\s*\d+\s*\]"),
@@ -64,11 +65,11 @@ def fallback_reasons(bundle: LocatorBundle) -> List[str]:
     A uniquely browser-verified primary is terminal even when a lower-quality
     alternate carries warnings. This invariant prevents unnecessary LLM calls.
     """
-    if bundle.primary.verified_in_snapshot is True:
+    if locator_accepted(bundle.primary, bundle.metadata):
         return []
 
     records = _raw_records(bundle)
-    reasons: List[str] = []
+    reasons: List[str] = acceptance_reasons(bundle.primary, bundle.metadata)
     match_counts = [record.get("match_count") for record in records]
     if any(count == 0 for count in match_counts):
         reasons.append("not_found")
@@ -218,6 +219,8 @@ def build_unresolved_payload(
             "value": first_record.get("working_locator_value"),
         },
         "fallback_reasons": reasons,
+        "candidate_elements": metadata.get("candidate_elements", []),
+        "requested_label": metadata.get("requested_label", bundle.element_name),
     }
 
 
@@ -242,7 +245,8 @@ def build_unresolved_payloads(
 
 def has_positional_selector(value: str) -> bool:
     """Reject selectors that force a result by arbitrary position."""
-    return any(pattern.search(value) for pattern in _POSITIONAL_PATTERNS)
+    patterns = _POSITIONAL_PATTERNS if value.strip().startswith(("page.", "locator(", "get_by_")) else _POSITIONAL_PATTERNS[1:]
+    return any(pattern.search(value) for pattern in patterns)
 
 
 def parse_locator_expert_candidates(
@@ -276,7 +280,8 @@ def parse_locator_expert_candidates(
             "reason": raw.get("reason") or raw.get("description"),
             "context_strategy": raw.get("context_strategy"),
         }
-        candidates.append(Locator(
+        try:
+            candidate = Locator(
             element_name=payload["element_name"],
             strategy=strategy,
             value=value,
@@ -285,7 +290,10 @@ def parse_locator_expert_candidates(
             description=raw.get("description"),
             verified_in_snapshot=None,
             metadata={key: value for key, value in metadata.items() if value is not None},
-        ))
+            )
+        except (ValueError, TypeError):
+            continue
+        candidates.append(candidate)
     return candidates
 
 
@@ -296,11 +304,13 @@ def merge_validated_fallback(
 ) -> LocatorBundle:
     """Merge a LocatorExpert candidate only after unique live validation."""
     match_count = validation.get("match_count")
-    if match_count != 1:
-        raise ValueError("LocatorExpert candidate must have live match_count == 1")
+    if type(match_count) is not int or match_count != 1 or validation.get("identity_matches") is not True:
+        raise ValueError("LocatorExpert candidate requires live match_count == 1 and identity_matches == True")
 
     candidate_metadata = dict(candidate.metadata or {})
+    candidate_metadata.update(validation)
     candidate_metadata.update({
+        "source": "locator_expert",
         "validation_result": "unique",
         "match_count": 1,
         "resolution_timestamp": datetime.now(timezone.utc).isoformat(),
@@ -312,7 +322,7 @@ def merge_validated_fallback(
     })
 
     existing = [bundle.primary] + list(bundle.alternates)
-    if bundle.primary.verified_in_snapshot is True:
+    if locator_accepted(bundle.primary, bundle.metadata):
         primary = bundle.primary
         alternatives = existing[1:] + [validated]
     else:
@@ -350,8 +360,13 @@ def resolve_with_locator_expert(
     page_url: str,
     discover: DiscoveryCallable,
     validate: ValidationCallable,
+    capture: Optional[Callable] = None,
+    max_rounds: int = 1,
+    max_candidates: int = 5,
 ) -> Dict[str, Any]:
     """Resolve eligible bundles while guaranteeing zero calls for resolved ones."""
+    if not 1 <= max_rounds <= 3 or not 1 <= max_candidates <= 10:
+        raise ValueError("Fallback budget requires 1–3 rounds and 1–10 candidates")
     by_identity: Dict[str, LocatorBundle] = {}
     for bundle in bundles:
         identity = str((bundle.metadata or {}).get("element_identity") or f"name:{bundle.element_name}")
@@ -364,80 +379,83 @@ def resolve_with_locator_expert(
     total_tokens = 0
     started_at = time.perf_counter()
 
-    for payload in payloads:
-        identity = str(payload.get("element_identity") or f"name:{payload['element_name']}")
+    for original in payloads:
+        identity = str(original.get("element_identity") or f"name:{original['element_name']}")
         bundle = by_identity[identity]
-        llm_calls += 1
-        try:
-            response = discover(payload)
-            if isinstance(response, dict):
-                metadata = response.get("metadata", {})
-                tokens = (
-                    response.get("tokens_used")
-                    or metadata.get("tokens_used")
-                    or metadata.get("usage", {}).get("total_tokens")
-                    or 0
-                )
-                if isinstance(tokens, int):
-                    total_tokens += tokens
-        except Exception as exc:
-            unresolved.append({**payload, "error": f"locator_expert_failed: {exc}"})
-            continue
+        payload = dict(original)
         merged = None
         rejected = []
-        candidates = parse_locator_expert_candidates(response, payload)
-        for attempt_number, candidate in enumerate(candidates, start=1):
+        fingerprints = set()
+        error = None
+        discovery_calls = 0
+        capture_attempts = 0
+        for round_number in range(1, max_rounds + 1):
+            if capture is not None:
+                capture_attempts += 1
+                try:
+                    evidence = capture(payload, round_number)
+                except Exception as exc:
+                    error = "scoped_capture_failed:" + type(exc).__name__
+                    break
+                payload.update(evidence)
+                if evidence.get("capture_status") != "captured":
+                    error = "insufficient_live_context"
+                    break
+                fingerprint = evidence.get("context_fingerprint")
+                if round_number > 1 and fingerprint in fingerprints:
+                    error = "context_unchanged_after_rejection"
+                    break
+                fingerprints.add(fingerprint)
+            payload["round_number"] = round_number
+            payload["previous_rejections"] = list(rejected)
+            llm_calls += 1
+            discovery_calls += 1
             try:
-                validation = validate(candidate, payload)
+                response = discover(payload)
+                metadata = response.get("metadata", {}) if isinstance(response, dict) else {}
+                tokens = (response.get("tokens_used") or metadata.get("tokens_used") or 0) if isinstance(response, dict) else 0
+                if isinstance(tokens, int):
+                    total_tokens += tokens
             except Exception as exc:
-                rejected.append({
-                    "strategy": candidate.strategy.value,
-                    "value": candidate.value,
-                    "match_count": None,
-                    "error": f"validation_failed: {exc}",
-                    "attempt_number": attempt_number,
-                    "rejection_reason": "browser_validation_error",
-                })
-                continue
-            validation = dict(validation or {})
-            validation["attempt_number"] = attempt_number
-            expected_identity = payload.get("element_identity")
-            actual_identity = validation.get("element_identity")
-            identity_matches = validation.get("identity_matches")
-            wrong_identity = identity_matches is False or (
-                expected_identity and actual_identity and expected_identity != actual_identity
-            )
-            if validation.get("match_count") == 1 and not wrong_identity:
-                merged = merge_validated_fallback(bundle, candidate, validation)
+                error = "locator_expert_failed: " + type(exc).__name__
                 break
-            match_count = validation.get("match_count")
-            if wrong_identity:
-                rejection_reason = "wrong_element_identity"
-            elif match_count == 0:
-                rejection_reason = "not_found"
-            elif isinstance(match_count, int) and match_count > 1:
-                rejection_reason = "ambiguous"
-            else:
-                rejection_reason = "invalid_validation_result"
-            rejected.append({
-                "strategy": candidate.strategy.value,
-                "value": candidate.value,
-                "match_count": match_count,
-                "error": validation.get("error"),
-                "attempt_number": attempt_number,
-                "rejection_reason": rejection_reason,
-            })
+            candidates = parse_locator_expert_candidates(response, payload)[:max_candidates]
+            for candidate in candidates:
+                attempt_number = len(rejected) + 1
+                try:
+                    validation = dict(validate(candidate, payload) or {})
+                except Exception as exc:
+                    validation = {"match_count": None, "error": "validation_failed:" + type(exc).__name__}
+                validation.update(attempt_number=attempt_number, round_number=round_number)
+                count = validation.get("match_count")
+                same_identity = not (payload.get("element_identity") and validation.get("element_identity") and
+                    payload["element_identity"] != validation["element_identity"])
+                if type(count) is int and count == 1 and validation.get("identity_matches") is True and same_identity:
+                    merged = merge_validated_fallback(bundle, candidate, validation)
+                    break
+                reason = (validation.get("validation_reason") or "browser_validation_error" if validation.get("error") and count is None else
+                          "not_found" if count == 0 else "ambiguous" if isinstance(count, int) and count > 1 else
+                          "wrong_element_identity" if count == 1 and (validation.get("identity_matches") is False or not same_identity) else
+                          "missing_identity_evidence" if count == 1 else "invalid_validation_result")
+                rejected.append({"strategy":candidate.strategy.value,"value":candidate.value,
+                    "match_count":count,"error":validation.get("error"),"attempt_number":attempt_number,
+                    "identity_matches": validation.get("identity_matches"),
+                    "validation_url": validation.get("validation_url"), "state_name": validation.get("state_name"),
+                    "capture_status": payload.get("capture_status"), "anchor_count": payload.get("anchor_count"),
+                    "round_number":round_number,"rejection_reason":reason})
+            if merged is not None:
+                break
+            if not candidates:
+                error = "no_valid_locator_expert_candidates"
+                break
         if merged is not None:
             resolved.append(merged)
         else:
-            unresolved.append({
-                **payload,
-                "rejected_candidates": rejected,
-                "final_failure_reason": (
-                    "no_valid_locator_expert_candidates" if not candidates
-                    else "all_locator_expert_candidates_rejected"
-                ),
-            })
+            unresolved.append({**payload,"rejected_candidates":rejected,
+                "fallback_attempted":discovery_calls > 0, "discovery_calls":discovery_calls,
+                "capture_attempts":capture_attempts,
+                "final_failure_reason":error or "all_locator_expert_candidates_rejected",
+                **({"error":error} if error else {})})
 
     untouched = [bundle for bundle in bundles if build_unresolved_payload(bundle, page_url=page_url) is None]
     return {

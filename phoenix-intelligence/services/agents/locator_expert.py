@@ -122,8 +122,8 @@ class LocatorExpertAgent(BaseAgent):
     ) -> List[Dict[str, Any]]:
         # Get live page snapshot via MCP if we don't already have one.
         # Phase D: best-effort — a failing MCP call must not abort locator discovery.
-        snapshot = dom_snapshot or ""
-        if not snapshot and self.mcp_client and page_url:
+        snapshot = (element_context or {}).get("scoped_dom") or dom_snapshot or ""
+        if not snapshot and not element_context and self.mcp_client and page_url:
             logger.info("Fetching page snapshot via MCP: %s", page_url)
             try:
                 # Pass project, page, and execution_id for DOM reuse

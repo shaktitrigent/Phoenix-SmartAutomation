@@ -5,9 +5,54 @@ import re
 import symtable
 
 
+def negative_expectation(text):
+    """Recognize predicate negation without treating quoted UI labels as grammar."""
+    predicate = re.sub(r"`[^`]*`|\"[^\"]*\"|'[^']*'", "", str(text).lower())
+    return bool(re.search(r"\b(?:not|no|never|absent)\b", predicate))
+
+
 def normalize_action(text):
     text = re.sub(r"^(?:Given|When|Then|And|But)\s+", "", str(text).strip(), flags=re.I)
     return re.sub(r"^I\s+", "", text, flags=re.I)
+
+
+def expectation_parts(text, fields=()):
+    """Expand explicit shared predicates without splitting subject lists away."""
+    from phoenix_shared.generation_contract import clauses
+    visible = re.compile(r'(?:The\s+)?(.+?)\s+(?:are|is)\s+visible\.?$', re.I)
+    sentences = re.split(r'(?<=[.!;])\s+', ' '.join(str(text or '').split()))
+    result = []
+    for sentence in sentences:
+        display=re.search(r'\bdisplays?\s+((?:the\s+)?[^.]+(?:field|button|control|input))\.?$',sentence,re.I)
+        if display and ',' in display[1] and not re.search(r'\b(?:heading|URL)\b',display[1],re.I):
+            prefix=sentence[:display.start()].strip().removesuffix('and').strip()
+            if prefix:result.extend(expectation_parts(prefix,fields))
+            result.extend(expectation_parts(display[1]+' are visible.',fields));continue
+        # Keep trailing lists with a shared predicate intact while separating
+        # preceding URL/other outcomes.
+        sentence=re.sub(r'^After [\w -]+,\s*', '',sentence,flags=re.I)
+        trailing=re.search(r'(?:,\s*(?:and\s+)?|\s+and\s+)((?:the\s+)?[^,]+ field, .+ (?:are|is) visible\.?)$',sentence,re.I)
+        if trailing and re.search(r'\b(?:URL|visible|empty)\b',sentence[:trailing.start()],re.I):
+            result.extend(expectation_parts(sentence[:trailing.start()],fields))
+            result.extend(expectation_parts(trailing[1],fields));continue
+        empty_prefix=re.match(r'(Both .+? (?:remain empty|contain empty values))(?=,|\.|$)',sentence,re.I)
+        if empty_prefix and empty_prefix.end()<len(sentence.rstrip('.')):
+            result.extend(expectation_parts(empty_prefix[1],fields))
+            result.extend(expectation_parts(sentence[empty_prefix.end():].lstrip(', ').removeprefix('and '),fields));continue
+        match = visible.fullmatch(sentence)
+        if match and (',' in match[1] or ' and ' in match[1]):
+            subjects = re.split(r',\s*(?:and\s+)?|\s+and\s+', match[1])
+            if all(re.search(r'\b(?:field|button|control|input|heading|menu item)\b', s, re.I) for s in subjects):
+                result.extend(f'{s.strip()} is visible.' for s in subjects)
+                continue
+        empty = re.fullmatch(r'Both (.+?) (?:remain empty|contain empty values)\.?', sentence, re.I)
+        if empty:
+            names = list(fields) if empty[1].lower() in {'credential fields', 'fields'} else re.split(r'\s+and\s+', empty[1], flags=re.I)
+            if len(names) >= 2:
+                result.extend(f'The {name} field contains an empty value ("").' for name in names)
+                continue
+        result.extend(clauses(sentence))
+    return result
 
 
 def bound_actions(action, data):
@@ -53,7 +98,8 @@ def unresolved_dependencies(code):
 
 
 def final_artifact_issues(result):
-    issues = []
+    from phoenix_shared.generation_contract import artifact_plan_issues
+    issues = artifact_plan_issues(result)
     artifacts = [("flat", result.get("script_code", ""))]
     for key in ("pom_bundle", "bdd_bundle"):
         for section in ("page_objects", "steps", "tests"):

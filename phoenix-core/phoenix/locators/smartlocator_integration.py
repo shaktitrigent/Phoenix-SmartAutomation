@@ -67,7 +67,8 @@ def _bundle_names(bundle: object) -> set[str]:
 
 
 def _locator_is_usable(locator: object, bundle_metadata: dict) -> bool:
-    if locator.verified_in_snapshot is not True or not str(locator.value or "").strip():
+    from phoenix_shared.locator_policy import locator_accepted
+    if not locator_accepted(locator, bundle_metadata):
         return False
     if bundle_metadata.get("broken") is True or bundle_metadata.get("unresolved") is True:
         return False
@@ -94,6 +95,7 @@ def validated_locator_bundles(
     locators_dir: str | Path,
     page: str,
     manual_tests: list[dict] | None = None,
+    *, revalidate=None,
 ) -> List[object]:
     """Discover project-local validated bundles relevant to the automation request."""
     from phoenix.locators.registry import LocatorRegistry
@@ -150,6 +152,22 @@ def validated_locator_bundles(
 
     result = []
     for path, bundles in relevant_paths:
+        if revalidate is not None:
+            owner = getattr(revalidate, '__self__', None)
+            current_state = getattr(owner, 'state_name', None)
+            applicable, historical = [], []
+            for bundle in bundles:
+                state = (bundle.primary.metadata or {}).get('state_name') or (bundle.metadata or {}).get('state_name')
+                # An explicit state observation belongs to that state. Without
+                # a journey selecting it, absence on the initial DOM proves
+                # nothing about its validity in a future execution state.
+                if current_state and state and state != current_state:
+                    meta = {**(bundle.metadata or {}), 'validation_phase': 'historical',
+                            'requires_execution_validation': True}
+                    historical.append(bundle.model_copy(update={'metadata': meta}))
+                else:
+                    applicable.append(bundle)
+            bundles = [*revalidate(applicable), *historical] if applicable else historical
         for bundle in bundles:
             metadata = dict(bundle.metadata or {})
             usable = [
@@ -222,6 +240,7 @@ def generate_smartlocator_bundles(
     validate: bool = True,
     output_dir: str | Path | None = None,
     element_names: list[str] | None = None,
+    current_page=None,
 ) -> List[object]:
     """Run SmartLocatorAI and translate its JSON output into Phoenix bundles.
 
@@ -229,6 +248,11 @@ def generate_smartlocator_bundles(
     interchange artifact, while Phoenix's locator repository is the durable
     source of truth after adapter conversion and persistence.
     """
+    if current_page is not None:
+        from phoenix.locators.live_session import LiveLocatorSession
+        return LiveLocatorSession(current_page, state_name=page).scan(
+            application_url, page=page, validate=validate, output_dir=output_dir,
+            element_names=element_names)
     try:
         from phoenix_smartlocatorai import generate_locators_from_dom
     except ImportError as exc:
@@ -337,6 +361,7 @@ def reconcile_automation_tests_with_bundles(
     used: list[dict] = []
     for test in automation_tests:
         test_used: list[dict] = []
+        unresolved.extend(test.get("translation_targets") or [])
         code_targets = []
         if isinstance(test.get("script_code"), str) and test["script_code"].strip():
             code_targets.append((test, "script_code"))
@@ -353,13 +378,17 @@ def reconcile_automation_tests_with_bundles(
         for target, key in code_targets:
             try:
                 final_code, selected, missing = reconcile_generated_code(
-                    target[key], evidence, page=target.get("page_name") or test.get("page_name")
+                    target[key], evidence, page=target.get("page_name") or test.get("page_name"),
+                    assertion_contracts=test.get("assertion_contracts") or []
                 )
             except (SyntaxError, ValueError, TypeError) as exc:
                 raise ValueError("generated source could not be reconciled safely") from exc
             target[key] = final_code
             test_used.extend(selected)
             unresolved.extend(missing)
+
+        from phoenix_shared.generation_contract import artifact_plan_issues
+        unresolved.extend(artifact_plan_issues(test))
 
         seen: set[tuple[str, str, str]] = set()
         selected_for_test = []
@@ -450,7 +479,15 @@ def locator_expert_targets(
                 metadata={"unresolved": True, "smartlocator_raw_records": []},
             )
         else:
-            continue
+            # Preserve the ambiguity for the expert instead of dropping it.
+            bundle = LocatorBundle(
+                element_name=label, page=page,
+                primary=Locator(element_name=label, strategy=LocatorStrategy.CSS,
+                                value="__unresolved__", verified_in_snapshot=False),
+                metadata={"unresolved":True,"requested_label":label,
+                          "candidate_elements":[locator_bundle_to_dict(b) for b in matching],
+                          "smartlocator_raw_records":[]},
+            )
         identity = str((bundle.metadata or {}).get("element_identity") or f"name:{bundle.element_name}")
         if identity not in used_identities:
             used_identities.add(identity)
@@ -467,9 +504,23 @@ def resolve_automation_locator_evidence(
     scan,
     discover,
     validate,
+    capture=None,
+    max_rounds=2,
 ) -> dict[str, Any]:
     """Apply stored, fresh-scan, then LocatorExpert precedence per element."""
     from phoenix.locators.smartlocator_fallback import resolve_with_locator_expert
+
+    # Snapshot expressions are proposals, never acceptance evidence. Revalidate
+    # their physical identity on the same Page; direct use still requires the
+    # deterministic policy or successful LocatorExpert validation below.
+    from phoenix_shared.models.locator import Locator, LocatorStrategy
+    proposal_validation = []
+    for test in automation_tests:
+        for proposal in test.get("proposed_locator_targets") or []:
+            candidate = Locator(element_name=proposal["element_name"], strategy=LocatorStrategy.CONTEXT,
+                                value=proposal["expression"], verified_in_snapshot=None)
+            outcome = validate(candidate, {"element_data":proposal["element_data"]})
+            proposal_validation.append({"element_name":proposal["element_name"], **outcome})
 
     stored_evidence = locator_bundle_evidence(stored_bundles)
     unresolved, used = reconcile_automation_tests_with_bundles(
@@ -513,6 +564,8 @@ def resolve_automation_locator_evidence(
                 page_url=application_url,
                 discover=discover,
                 validate=validate,
+                capture=capture,
+                max_rounds=max_rounds,
             )
             for bundle in fallback_result.get("resolved_bundles", []):
                 metadata = dict(bundle.metadata or {})
@@ -537,87 +590,18 @@ def resolve_automation_locator_evidence(
         "fresh_count": len(fresh_bundles),
         "locator_expert_calls": fallback_result.get("llm_calls", 0),
         "locator_expert_unresolved": fallback_result.get("unresolved_elements", []),
+        "proposal_validation": proposal_validation,
     }
 
 
-def live_locator_validator(application_url: str):
-    """Create a LocatorExpert validator requiring one match and identity fit."""
-    import re
-
-    from phoenix.locators.smartlocator_fallback import has_positional_selector
-    from phoenix_shared.models.locator import LocatorStrategy
-
-    def validate(candidate, payload):
-        if has_positional_selector(candidate.value) or candidate.strategy == LocatorStrategy.CONTEXT:
-            return {"match_count": 0, "identity_matches": False}
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            try:
-                page = browser.new_page()
-                page.goto(payload.get("page_url") or application_url, wait_until="domcontentloaded")
-                value = candidate.value
-                strategy = candidate.strategy
-                if strategy == LocatorStrategy.ROLE:
-                    match = re.match(r"^(\w[\w-]*)(?:\[name=(.+)\])?$", value)
-                    if match and match.group(2):
-                        locator = page.get_by_role(match.group(1), name=match.group(2).strip("\"'"))
-                    else:
-                        locator = page.get_by_role(value)
-                elif strategy == LocatorStrategy.LABEL:
-                    locator = page.get_by_label(value)
-                elif strategy == LocatorStrategy.PLACEHOLDER:
-                    locator = page.get_by_placeholder(value)
-                elif strategy == LocatorStrategy.TEST_ID:
-                    locator = page.get_by_test_id(value)
-                elif strategy == LocatorStrategy.TEXT:
-                    locator = page.get_by_text(value)
-                elif strategy == LocatorStrategy.XPATH:
-                    locator = page.locator(value if value.startswith("xpath=") else f"xpath={value}")
-                elif strategy == LocatorStrategy.ALT_TEXT:
-                    locator = page.get_by_alt_text(value)
-                elif strategy == LocatorStrategy.TITLE:
-                    locator = page.get_by_title(value)
-                else:
-                    locator = page.locator(value)
-                count = locator.count()
-                if count != 1:
-                    return {"match_count": count, "identity_matches": False}
-                actual = locator.evaluate("""element => ({
-                    tag: element.tagName.toLowerCase(),
-                    id: element.id || '',
-                    name: element.getAttribute('name') || '',
-                    placeholder: element.getAttribute('placeholder') || '',
-                    aria: element.getAttribute('aria-label') || '',
-                    testid: element.getAttribute('data-testid') || element.getAttribute('data-test') || '',
-                    role: element.getAttribute('role') || '',
-                    text: (element.innerText || element.textContent || '').trim()
-                })""")
-            finally:
-                browser.close()
-
-        element_data = payload.get("element_data") or {}
-        expected_stable = {
-            "id": element_data.get("id"),
-            "name": element_data.get("name"),
-            "placeholder": element_data.get("placeholder"),
-            "aria": element_data.get("aria-label") or element_data.get("aria_label"),
-        }
-        expected_stable = {key: value for key, value in expected_stable.items() if value}
-        if expected_stable:
-            identity_matches = all(str(actual.get(key, "")) == str(value) for key, value in expected_stable.items())
-        else:
-            label = str(payload.get("element_name") or payload.get("custom_name") or "")
-            label_words = set(re.findall(r"[a-z0-9]+", normalize_element_name(label)))
-            label_words -= {"input", "field", "element", "control", "button", "link", "checkbox", "textbox"}
-            actual_words = set(re.findall(r"[a-z0-9]+", normalize_element_name(" ".join(str(actual.get(key, "")) for key in (
-                "id", "name", "placeholder", "aria", "testid", "text", "role"
-            )))))
-            identity_matches = bool(label_words) and label_words.issubset(actual_words)
-        return {"match_count": 1, "identity_matches": identity_matches}
-
-    return validate
+def live_locator_validator(application_url: str, *, page=None):
+    """Validate only on a supplied current page; never create an anonymous session."""
+    if page is None:
+        def missing_session(candidate, payload):
+            return {"match_count": None, "identity_matches": False, "error": "current_browser_session_required"}
+        return missing_session
+    from phoenix.locators.live_session import LiveLocatorSession
+    return LiveLocatorSession(page).validate
 
 
 def smartlocator_prompt_context(bundles: list[object], *, max_items: int = 100) -> str:

@@ -843,8 +843,13 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
     is_flag=True,
     help="Delete existing tests/ scripts before generating",
 )
+@click.option("--locators-dir", default="locators", type=click.Path())
+@click.option("--storage-state", default=None, type=click.Path(exists=True, dir_okay=False))
+@click.option("--states-file", default=None, type=click.Path(exists=True, dir_okay=False), help="Explicit journey states; no routes or login actions are guessed")
+@click.option("--state", "state_name", default=None, help="State to establish before resolution")
+@click.option("--fallback-rounds", default=2, type=click.IntRange(1, 3))
 @click.pass_context
-def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
+def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locators_dir="locators", storage_state=None, states_file=None, state_name=None, fallback_rounds=2):
     """Generate automation scripts from reviewed manual test cases.
 
     Reads every manual_test_*.md file from the manual_tests/ directory,
@@ -938,361 +943,410 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
         )
         raise click.Abort()
 
-    # Load project-specific domain knowledge
-    domain_knowledge = _load_domain_knowledge(project_root)
-    if domain_knowledge:
-        print_info("Domain knowledge loaded from domain_knowledge/")
+    locator_directory = Path(locators_dir)
+    if not locator_directory.is_absolute():
+        locator_directory = project_root / locator_directory
+    locator_directory = locator_directory.resolve()
+    from phoenix.locators.live_session import live_session
+    from phoenix.locators.journey import load_journey
+    states = load_journey(states_file, project_root) if states_file else []
+    if state_name and not any(st["name"] == state_name for st in states):
+        raise click.ClickException("--state must identify a state in --states-file")
+    selected_state = state_name or (states[-1]["name"] if states else _module_from_file(manual_path))
+    actions = []
+    for st in states:
+        actions.extend(st.get("actions", []))
+        if st["name"] == selected_state:
+            break
+    with live_session(application_url, storage_state=storage_state, state_name=selected_state,
+                      actions=actions) as browser_session:
+        # Load project-specific domain knowledge
+        domain_knowledge = _load_domain_knowledge(project_root)
+        if domain_knowledge:
+            print_info("Domain knowledge loaded from domain_knowledge/")
 
-    # SmartLocatorAI runs before intelligence generation so its validated
-    # locator evidence can ground the generated flat/POM code. The same bundle
-    # objects are retained and merged into Phoenix persistence after generation.
-    smartlocator_bundles = []
-    locator_evidence = []
-    smartlocator_scan = None
-    smartlocator_page = _module_from_file(manual_path)
-    try:
-        from phoenix.locators.smartlocator_fallback import intelligence_discoverer
-        from phoenix.locators.smartlocator_integration import (
-            SmartLocatorUnavailableError,
-            generate_smartlocator_bundles,
-            locator_bundle_evidence,
-            live_locator_validator,
-            resolve_automation_locator_evidence,
-            smartlocator_prompt_context,
-            validated_locator_bundles,
-        )
-
-        smartlocator_scan = generate_smartlocator_bundles
-        smartlocator_bundles = validated_locator_bundles(
-            project_root / "locators", smartlocator_page, manual_tests
-        )
-        if smartlocator_bundles:
-            print_info(
-                f"SmartLocatorAI: loaded {len(smartlocator_bundles)} validated stored "
-                "LocatorBundle(s); unresolved elements will be scanned after generation."
-            )
-        else:
-            print_info(
-                "SmartLocatorAI: no usable stored bundles discovered; unresolved elements "
-                "will be scanned after generation."
-            )
-        locator_evidence = locator_bundle_evidence(smartlocator_bundles)
-        locator_context = smartlocator_prompt_context(smartlocator_bundles)
-        if locator_context:
-            domain_knowledge = "\n\n".join(
-                part for part in (locator_context, domain_knowledge) if part
-            )
-        print_info(
-            f"SmartLocatorAI: {len(smartlocator_bundles)} validated LocatorBundle(s) "
-            "provided to automation generation."
-        )
-    except SmartLocatorUnavailableError as _exc:
-        print_warning(str(_exc))
-    except Exception as _exc:
-        print_warning(f"SmartLocatorAI pre-pass failed; continuing with Phoenix locators: {_exc}")
-
-    # Detect layout and mode
-    _use_pom = getattr(config.project, "layout", "flat") == "pom-v1"
-    _use_bdd = _use_pom and getattr(config.project, "bdd", False)
-    _manifest_context = ""
-    _keywords_context = ""
-
-    if _use_pom:
+        # SmartLocatorAI runs before intelligence generation so its validated
+        # locator evidence can ground the generated flat/POM code. The same bundle
+        # objects are retained and merged into Phoenix persistence after generation.
+        smartlocator_bundles = []
+        locator_evidence = []
+        smartlocator_scan = None
+        smartlocator_page = _module_from_file(manual_path)
         try:
-            from phoenix.intelligence.manifest import ProjectIndexer
-            indexer = ProjectIndexer(project_root)
-            manifest_obj = indexer.build()
-            manifest_path = indexer.save(manifest_obj)
-            _manifest_context = manifest_obj.to_prompt_context()
-            print_info(f"Manifest built → {manifest_path.relative_to(project_root)}")
-        except Exception as _exc:
-            import logging as _logging
-            _logging.getLogger(__name__).warning("Manifest build failed (non-fatal): %s", _exc)
+            from phoenix.locators.smartlocator_fallback import intelligence_discoverer
+            from phoenix.locators.smartlocator_integration import (
+                SmartLocatorUnavailableError,
+                generate_smartlocator_bundles,
+                locator_bundle_evidence,
+                live_locator_validator,
+                resolve_automation_locator_evidence,
+                smartlocator_prompt_context,
+                validated_locator_bundles,
+            )
 
-    if _use_bdd:
-        try:
-            from phoenix.intelligence.keyword_catalog import KeywordCatalog
-            _catalog_path = project_root / ".phoenix" / "keywords.json"
-            _catalog = KeywordCatalog(_catalog_path)
-            _keywords_context = _catalog.to_prompt_summary()
-            print_info(f"Keyword catalog loaded — {len(_catalog)} keyword(s) available")
-        except Exception as _exc:
-            import logging as _logging
-            _logging.getLogger(__name__).warning("Keyword catalog load failed (non-fatal): %s", _exc)
-
-    # Call intelligence server with enhanced MCP/DOM configuration
-    project_context = ProjectContext(
-        project_root=str(project_root),
-        application_url=application_url,
-        page_name=_module_from_file(manual_path),
-        locator_directory=str(project_root / "locators"),
-        environment_file=str(project_root / ".env.local"),
-    )
-    intel_client = IntelligenceClient(config)
-    try:
-        click.echo("")
-        _mode_label = "BDD" if _use_bdd else ("POM" if _use_pom else "flat")
-        print_info(f"Calling intelligence server to generate automation scripts [{_mode_label} mode]…")
-        print_info("MCP/DOM: ENABLED for perfect locator generation")
-        result = intel_client.automate_from_manual(
-            manual_tests=manual_tests,
-            application_url=application_url,
-            domain_knowledge=domain_knowledge,
-            manifest=_manifest_context,
-            use_pom=_use_pom,
-            use_bdd=_use_bdd,
-            keywords=_keywords_context,
-            mcp_enabled=True,  # Always enable MCP for DOM-based locator generation
-            mcp_command="npx",
-            mcp_args="@playwright/mcp@latest",
-            mcp_timeout=120,  # Increased timeout for comprehensive DOM analysis
-            project_context=project_context,
-            locator_bundles=locator_evidence,
-        )
-    except Exception as exc:
-        print_error(f"Intelligence server error: {exc}")
-        raise click.Abort() from exc
-
-    automation_tests = result.get("automation_tests", [])
-    if not automation_tests:
-        print_warning("No automation scripts were generated.")
-        raise click.Abort()
-
-    try:
-        resolution = resolve_automation_locator_evidence(
-            automation_tests,
-            smartlocator_bundles,
-            application_url=application_url,
-            page=smartlocator_page,
-            scan=smartlocator_scan,
-            discover=intelligence_discoverer(intel_client, project_context),
-            validate=live_locator_validator(application_url),
-        )
-        print_info(
-            "Locator evidence: "
-            f"stored={resolution['stored_count']}, "
-            f"scan_results={resolution['scanned_count']}, "
-            f"fresh_selected={resolution['fresh_count']}, "
-            f"LocatorExpert_calls={resolution['locator_expert_calls']}, "
-            f"unresolved={len(resolution['unresolved'])}."
-        )
-    except Exception as _exc:
-        print_warning(
-            "Locator evidence reconciliation failed; generated output was not accepted: "
-            f"{type(_exc).__name__}"
-        )
-        raise click.Abort() from _exc
-
-    if resolution["unresolved"]:
-        print_error("Generation unresolved: validated locator evidence is missing for required operations")
-        raise click.Abort()
-
-    _print_intelligence_metadata_warnings(result.get("metadata"))
-    for test in automation_tests:
-        for warning in test.get("warnings", []):
-            print_warning(f"{test.get('name', 'automation_test')}: {warning}")
-    
-    # Check metadata status for CLI exit code mapping
-    metadata = result.get("metadata", {})
-    status = metadata.get("status", "")
-    if status == "failed":
-        print_error("Generation failed: no valid automation produced")
-        raise click.Abort()
-    elif status == "partial":
-        print_error("Generation partial: review incomplete tests before writing automation")
-        raise click.Abort()
-
-    # BDD mode: apply BDD delta bundles and register keywords
-    if _use_bdd:
-        try:
-            from phoenix.output.coordinator import OutputManager
-            from phoenix.intelligence.keyword_catalog import KeywordCatalog, Keyword
-            manager = OutputManager(project_root)
-            bdd_written: List[str] = []
-            keywords_reused = 0
-            keywords_added = 0
-            _catalog_path = project_root / ".phoenix" / "keywords.json"
-            _catalog = KeywordCatalog(_catalog_path)
-
-            for test in automation_tests:
-                bundle = test.get("bdd_bundle")
-                if not bundle:
-                    continue
-                # Apply file delta (features, steps, page objects, locators)
-                bdd_bundle_for_output = {
-                    "page_objects": bundle.get("page_objects", []),
-                    "locators": bundle.get("locators", []),
-                    "tests": [
-                        {"action": s["action"], "file": s["file"], "code": s["code"]}
-                        for s in bundle.get("steps", [])
-                    ],
-                    "test_data": bundle.get("test_data", []),
-                }
-                # Write feature files
-                for feat in bundle.get("features", []):
-                    feat_path = project_root / feat["file"]
-                    feat_path.parent.mkdir(parents=True, exist_ok=True)
-                    if feat["action"] == "create" or not feat_path.exists():
-                        feat_path.write_text(feat["content"], encoding="utf-8")
-                        bdd_written.append(str(feat_path))
-                    elif feat["action"] == "extend" and feat_path.exists():
-                        existing = feat_path.read_text(encoding="utf-8")
-                        for line in feat["content"].splitlines():
-                            if line.strip().startswith("Scenario:") and line not in existing:
-                                existing += f"\n{line}\n"
-                        feat_path.write_text(existing, encoding="utf-8")
-                        bdd_written.append(str(feat_path))
-
-                files = manager.apply(bdd_bundle_for_output)
-                bdd_written.extend(files)
-
-                # Register new keywords; count reused
-                for kw_data in bundle.get("keywords", []):
-                    kw_id = kw_data.get("id", "")
-                    if not kw_id:
-                        continue
-                    match = _catalog.find_match(kw_data.get("canonical", ""))
-                    if match:
-                        keywords_reused += 1
-                        if kw_data.get("canonical", "") not in [match.canonical] + match.aliases:
-                            _catalog.add_alias(match.id, kw_data["canonical"])
-                    else:
-                        try:
-                            _catalog.add(Keyword.from_dict(kw_data))
-                            keywords_added += 1
-                        except Exception:
-                            pass
-
-            if bdd_written:
-                click.echo("")
-                print_success(
-                    f"BDD delta applied — {len(set(bdd_written))} file(s) written/updated. "
-                    f"Reused {keywords_reused} keywords, added {keywords_added} new."
+            smartlocator_scan = browser_session.scan
+            smartlocator_bundles = validated_locator_bundles(
+                locator_directory, smartlocator_page, manual_tests, revalidate=browser_session.revalidate
+            )
+            if smartlocator_bundles:
+                print_info(
+                    f"SmartLocatorAI: loaded {len(smartlocator_bundles)} validated stored "
+                    "LocatorBundle(s); unresolved elements will be scanned after generation."
                 )
-                for f in sorted(set(bdd_written)):
-                    try:
-                        rel = Path(f).relative_to(project_root)
-                    except ValueError:
-                        rel = Path(f)
-                    print_info(f"  {rel}")
-                print_info("Next: phoenix run")
-                return
+            else:
+                print_info(
+                    "SmartLocatorAI: no usable stored bundles discovered; unresolved elements "
+                    "will be scanned after generation."
+                )
+            locator_evidence = locator_bundle_evidence(smartlocator_bundles)
+            locator_context = smartlocator_prompt_context(smartlocator_bundles)
+            if locator_context:
+                domain_knowledge = "\n\n".join(
+                    part for part in (locator_context, domain_knowledge) if part
+                )
+            print_info(
+                f"SmartLocatorAI: {len(smartlocator_bundles)} validated LocatorBundle(s) "
+                "provided to automation generation."
+            )
+        except SmartLocatorUnavailableError as _exc:
+            print_warning(str(_exc))
         except Exception as _exc:
-            print_warning(f"BDD delta apply failed, falling back to flat output: {_exc}")
+            print_warning(f"SmartLocatorAI pre-pass failed; continuing with Phoenix locators: {_exc}")
 
-    # POM mode: apply delta bundles via OutputManager (pom-v1 projects)
-    if _use_pom:
-        try:
-            from phoenix.output.coordinator import OutputManager
-            manager = OutputManager(project_root)
-            pom_written: List[str] = []
-            for test in automation_tests:
-                bundle = test.get("pom_bundle")
-                if bundle:
-                    files = manager.apply(bundle)
-                    pom_written.extend(files)
-            if pom_written:
-                click.echo("")
-                print_success(f"POM delta applied — {len(pom_written)} file(s) written/updated:")
-                for f in pom_written:
-                    try:
-                        rel = Path(f).relative_to(project_root)
-                    except ValueError:
-                        rel = Path(f)
-                    print_info(f"  {rel}")
+        # Detect layout and mode
+        _use_pom = getattr(config.project, "layout", "flat") == "pom-v1"
+        _use_bdd = _use_pom and getattr(config.project, "bdd", False)
+        _manifest_context = ""
+        _keywords_context = ""
 
-                # Persist locators from PAGE OBJECT files (test files are thin wrappers —
-                # all real Playwright locator calls are in the page object class body)
-                locators_dir = Path(config.project.test_output_dir).parent / "locators"
-                from phoenix.locators.persist import persist_locators
-                pom_scripts = []
-                for test in automation_tests:
-                    bundle = test.get("pom_bundle") or {}
-                    for node in bundle.get("page_objects", []):
-                        fp = str(project_root / node["file"])
-                        # Page name: pages/login_page.py → login
-                        page_name = Path(node["file"]).stem.removesuffix("_page") or "global"
-                        pom_scripts.append({
-                            "script_path": fp,
-                            "page": page_name,
-                            "locators": test.get("locators", []),
-                        })
-                total_locators = persist_locators(pom_scripts, locators_dir)
-                if total_locators:
-                    print_info(
-                        f"Locators: {total_locators} bundle(s) saved to {locators_dir}/ "
-                        "— run 'phoenix locators' to inspect."
-                    )
-                print_info("Next: phoenix run")
-                return
-        except Exception as _exc:
-            print_warning(f"POM delta apply failed, falling back to flat output: {_exc}")
+        if _use_pom:
+            try:
+                from phoenix.intelligence.manifest import ProjectIndexer
+                indexer = ProjectIndexer(project_root)
+                manifest_obj = indexer.build()
+                manifest_path = indexer.save(manifest_obj)
+                _manifest_context = manifest_obj.to_prompt_context()
+                print_info(f"Manifest built → {manifest_path.relative_to(project_root)}")
+            except Exception as _exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Manifest build failed (non-fatal): %s", _exc)
 
-    # Flat mode: write scripts via AutomationTestGenerator
-    from phoenix.exceptions import QualityGateFailedError
-    auto_gen = AutomationTestGenerator(
-        output_dir=config.project.test_output_dir,
-        intel_client=intel_client,
-        repair_attempts=config.intelligence.repair_attempts,
-        collect_only_gate=config.intelligence.collect_only_gate,
-    )
-    try:
-        written = auto_gen.generate(
-            automation_tests=automation_tests,
-            user_story="",
+        if _use_bdd:
+            try:
+                from phoenix.intelligence.keyword_catalog import KeywordCatalog
+                _catalog_path = project_root / ".phoenix" / "keywords.json"
+                _catalog = KeywordCatalog(_catalog_path)
+                _keywords_context = _catalog.to_prompt_summary()
+                print_info(f"Keyword catalog loaded — {len(_catalog)} keyword(s) available")
+            except Exception as _exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Keyword catalog load failed (non-fatal): %s", _exc)
+
+        # Call intelligence server with enhanced MCP/DOM configuration
+        project_context = ProjectContext(
+            project_root=str(project_root),
             application_url=application_url,
-            acceptance_criteria=[],
+            page_name=_module_from_file(manual_path),
+            locator_directory=str(locator_directory),
+            environment_file=str(project_root / ".env.local"),
         )
-    except QualityGateFailedError as exc:
-        print_error("Quality gate blocked script generation. Blocking issues:")
-        for err in exc.errors:
-            print_error(f"  • {err}")
-        print_info(
-            "Fix the manual test steps that trigger these issues, "
-            "then re-run 'phoenix automate'."
+        intel_client = IntelligenceClient(config)
+        try:
+            click.echo("")
+            _mode_label = "BDD" if _use_bdd else ("POM" if _use_pom else "flat")
+            print_info(f"Calling intelligence server to generate automation scripts [{_mode_label} mode]…")
+            print_info("DOM evidence is supplied from the current browser session; locator validation is required")
+            result = intel_client.automate_from_manual(
+                manual_tests=manual_tests,
+                application_url=application_url,
+                domain_knowledge=domain_knowledge,
+                manifest=_manifest_context,
+                use_pom=_use_pom,
+                use_bdd=_use_bdd,
+                keywords=_keywords_context,
+                mcp_enabled=config.intelligence.mcp_enabled,
+                mcp_command=config.intelligence.mcp_command,
+                mcp_args=config.intelligence.mcp_args,
+                mcp_timeout=config.intelligence.mcp_timeout,
+                project_context=project_context,
+                locator_bundles=locator_evidence,
+                dom_snapshot=browser_session.generation_snapshot(),
+            )
+        except Exception as exc:
+            print_error(f"Intelligence server error: {exc}")
+            raise click.Abort() from exc
+
+        automation_tests = result.get("automation_tests", [])
+        if not automation_tests:
+            print_warning("No automation scripts were generated.")
+            raise click.Abort()
+
+        for _generated in automation_tests:
+            if _generated.get("overall_outcome_unresolved"):
+                print_warning("Translation overall expected result: explicit executable assertions are required")
+            for _step_contract in _generated.get("step_contracts", []):
+                if _step_contract.get("status") == "partial":
+                    _number = _step_contract.get("step", "unknown")
+                    _known = {"missing_explicit_action_data", "missing_explicit_fill_data", "missing_navigation_url",
+                        "missing_or_ambiguous_fill_target", "missing_or_ambiguous_click_target", "unsupported_action",
+                        "unsupported_expected_outcome", "missing_expected_outcome", "missing_or_ambiguous_select_target",
+                        "missing_or_ambiguous_checkbox_target", "submission_outcome_not_supplied", "contradictory_expected_input_state"}
+                    _reasons = [r for r in _step_contract.get("reasons", []) if r in _known]
+                    print_warning(f"Translation step {_number}: " + ", ".join(_reasons or ["unresolved contract"]))
+
+        try:
+            resolution = resolve_automation_locator_evidence(
+                automation_tests,
+                smartlocator_bundles,
+                application_url=application_url,
+                page=smartlocator_page,
+                scan=smartlocator_scan,
+                discover=intelligence_discoverer(intel_client, project_context),
+                validate=browser_session.validate,
+                capture=browser_session.capture,
+                max_rounds=fallback_rounds,
+            )
+            print_info(
+                "Locator evidence: "
+                f"stored={resolution['stored_count']}, "
+                f"scan_results={resolution['scanned_count']}, "
+                f"fresh_selected={resolution['fresh_count']}, "
+                f"LocatorExpert_calls={resolution['locator_expert_calls']}, "
+                f"unresolved={len(resolution['unresolved'])}."
+            )
+        except Exception as _exc:
+            print_warning(
+                "Locator evidence reconciliation failed; generated output was not accepted: "
+                f"{type(_exc).__name__}"
+            )
+            raise click.Abort() from _exc
+
+        if resolution["unresolved"]:
+            print_error("Generation unresolved: validated locator evidence is missing for required operations")
+            print_warning("Unresolved targets (these may include unsupported generated expressions, not only UI elements):")
+            from phoenix.locators.diagnostics import redact_diagnostics
+            import json as _diagnostic_json
+            for target_index, _target in enumerate(resolution["unresolved"], 1):
+                _safe_target = redact_diagnostics(str(_target), manual_tests)
+                print_warning(f"  Target {target_index}: {_safe_target}")
+            for _failed in resolution.get("locator_expert_unresolved", []):
+                _details = {k: _failed.get(k) for k in (
+                    "element_name", "page_url", "state_name", "capture_status", "anchor_count",
+                    "rejected_candidates", "final_failure_reason")}
+                print_warning("  Fallback: " + _diagnostic_json.dumps(
+                    redact_diagnostics(_details, manual_tests), ensure_ascii=False, default=str))
+            raise click.Abort()
+
+        _print_intelligence_metadata_warnings(result.get("metadata"))
+        for test in automation_tests:
+            for warning in test.get("warnings", []):
+                print_warning(f"{test.get('name', 'automation_test')}: {warning}")
+            if test.get("unbound_overall_outcomes"):
+                from phoenix.locators.diagnostics import redact_diagnostics
+                for outcome in test["unbound_overall_outcomes"]:
+                    print_warning("Unbound overall outcome: " + redact_diagnostics(str(outcome), manual_tests))
+
+        # Check metadata status for CLI exit code mapping
+        metadata = result.get("metadata", {})
+        status = metadata.get("status", "")
+        if status == "failed":
+            print_error("Generation failed: no valid automation produced")
+            raise click.Abort()
+        elif status == "partial":
+            print_error("Generation partial: review incomplete tests before writing automation")
+            raise click.Abort()
+
+        # BDD mode: apply BDD delta bundles and register keywords
+        if _use_bdd:
+            try:
+                from phoenix.output.coordinator import OutputManager
+                from phoenix.intelligence.keyword_catalog import KeywordCatalog, Keyword
+                manager = OutputManager(project_root)
+                bdd_written: List[str] = []
+                keywords_reused = 0
+                keywords_added = 0
+                _catalog_path = project_root / ".phoenix" / "keywords.json"
+                _catalog = KeywordCatalog(_catalog_path)
+
+                for test in automation_tests:
+                    bundle = test.get("bdd_bundle")
+                    if not bundle:
+                        continue
+                    # Apply file delta (features, steps, page objects, locators)
+                    bdd_bundle_for_output = {
+                        "page_objects": bundle.get("page_objects", []),
+                        "locators": bundle.get("locators", []),
+                        "tests": [
+                            {"action": s["action"], "file": s["file"], "code": s["code"]}
+                            for s in bundle.get("steps", [])
+                        ],
+                        "test_data": bundle.get("test_data", []),
+                    }
+                    # Write feature files
+                    for feat in bundle.get("features", []):
+                        feat_path = project_root / feat["file"]
+                        feat_path.parent.mkdir(parents=True, exist_ok=True)
+                        if feat["action"] == "create" or not feat_path.exists():
+                            feat_path.write_text(feat["content"], encoding="utf-8")
+                            bdd_written.append(str(feat_path))
+                        elif feat["action"] == "extend" and feat_path.exists():
+                            existing = feat_path.read_text(encoding="utf-8")
+                            for line in feat["content"].splitlines():
+                                if line.strip().startswith("Scenario:") and line not in existing:
+                                    existing += f"\n{line}\n"
+                            feat_path.write_text(existing, encoding="utf-8")
+                            bdd_written.append(str(feat_path))
+
+                    files = manager.apply(bdd_bundle_for_output)
+                    bdd_written.extend(files)
+
+                    # Register new keywords; count reused
+                    for kw_data in bundle.get("keywords", []):
+                        kw_id = kw_data.get("id", "")
+                        if not kw_id:
+                            continue
+                        match = _catalog.find_match(kw_data.get("canonical", ""))
+                        if match:
+                            keywords_reused += 1
+                            if kw_data.get("canonical", "") not in [match.canonical] + match.aliases:
+                                _catalog.add_alias(match.id, kw_data["canonical"])
+                        else:
+                            try:
+                                _catalog.add(Keyword.from_dict(kw_data))
+                                keywords_added += 1
+                            except Exception:
+                                pass
+
+                if bdd_written:
+                    click.echo("")
+                    print_success(
+                        f"BDD delta applied — {len(set(bdd_written))} file(s) written/updated. "
+                        f"Reused {keywords_reused} keywords, added {keywords_added} new."
+                    )
+                    for f in sorted(set(bdd_written)):
+                        try:
+                            rel = Path(f).relative_to(project_root)
+                        except ValueError:
+                            rel = Path(f)
+                        print_info(f"  {rel}")
+                    print_info("Next: phoenix run")
+                    return
+            except Exception as _exc:
+                print_warning(f"BDD delta apply failed, falling back to flat output: {_exc}")
+
+        # POM mode: apply delta bundles via OutputManager (pom-v1 projects)
+        if _use_pom:
+            try:
+                from phoenix.output.coordinator import OutputManager
+                manager = OutputManager(project_root)
+                pom_written: List[str] = []
+                for test in automation_tests:
+                    bundle = test.get("pom_bundle")
+                    if bundle:
+                        files = manager.apply(bundle)
+                        pom_written.extend(files)
+                if pom_written:
+                    click.echo("")
+                    print_success(f"POM delta applied — {len(pom_written)} file(s) written/updated:")
+                    for f in pom_written:
+                        try:
+                            rel = Path(f).relative_to(project_root)
+                        except ValueError:
+                            rel = Path(f)
+                        print_info(f"  {rel}")
+
+                    # Persist locators from PAGE OBJECT files (test files are thin wrappers —
+                    # all real Playwright locator calls are in the page object class body)
+                    locators_dir = locator_directory
+                    from phoenix.locators.persist import persist_locators
+                    pom_scripts = []
+                    for test in automation_tests:
+                        bundle = test.get("pom_bundle") or {}
+                        for node in bundle.get("page_objects", []):
+                            fp = str(project_root / node["file"])
+                            # Page name: pages/login_page.py → login
+                            page_name = Path(node["file"]).stem.removesuffix("_page") or "global"
+                            pom_scripts.append({
+                                "script_path": fp,
+                                "page": page_name,
+                                "locators": test.get("locators", []),
+                            })
+                    total_locators = persist_locators(pom_scripts, locators_dir)
+                    if total_locators:
+                        print_info(
+                            f"Locators: {total_locators} bundle(s) saved to {locators_dir}/ "
+                            "— run 'phoenix locators' to inspect."
+                        )
+                    print_info("Next: phoenix run")
+                    return
+            except Exception as _exc:
+                print_warning(f"POM delta apply failed, falling back to flat output: {_exc}")
+
+        # Flat mode: write scripts via AutomationTestGenerator
+        from phoenix.exceptions import QualityGateFailedError
+        auto_gen = AutomationTestGenerator(
+            output_dir=config.project.test_output_dir,
+            intel_client=intel_client,
+            repair_attempts=config.intelligence.repair_attempts,
+            collect_only_gate=config.intelligence.collect_only_gate,
         )
-        raise click.Abort() from exc
+        try:
+            written = auto_gen.generate(
+                automation_tests=automation_tests,
+                user_story="",
+                application_url=application_url,
+                acceptance_criteria=[],
+            )
+        except QualityGateFailedError as exc:
+            print_error("Quality gate blocked script generation. Blocking issues:")
+            for err in exc.errors:
+                print_error(f"  • {err}")
+            print_info(
+                "Fix the manual test steps that trigger these issues, "
+                "then re-run 'phoenix automate'."
+            )
+            raise click.Abort() from exc
 
-    # Extract and save locators (shared helper: LLM + regex, ranked, page-wise)
-    locators_dir = Path(config.project.test_output_dir).parent / "locators"
-    from phoenix.locators.persist import persist_locators
-    # Enrich the written list: carry LLM locators[] and use the module-derived
-    # page name (e.g. "login") so files are saved as locators/login.json rather
-    # than locators/001_login_valid_credentials.json  (B6).
-    module_page = _module_from_file(manual_path)
-    for w, t in zip(written, automation_tests):
-        w.setdefault("locators", t.get("locators", []))
-        w.setdefault("page", module_page)
-    total_locators = persist_locators(written, locators_dir)
+        # Extract and save locators (shared helper: LLM + regex, ranked, page-wise)
+        locators_dir = locator_directory
+        from phoenix.locators.persist import persist_locators
+        # Enrich the written list: carry LLM locators[] and use the module-derived
+        # page name (e.g. "login") so files are saved as locators/login.json rather
+        # than locators/001_login_valid_credentials.json  (B6).
+        module_page = _module_from_file(manual_path)
+        for w, t in zip(written, automation_tests):
+            w.setdefault("locators", t.get("locators", []))
+            w.setdefault("page", module_page)
+        total_locators = persist_locators(written, locators_dir)
 
-    # Module-aware consolidated output (groups by module derived from manual file path)
-    project_root = Path(config_path).parent if config_path else Path.cwd()
-    _write_module_artifacts(
-        module=_module_from_file(manual_path),
-        all_manual=manual_tests,  # pass manual tests so tags flow into @pytest.mark decorators
-        all_automation=written,
-        project_root=project_root,
-        verbose=verbose,
-    )
-
-    # Summary
-    click.echo("")
-    print_success(
-        f"Generated {len(written)} automation script(s) → {config.project.test_output_dir}/"
-    )
-    for test in written:
-        manual_name = test.get("manual_test_name", "")
-        script = Path(test.get("script_path", "")).name
-        print_info(f"  {manual_name}  →  {script}")
-
-    if total_locators:
-        print_info(
-            f"Locators: {total_locators} bundle(s) saved to {locators_dir}/ "
-            "— run 'phoenix locators' to inspect."
+        # Module-aware consolidated output (groups by module derived from manual file path)
+        project_root = Path(config_path).parent if config_path else Path.cwd()
+        _write_module_artifacts(
+            module=_module_from_file(manual_path),
+            all_manual=manual_tests,  # pass manual tests so tags flow into @pytest.mark decorators
+            all_automation=written,
+            project_root=project_root,
+            verbose=verbose,
         )
 
-    click.echo("")
-    print_info("Next: phoenix run")
+        # Summary
+        click.echo("")
+        print_success(
+            f"Generated {len(written)} automation script(s) → {config.project.test_output_dir}/"
+        )
+        for test in written:
+            manual_name = test.get("manual_test_name", "")
+            script = Path(test.get("script_path", "")).name
+            print_info(f"  {manual_name}  →  {script}")
+
+        if total_locators:
+            print_info(
+                f"Locators: {total_locators} bundle(s) saved to {locators_dir}/ "
+                "— run 'phoenix locators' to inspect."
+            )
+
+        click.echo("")
+        print_info("Next: phoenix run")
 
 
 @click.command()
@@ -1743,10 +1797,14 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     except Exception:
         pass  # Report generation is best-effort; never block the run
 
-    if failed == 0:
+    execution_passed = (total_tests > 0 and passed == total_tests and failed == 0
+                        and result.get("return_code", 0) == 0
+                        and result.get("status") == "passed")
+    if execution_passed:
         print_success(f"All {total_tests} test(s) passed in {duration:.1f}s")
     else:
-        print_error(f"{failed}/{total_tests} test(s) failed")
+        print_error(f"Execution did not pass: {passed}/{total_tests} passed, {failed} failed, "
+                    f"{result.get('skipped_tests', 0)} skipped; status={result.get('status', 'unknown')}")
     
     # Print Phoenix Intelligent Runtime summary
     if test_runner.intelligent_runtime:
@@ -1762,6 +1820,9 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
             test_runner.intelligent_runtime.print_summary()
         except Exception as e:
             logger.warning(f"Failed to print intelligent runtime summary: {e}")
+
+    if not execution_passed:
+        raise click.ClickException("Test execution did not complete with all requested tests passing")
 
 
 @click.group(invoke_without_command=True)
@@ -1846,6 +1907,10 @@ def locators(ctx, locators_dir, page, output):
     type=float,
     help="Optional stability threshold for locator fallback",
 )
+@click.option("--storage-state", default=None, type=click.Path(dir_okay=False))
+@click.option("--states-file", default=None, type=click.Path(exists=True, dir_okay=False))
+@click.option("--state", "state_name", default=None)
+@click.option("--fallback-rounds", default=2, type=click.IntRange(1, 3))
 @click.pass_context
 def scan_locators(
     ctx,
@@ -1856,6 +1921,10 @@ def scan_locators(
     raw_output_dir,
     llm_fallback,
     stability_threshold,
+    storage_state=None,
+    states_file=None,
+    state_name=None,
+    fallback_rounds=2,
 ):
     """Scan, validate, convert and persist locators with optional LocatorExpert fallback."""
     from phoenix.locators.persist import persist_locators
@@ -1871,6 +1940,8 @@ def scan_locators(
     from phoenix_shared.models.locator import Locator, LocatorStrategy
 
     config_path = ctx.obj.get("config_path") if ctx.obj else None
+    from phoenix.sdk.config import resolve_config_path
+    config_path = resolve_config_path(config_path, search_parents=True)
     config = PhoenixConfig.load(config_path)
     resolved_url = application_url or config.project.resolved_base_url
     if not resolved_url:
@@ -1881,6 +1952,14 @@ def scan_locators(
         raise click.Abort()
 
     project_root = Path(config_path).resolve().parent if config_path else Path.cwd()
+    if storage_state:
+        state_path = Path(storage_state).expanduser()
+        if not state_path.is_absolute():
+            state_path = project_root / state_path
+        state_path = state_path.resolve()
+        if not state_path.is_file():
+            raise click.ClickException("Storage-state file does not exist relative to the project root")
+        storage_state = str(state_path)
     locator_path = Path(locators_dir)
     if not locator_path.is_absolute():
         locator_path = project_root / locator_path
@@ -1892,196 +1971,186 @@ def scan_locators(
             raw_path = project_root / raw_path
         raw_path = raw_path / page_name
 
-    print_header(f"Scanning locators for page '{page_name}'")
-    print_info(f"SmartLocatorAI: scanning and validating {resolved_url}")
-    try:
-        bundles = generate_smartlocator_bundles(
-            resolved_url,
-            page=page_name,
-            validate=True,
-            output_dir=raw_path,
-        )
-    except SmartLocatorUnavailableError as exc:
-        print_error(str(exc))
-        raise click.Abort() from exc
-    except Exception as exc:
-        print_error(f"SmartLocatorAI scan failed: {exc}")
-        raise click.Abort() from exc
-
-    sl_resolved_bundles = [
-        bundle for bundle in bundles if fallback_reasons(bundle) == []
-    ]
-    sl_resolved_count = len(sl_resolved_bundles)
-    unresolved_payloads = build_unresolved_payloads(bundles, page_url=resolved_url)
-    sent_to_fallback_count = len(unresolved_payloads) if llm_fallback else 0
-
-
-    final_bundles = list(bundles)
-    le_resolved_count = 0
-    llm_calls = 0
-    tokens_used = 0
-    duration_ms = 0.0
-    unresolved_elements = unresolved_payloads
-
-    if llm_fallback and unresolved_payloads:
-        # Verify LLM credentials / availability before attempting fallback
-        import os
-        has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-        
-        # Check if intelligence server is reachable or local client configured
-        intel_client = None
+    from phoenix.locators.live_session import live_session
+    from phoenix.locators.journey import load_journey
+    from phoenix_shared.contracts.project_context import ProjectContext
+    states = load_journey(states_file, project_root) if states_file else []
+    if state_name and not any(st["name"] == state_name for st in states):
+        raise click.ClickException("--state must identify a state in --states-file")
+    selected_state = state_name or (states[-1]["name"] if states else page_name)
+    actions = []
+    for st in states:
+        actions.extend(st.get("actions", []))
+        if st["name"] == selected_state:
+            break
+    threshold = 0.8 if stability_threshold is None else stability_threshold
+    if not 0.8 <= threshold <= 1:
+        raise click.ClickException("--stability-threshold must be between 0.8 and 1; High stability remains required")
+    project_context = ProjectContext(project_root=str(project_root.resolve()),application_url=resolved_url,
+        page_name=page_name,locator_directory=str(locator_path.resolve()),
+        environment_file=str(project_root.resolve()/".env.local"))
+    with live_session(resolved_url,storage_state=storage_state,state_name=selected_state,
+                      actions=actions,stability_threshold=threshold) as browser_session:
+        print_header(f"Scanning locators for page '{page_name}'")
+        print_info(f"SmartLocatorAI: scanning and validating {resolved_url}")
         try:
-            from phoenix.sdk.client import PhoenixClient
-            client = PhoenixClient(config_path=config_path)
-            intel_client = client._intelligence_client
-        except Exception:
-            intel_client = None
+            bundles = browser_session.scan(
+                resolved_url,
+                page=page_name,
+                validate=True,
+                output_dir=raw_path,
+            )
+        except SmartLocatorUnavailableError as exc:
+            print_error(str(exc))
+            raise click.Abort() from exc
+        except Exception as exc:
+            print_error(f"SmartLocatorAI scan failed: {exc}")
+            raise click.Abort() from exc
 
-        if not has_anthropic_key and intel_client is None:
-            print_warning(
-                "LLM fallback requested (--llm-fallback), but ANTHROPIC_API_KEY is not configured. "
-                "Skipping LocatorExpert fallback."
+        capture_info = getattr(browser_session, "scan_diagnostics", {})
+        captured_url = capture_info.get("final_url", resolved_url)
+        print_info(f"Final page URL: {captured_url}")
+        print_info(f"Captured elements: {capture_info.get('captured_element_count', len(bundles))}")
+        if storage_state and not actions:
+            from urllib.parse import urlsplit
+            requested = urlsplit(resolved_url)
+            captured = urlsplit(captured_url)
+            if (requested.hostname, requested.path.rstrip('/')) != (captured.hostname, captured.path.rstrip('/')):
+                raise click.ClickException("Saved authentication redirected away from the requested scan page; no locators saved")
+
+        sl_resolved_bundles = [
+            bundle for bundle in bundles if fallback_reasons(bundle) == []
+        ]
+        sl_resolved_count = len(sl_resolved_bundles)
+        unresolved_payloads = build_unresolved_payloads(bundles, page_url=captured_url)
+        sent_to_fallback_count = len(unresolved_payloads) if llm_fallback else 0
+
+
+        final_bundles = list(bundles)
+        le_resolved_count = 0
+        llm_calls = 0
+        tokens_used = 0
+        duration_ms = 0.0
+        unresolved_elements = unresolved_payloads
+
+        if llm_fallback and unresolved_payloads:
+            # Verify LLM credentials / availability before attempting fallback
+            import os
+            has_anthropic_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+            
+            # Check if intelligence server is reachable or local client configured
+            intel_client = None
+            try:
+                from phoenix.sdk.client import PhoenixClient
+                client = PhoenixClient(config_path=config_path)
+                intel_client = client._intelligence_client
+            except Exception:
+                intel_client = None
+
+            if not has_anthropic_key and intel_client is None:
+                print_warning(
+                    "LLM fallback requested (--llm-fallback), but ANTHROPIC_API_KEY is not configured. "
+                    "Skipping LocatorExpert fallback."
+                )
+            else:
+                print_info(f"LocatorExpert: attempting fallback for {sent_to_fallback_count} unresolved element(s)")
+
+                # Prepare discover callback
+                def discover_callback(payload: dict) -> dict:
+                    if intel_client:
+                        return intel_client.discover_locators(
+                            page_url=payload.get("page_url", resolved_url),
+                            elements=[payload.get("element_name", "")],
+                            element_contexts=[payload],
+                            require_llm=True,
+                            project_context=project_context,
+                        )
+                    # Fallback to direct agent call if SDK client is unavailable
+                    try:
+                        from services.agents.locator_expert import LocatorExpertAgent
+                        from services.cache import Cache
+                        from services.knowledge.base import KnowledgeBase
+                        agent = LocatorExpertAgent(KnowledgeBase(), Cache())
+                        return agent.process({
+                            "page_url": payload.get("page_url", resolved_url),
+                            "element_name": payload.get("element_name", ""),
+                            "element_context": payload,
+                            "require_llm": True,
+                        })
+                    except Exception as exc:
+                        raise RuntimeError(f"LocatorExpert discovery failed: {exc}") from exc
+
+                fallback_result = resolve_with_locator_expert(
+                    bundles,
+                    page_url=captured_url,
+                    discover=discover_callback,
+                    validate=browser_session.validate,
+                    capture=browser_session.capture,
+                    max_rounds=fallback_rounds,
+                )
+                final_bundles = fallback_result.get("resolved_bundles", bundles)
+                unresolved_elements = fallback_result.get("unresolved_elements", [])
+                llm_calls = fallback_result.get("llm_calls", 0)
+                tokens_used = fallback_result.get("tokens_used", 0)
+                duration_ms = fallback_result.get("duration_ms", 0.0)
+
+                # Count newly resolved elements by LocatorExpert
+                initial_unresolved_names = {p["element_name"] for p in unresolved_payloads}
+                for bundle in final_bundles:
+                    if bundle.element_name in initial_unresolved_names and bundle.primary.verified_in_snapshot is True:
+                        le_resolved_count += 1
+
+        still_unresolved_count = len(unresolved_elements)
+
+        accepted = [
+            bundle
+            for bundle in final_bundles
+            if not fallback_reasons(bundle)
+        ]
+
+        if accepted:
+            persist_locators(
+                [{"page": page_name, "locators": accepted}],
+                locator_path,
+                replace_pages=True,
+            )
+            print_success(
+                f"Saved {len(accepted)} validated LocatorBundle(s) to "
+                f"{locator_path / (page_name + '.json')}"
             )
         else:
-            print_info(f"LocatorExpert: attempting fallback for {sent_to_fallback_count} unresolved element(s)")
-            
-            # Prepare discover callback
-            def discover_callback(payload: dict) -> dict:
-                if intel_client:
-                    return intel_client.discover_locators(
-                        page_url=payload.get("page_url", resolved_url),
-                        elements=[payload.get("element_name", "")],
-                        element_contexts=[payload],
-                        require_llm=True,
-                    )
-                # Fallback to direct agent call if SDK client is unavailable
-                try:
-                    from services.agents.locator_expert import LocatorExpertAgent
-                    from services.cache import Cache
-                    from services.knowledge.base import KnowledgeBase
-                    agent = LocatorExpertAgent(KnowledgeBase(), Cache())
-                    return agent.process({
-                        "page_url": payload.get("page_url", resolved_url),
-                        "element_name": payload.get("element_name", ""),
-                        "element_context": payload,
-                        "require_llm": True,
-                    })
-                except Exception as exc:
-                    raise RuntimeError(f"LocatorExpert discovery failed: {exc}") from exc
+            print_warning("No uniquely validated LocatorBundles were available to save.")
 
-            # Prepare live Playwright validator callback
-            def _count_candidate_matches(page, candidate: Locator) -> int:
-                val = candidate.value
-                strat = candidate.strategy
-                if strat == LocatorStrategy.ROLE:
-                    m = _re.match(r'^(\w[\w-]*)(?:\[name=(.+)\])?$', val)
-                    if m and m.group(2):
-                        role, name = m.group(1), m.group(2).strip('"\'')
-                        return page.get_by_role(role, name=name).count()
-                    return page.get_by_role(val).count()
-                elif strat == LocatorStrategy.LABEL:
-                    return page.get_by_label(val).count()
-                elif strat == LocatorStrategy.PLACEHOLDER:
-                    return page.get_by_placeholder(val).count()
-                elif strat == LocatorStrategy.TEST_ID:
-                    return page.get_by_test_id(val).count()
-                elif strat == LocatorStrategy.TEXT:
-                    return page.get_by_text(val).count()
-                elif strat == LocatorStrategy.XPATH:
-                    xpath_val = val if val.startswith("xpath=") else f"xpath={val}"
-                    return page.locator(xpath_val).count()
-                elif strat == LocatorStrategy.ALT_TEXT:
-                    return page.get_by_alt_text(val).count()
-                elif strat == LocatorStrategy.TITLE:
-                    return page.get_by_title(val).count()
-                else:
-                    return page.locator(val).count()
+        # Detailed unresolved reporting
+        if unresolved_elements:
+            for elem in unresolved_elements:
+                elem_name = elem.get("element_name", "unknown")
+                reasons = ", ".join(elem.get("fallback_reasons", [])) or "unresolved"
+                attempted = bool(elem.get("fallback_attempted", False))
+                failure_reason = elem.get("final_failure_reason", "fallback_disabled" if not llm_fallback else "not_called")
+                print_warning(
+                    f"  {elem_name}: no uniquely validated primary locator "
+                    f"(reasons: {reasons}, fallback attempted: {attempted}, stop: {failure_reason})"
+                )
+        elif final_bundles:
+            print_success("All converted elements have a uniquely validated primary locator.")
 
-            def validate_callback(candidate: Locator, payload: dict) -> dict:
-                # Open browser page to validate candidate match count if Playwright is available
-                try:
-                    from playwright.sync_api import sync_playwright
-                    with sync_playwright() as p:
-                        browser = p.chromium.launch(headless=True)
-                        try:
-                            page = browser.new_page()
-                            page.goto(payload.get("page_url", resolved_url), timeout=30000)
-                            match_count = _count_candidate_matches(page, candidate)
-                            return {"match_count": match_count}
-                        finally:
-                            browser.close()
-                except Exception as exc:
-                    logger.debug("Live Playwright validation fallback warning: %s", exc)
-                    # If live validation cannot open page, return error
-                    return {"match_count": 0, "error": str(exc)}
+        if raw_path is not None:
+            print_info(f"Raw SmartLocatorAI artifacts kept in: {raw_path}")
 
-            fallback_result = resolve_with_locator_expert(
-                bundles,
-                page_url=resolved_url,
-                discover=discover_callback,
-                validate=validate_callback,
-            )
-            final_bundles = fallback_result.get("resolved_bundles", bundles)
-            unresolved_elements = fallback_result.get("unresolved_elements", [])
-            llm_calls = fallback_result.get("llm_calls", 0)
-            tokens_used = fallback_result.get("tokens_used", 0)
-            duration_ms = fallback_result.get("duration_ms", 0.0)
-
-            # Count newly resolved elements by LocatorExpert
-            initial_unresolved_names = {p["element_name"] for p in unresolved_payloads}
-            for bundle in final_bundles:
-                if bundle.element_name in initial_unresolved_names and bundle.primary.verified_in_snapshot is True:
-                    le_resolved_count += 1
-
-    still_unresolved_count = len(unresolved_elements)
-
-    accepted = [
-        bundle
-        for bundle in final_bundles
-        if bundle.primary.verified_in_snapshot is True
-    ]
-
-    if accepted:
-        persist_locators(
-            [{"page": page_name, "locators": accepted}],
-            locator_path,
-        )
-        print_success(
-            f"Saved {len(accepted)} validated LocatorBundle(s) to "
-            f"{locator_path / (page_name + '.json')}"
-        )
-    else:
-        print_warning("No uniquely validated LocatorBundles were available to save.")
-
-    # Detailed unresolved reporting
-    if unresolved_elements:
-        for elem in unresolved_elements:
-            elem_name = elem.get("element_name", "unknown")
-            reasons = ", ".join(elem.get("fallback_reasons", [])) or "unresolved"
-            attempted = bool(elem.get("attempted_locators"))
-            print_warning(
-                f"  {elem_name}: no uniquely validated primary locator "
-                f"(reasons: {reasons}, fallback attempted: {llm_fallback})"
-            )
-    elif final_bundles:
-        print_success("All converted elements have a uniquely validated primary locator.")
-
-    if raw_path is not None:
-        print_info(f"Raw SmartLocatorAI artifacts kept in: {raw_path}")
-
-    # Summary reporting
-    click.echo("")
-    click.echo("Scan Summary:")
-    click.echo(f"  SmartLocatorAI resolved: {sl_resolved_count}")
-    click.echo(f"  Sent to LocatorExpert:   {sent_to_fallback_count}")
-    click.echo(f"  LocatorExpert resolved:  {le_resolved_count}")
-    click.echo(f"  Still unresolved:        {still_unresolved_count}")
-    click.echo("")
-    click.echo(f"  LLM calls:               {llm_calls}")
-    if tokens_used > 0:
-        click.echo(f"  Tokens used:             {tokens_used:,}")
-    if llm_fallback and sent_to_fallback_count > 0:
-        click.echo(f"  Fallback duration:       {duration_ms:,.0f} ms")
+        # Summary reporting
+        click.echo("")
+        click.echo("Scan Summary:")
+        click.echo(f"  SmartLocatorAI resolved: {sl_resolved_count}")
+        click.echo(f"  Sent to LocatorExpert:   {sent_to_fallback_count}")
+        click.echo(f"  LocatorExpert resolved:  {le_resolved_count}")
+        click.echo(f"  Still unresolved:        {still_unresolved_count}")
+        click.echo("")
+        click.echo(f"  LLM calls:               {llm_calls}")
+        if tokens_used > 0:
+            click.echo(f"  Tokens used:             {tokens_used:,}")
+        if llm_fallback and sent_to_fallback_count > 0:
+            click.echo(f"  Fallback duration:       {duration_ms:,.0f} ms")
 
 
 
@@ -3043,14 +3112,32 @@ def jira_show(ctx, issue_key: str):
 @click.option("--storage-state", default=None, type=click.Path(exists=True, dir_okay=False))
 @click.option("--output", default="smartlocator_raw/states", type=click.Path())
 @click.option("--locators-dir", default="locators", type=click.Path())
-def scan_locator_states(application_url, states_file, storage_state, output, locators_dir):
+@click.option("--llm-fallback", is_flag=True, default=False)
+@click.option("--fallback-rounds", default=2, type=click.IntRange(1, 3))
+def scan_locator_states(application_url, states_file, storage_state, output, locators_dir, llm_fallback=False, fallback_rounds=2):
     """Capture an explicit journey in one session; never guess routes or credentials."""
+    import os
     from dotenv import dotenv_values
     from phoenix.locators.journey import capture_journey
     values = {**dotenv_values(".env"), **os.environ, **dotenv_values(".env.local")}
+    discover = None
+    if llm_fallback:
+        from phoenix.sdk.config import resolve_config_path
+        from phoenix.sdk.intelligence_client import IntelligenceClient
+        from phoenix_shared.contracts.project_context import ProjectContext
+        config_path = resolve_config_path(search_parents=True)
+        root = Path(config_path).resolve().parent if config_path else Path.cwd()
+        client = IntelligenceClient(PhoenixConfig.load(config_path))
+        def discover(payload):
+            context = ProjectContext(project_root=str(root), application_url=payload["page_url"],
+                page_name=payload["state_name"], locator_directory=str(Path(locators_dir).resolve()),
+                environment_file=str(root/".env.local"))
+            return client.discover_locators(page_url=payload["page_url"], elements=[payload["element_name"]],
+                element_contexts=[payload], require_llm=True, project_context=context)
     try:
         result = capture_journey(application_url, states_file, output, locators_dir,
-                                 values=values, storage_state=storage_state)
+                                 values=values, storage_state=storage_state, discover=discover,
+                                 max_rounds=fallback_rounds)
     except Exception as exc:
         raise click.ClickException(f"Journey capture failed ({type(exc).__name__}); check supplied states and runtime diagnostics") from exc
     print_success(f"Captured and persisted {len(result['states'])} explicit page/state(s)")

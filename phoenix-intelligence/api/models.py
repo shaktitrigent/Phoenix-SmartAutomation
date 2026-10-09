@@ -165,6 +165,7 @@ class AutomateRequest(BaseModel):
     manual_tests: List[Dict[str, Any]] = Field(
         description="Structured manual test dicts parsed from manual_tests/ directory"
     )
+    dom_snapshot: Optional[str] = Field(default=None, max_length=50000, description="Current-session sanitized HTML supplied by Core")
     application_url: Optional[str] = Field(default=None, description="Application URL under test")
     project_context: Optional[ProjectContext] = Field(
         default=None, description="Client project metadata; paths are not opened or resolved by the API"

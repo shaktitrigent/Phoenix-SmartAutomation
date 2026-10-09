@@ -495,12 +495,15 @@ def _extract_click_target(criterion: str) -> Tuple[str, str]:
     cleaned = cleaned.strip().strip("`'\"*. ")
     quoted = (_extract_quoted_value(criterion) or cleaned).strip("`'\"*. ")
 
+    if re.search(r'\bmenu\s+item\b|\boption\b.*\bmenu\b', lower):
+        return "menuitem", quoted
+
     if "button" in lower or re.search(r"\b(log\s*in|login|sign\s*in|submit|continue|save|next)\b", cleaned, re.IGNORECASE):
         label = re.sub(r"\s+button.*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return "button", label or quoted
+        return "button", _extract_quoted_value(criterion) or label.strip("`'\" ") or quoted
     if "link" in lower:
         label = re.sub(r"\s+link.*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return "link", label or quoted
+        return "link", _extract_quoted_value(criterion) or label.strip("`'\" ") or quoted
     return "text", quoted
 
 
@@ -1196,7 +1199,7 @@ def _parse_attr(attrs_str: str, attr_name: str, default: str = "") -> str:
     return m.group(1) if m else default
 
 
-def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, Any]]) -> List[str]:
+def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, Any]], *, coverage=None) -> List[str]:
     """Detect signs of truncated or incomplete generated automation.
 
     Returns a list of warning messages describing detected issues.
@@ -1209,7 +1212,6 @@ def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, 
     
     # Check for common truncation markers
     truncation_markers = [
-        "...",
         "[TRUNCATED]",
         "[INCOMPLETE]",
         "[TODO]",
@@ -1217,6 +1219,14 @@ def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, 
         "# FIXME:",
         "# PLACEHOLDER",
     ]
+
+    # Captured identity text may explicitly end in an ellipsis. Only a Python
+    # Ellipsis expression establishes an unfinished executable statement.
+    try:
+        if any(isinstance(n, ast.Constant) and n.value is Ellipsis for n in ast.walk(ast.parse(script_code))):
+            warnings.append("Script contains truncation marker: ...")
+    except SyntaxError:
+        warnings.append("Generated script is invalid Python")
     
     for marker in truncation_markers:
         if marker in script_code:
@@ -1250,7 +1260,7 @@ def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, 
     # Check step coverage ratio
     if manual_steps:
         from phoenix_shared.automation_translation import step_coverage
-        coverage = step_coverage(script_code, manual_steps)
+        coverage = coverage if coverage is not None else step_coverage(script_code, manual_steps)
         ratio = coverage["implemented_steps"] / len(manual_steps) if manual_steps else 0.0
         if ratio < 0.5:
             warnings.append(f"Low step coverage: {ratio:.1%} of manual steps implemented")
@@ -1654,6 +1664,20 @@ def _synthesize_pom_bundle(
 
     method_body = "\n".join(body_lines)
 
+    # Inject only dependencies that are absent from the normalized flat script.
+    # Duplicating unique_visible changes binding analysis and can mask overrides.
+    existing_tree = ast.parse(script_code)
+    existing_names = {n.name for n in existing_tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    existing_names.update(n.id for statement in existing_tree.body if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+    helper_nodes = []
+    for node in ast.parse(_FALLBACK_RUNTIME_HELPERS).body:
+        names = {node.name} if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else {
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        if not names & existing_names:
+            helper_nodes.append(node)
+    runtime_helpers = ast.unparse(ast.Module(body=helper_nodes, type_ignores=[]))
+
     # ── Page object ────────────────────────────────────────────────────────
     page_code = (
         f'"""{"".join(w.capitalize() for w in re.split(r"[_-]+", module_name))}Page'
@@ -1664,7 +1688,7 @@ def _synthesize_pom_bundle(
         f"import pytest\n"
         f"from playwright.sync_api import Locator, Page, expect\n"
         f"from pages.base_page import BasePage\n\n\n"
-        f"{_FALLBACK_RUNTIME_HELPERS}\n\n{_script_dependencies(script_code)}\n\n"
+        f"{runtime_helpers}\n\n{_script_dependencies(script_code)}\n\n"
         f"class {page_class}(BasePage):\n"
         f'    """Page object for {module_name} tests."""\n\n'
         f'    URL_PATH = ""\n\n'
@@ -2117,6 +2141,20 @@ class TestGeneratorAgent(BaseAgent):
         manifest: str = "",
     ) -> Dict[str, Any]:
         """Translate a single manual test into a Playwright script via LLM or fallback."""
+        if "_validated_locator_bundles" in manual_test:
+            from services.agents.evidence_fallback import compile_fallback
+            compiled = compile_fallback(manual_test, application_url,
+                manual_test.get("_validated_locator_bundles") or [], manual_test.get("_dom_snapshot") or "",
+                extract_fill=_extract_fill_target_and_value, extract_click=_extract_click_target,
+                split_actions=_split_compound_actions, extract_select=_extract_select_option, missing_fill_data=_missing_fill_data, environment_values=getattr(self, "environment_values", None), test_name=self._derive_short_name(manual_test.get("name", "test"), use_llm=False))
+            manual_test["_compiled_fallback"] = compiled
+            if not compiled["unresolved_steps"]:
+                # An unbound overall summary remains an explicit review block.
+                # Do not replace otherwise complete evidence-backed steps with
+                # speculative LLM selectors merely to interpret that summary.
+                return {"script_code": _normalise_generated_script(compiled["script_code"]),
+                        "generation_mode": "fallback" if compiled["overall_outcome_unresolved"] else "deterministic",
+                        "locators": [], "recommendations": []}
         if not self.llm_client:
             script = self._build_fallback_script_from_manual_test(
                 manual_test=manual_test,
@@ -2386,6 +2424,7 @@ class TestGeneratorAgent(BaseAgent):
                         f"REJECTING AUTOMATION: Too few steps implemented ({implemented_steps}/{len(manual_steps)})"
                     )
                     # Force fallback to ensure at least basic functionality
+                    used_fallback = True
                     normalised = _normalise_generated_script(
                         self._build_fallback_script_from_manual_test(
                             manual_test=manual_test,
@@ -2444,6 +2483,14 @@ class TestGeneratorAgent(BaseAgent):
         
         CRITICAL FIX: Ensure we always generate executable code, never empty stubs.
         """
+        if "_validated_locator_bundles" in manual_test:
+            from services.agents.evidence_fallback import compile_fallback
+            compiled = compile_fallback(manual_test, application_url,
+                manual_test.get("_validated_locator_bundles") or [], manual_test.get("_dom_snapshot") or "",
+                extract_fill=_extract_fill_target_and_value, extract_click=_extract_click_target,
+                split_actions=_split_compound_actions, extract_select=_extract_select_option, missing_fill_data=_missing_fill_data, environment_values=getattr(self, "environment_values", None), test_name=self._derive_short_name(manual_test.get("name", "test"), use_llm=False))
+            manual_test["_compiled_fallback"] = compiled
+            return compiled["script_code"]
         logger.warning(
             "Using heuristic fallback for manual test '%s'. "
             "Review generation diagnostics for the reason the LLM path was unavailable.",
@@ -2526,7 +2573,7 @@ class TestGeneratorAgent(BaseAgent):
                 body_lines.append("    pytest.skip('Overall expected result was not translated')")
 
         body = "\n".join(body_lines)
-        test_func_name = self._derive_short_name(manual_test.get("name", "test"))
+        test_func_name = self._derive_short_name(manual_test.get("name", "test"), use_llm=False)
         description = manual_test.get("description", manual_test.get("name", ""))
 
         script = (
@@ -2643,6 +2690,7 @@ class TestGeneratorAgent(BaseAgent):
         use_bdd: bool = False,
         keywords: str = "",
         locator_bundles: Optional[List[Dict[str, Any]]] = None,
+        dom_snapshot: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate one automation script for each supplied manual test.
 
@@ -2685,8 +2733,8 @@ class TestGeneratorAgent(BaseAgent):
         knowledge_context = self.get_knowledge_context(query="playwright automation")
 
         # Phase D — best-effort grounding: never block on MCP failure
-        page_snapshot = ""
-        if self.mcp_client and application_url:
+        page_snapshot = dom_snapshot or ""
+        if dom_snapshot is None and self.mcp_client and application_url:
             try:
                 import concurrent.futures as _cf
                 import time
@@ -2752,8 +2800,12 @@ class TestGeneratorAgent(BaseAgent):
                 logger.warning("[PHOENIX AUTOMATE] No application URL provided - skipping DOM inspection")
 
         results = []
-        for manual_test in manual_tests:
-            test_name = self._derive_short_name(manual_test.get("name", "test"))
+        for original_manual_test in manual_tests:
+            manual_test = dict(original_manual_test)
+            if locator_bundles is not None:
+                manual_test["_validated_locator_bundles"] = locator_bundles
+                manual_test["_dom_snapshot"] = page_snapshot
+            test_name = self._derive_short_name(manual_test.get("name", "test"), use_llm=False)
             source_file = manual_test.get("source_file", "")
             # Derive a clean module name from source file:
             # 1. Take the file stem and slugify it
@@ -2878,18 +2930,48 @@ class TestGeneratorAgent(BaseAgent):
                 )
                 logger.info("Automated manual test: %s", manual_test.get("name", ""))
 
+            compiled = manual_test.get("_compiled_fallback")
+            if compiled and not use_bdd:
+                from phoenix_shared.generation_contract import operation_signature
+                # Carry contracts only for the compiler's selected artifact. An
+                # independently generated LLM script cannot borrow its approval.
+                fallback_normalized = _normalise_generated_script(compiled["script_code"])
+                if operation_signature(results[-1]["script_code"]) == operation_signature(fallback_normalized):
+                    results[-1]["assertion_contracts"] = compiled["assertion_contracts"]
+                    results[-1]["step_contracts"] = compiled["step_contracts"]
+                    results[-1]["overall_outcome_unresolved"] = compiled["overall_outcome_unresolved"]
+                    results[-1]["overall_bindings"] = compiled.get("overall_bindings", [])
+                    results[-1]["unbound_overall_outcomes"] = compiled.get("unbound_overall_outcomes", [])
+                    results[-1]["proposed_locator_targets"] = compiled.get("proposed_locator_targets", [])
+                    results[-1]["translation_targets"] = compiled.get("translation_targets", [])
+                    results[-1]["generation_plan"] = {"version": 1,
+                        "operations": operation_signature(results[-1]["script_code"])}
+
         for result, source in zip(results, manual_tests):
             result["script_code"] = resolve_script_environment_values(result.get("script_code", ""))
 
             steps = source.get("steps", [])
             coverage = step_coverage(result["script_code"], steps)
             
-            # Detect truncation/incomplete generation
-            truncation_warnings = _detect_truncated_generation(result["script_code"], steps)
+            artifact_issues = final_artifact_issues(result)
+            if (result.get("generation_plan") and not artifact_issues
+                    and result.get("step_contracts")
+                    and (not coverage.get("first_blocking_line") or (
+                        result.get("overall_outcome_unresolved")
+                        and 'pytest.skip("Overall expected outcome lacks explicit executable evidence")'
+                        in result["script_code"].splitlines()[coverage["first_blocking_line"] - 1]))
+                    and len(result["step_contracts"]) == len(steps)
+                    and all(s.get("status") == "translated" for s in result["step_contracts"])):
+                # Typed action/outcome mappings plus ordered artifact fidelity
+                # provide stronger coverage evidence than English token overlap.
+                coverage.update(implemented_steps=len(steps), unresolved_steps=[])
+            # Use the same authoritative coverage for warnings and acceptance.
+            # Recomputing token-based coverage here can falsely reject a fully
+            # mapped action/assertion plan (notably scoped absence assertions).
+            truncation_warnings = _detect_truncated_generation(
+                result["script_code"], steps, coverage=coverage)
             if truncation_warnings:
                 result.setdefault("warnings", []).extend(truncation_warnings)
-            
-            artifact_issues = final_artifact_issues(result)
             if artifact_issues:
                 result.setdefault("warnings", []).extend(artifact_issues)
             requires_review = bool(
@@ -2908,6 +2990,9 @@ class TestGeneratorAgent(BaseAgent):
             }
             if requires_review:
                 result.setdefault("warnings", []).append("Manual review required: incomplete automation translation")
+            if result.get("overall_outcome_unresolved"):
+                result.setdefault("warnings", []).append(
+                    "Overall expected result needs explicit executable assertions; translated steps do not prove the unbound summary")
             if coverage["unresolved_steps"]:
                 result.setdefault("recommendations", []).append(
                     "Untranslated or unverified manual steps: " + ", ".join(map(str, coverage["unresolved_steps"]))
@@ -3024,9 +3109,9 @@ class TestGeneratorAgent(BaseAgent):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _derive_short_name(self, user_story: str) -> str:
-        """Derive a short snake_case name - LLM first, heuristic fallback."""
-        if self.llm_client:
+    def _derive_short_name(self, user_story: str, *, use_llm: bool = True) -> str:
+        """Derive a snake_case name; manual translation uses deterministic naming."""
+        if use_llm and self.llm_client:
             try:
                 system_prompt = _prompt_loader.get("test_name")
                 raw = self.llm_client.generate(system_prompt, user_story).strip()

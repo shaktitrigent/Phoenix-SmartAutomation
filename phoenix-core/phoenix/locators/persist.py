@@ -93,7 +93,7 @@ def enrich_locators_with_smartlocator(
     return _merge_locators(existing_locators + sl_dicts)
 
 
-def persist_locators(scripts: List[Dict[str, Any]], locators_dir: Path) -> int:
+def persist_locators(scripts: List[Dict[str, Any]], locators_dir: Path, *, replace_pages: bool = False) -> int:
     """Extract and save locators from generated automation scripts.
     
     Args:
@@ -130,13 +130,13 @@ def persist_locators(scripts: List[Dict[str, Any]], locators_dir: Path) -> int:
                 except Exception as exc:
                     logger.debug("Failed to extract locators from %s: %s", script_path, exc)
         
-        if script_locators:
+        if script_locators or replace_pages:
             page_locators.setdefault(page, []).extend(script_locators)
     
     # Save locator bundles
     bundles_saved = 0
     for page, locators in page_locators.items():
-        if not locators:
+        if not locators and not replace_pages:
             continue
         
         # Merge locators by element_id/element_name
@@ -146,7 +146,7 @@ def persist_locators(scripts: List[Dict[str, Any]], locators_dir: Path) -> int:
         bundle_path = locators_dir / f"{page}.json"
         try:
             # Load existing if it exists
-            if bundle_path.exists():
+            if bundle_path.exists() and not replace_pages:
                 existing = json.loads(bundle_path.read_text(encoding="utf-8"))
                 if isinstance(existing, list):
                     # Use the shared merger for both legacy strategies and
@@ -251,8 +251,9 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     new_primary = dict(loc["primary"])
                     existing_primary = dict(existing["primary"])
                     
-                    existing_ver = existing_primary.get("verified_in_snapshot") is True
-                    new_ver = new_primary.get("verified_in_snapshot") is True
+                    from phoenix_shared.locator_policy import locator_accepted
+                    existing_ver = locator_accepted(existing_primary, existing.get("metadata"))
+                    new_ver = locator_accepted(new_primary, loc.get("metadata"))
                     
                     # Choose primary: prefer snapshot-verified, then higher confidence
                     if new_ver and not existing_ver:
@@ -274,7 +275,7 @@ def _merge_locators(locators: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     non_winner_key = (non_winner.get("strategy"), non_winner.get("value"))
 
                     if non_winner_key == prim_key:
-                        existing_primary.setdefault("metadata", {}).update(
+                        existing["primary"].setdefault("metadata", {}).update(
                             new_primary.get("metadata") or {}
                         )
                     

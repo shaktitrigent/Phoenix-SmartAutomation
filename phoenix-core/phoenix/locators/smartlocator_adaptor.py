@@ -70,6 +70,11 @@ _LEGACY_BLOCK_START_TYPE = "css selector"
 _PRESERVED_METADATA_KEYS = {
     "recommended",
     "validated",
+    "match_count",
+    "identity_matches",
+    "validated_at",
+    "validation_url",
+    "state_name",
     "context_strategy",
     "stability",
     "stability_score",
@@ -483,17 +488,20 @@ def _candidate_locators_for_record(entry: Dict[str, Any], bundle_name: str) -> L
         working_type = entry.get("working_locator_type")
         working_value = entry.get("working_locator_value")
         if working_type and working_value:
+            same_selector = (
+                _strategy_from_raw(working_type) == _strategy_from_raw(entry.get("locator_type", entry.get("strategy")))
+                and str(working_value).strip() == str(entry.get("locator_value", entry.get("value", ""))).strip()
+            )
             working_entry = {
                 "locator_type": working_type,
                 "locator_value": working_value,
                 "validated": entry.get("validated"),
-                "stability_score": entry.get("stability_score"),
-                "stability": entry.get("stability"),
-                "warnings": entry.get("warnings", []),
                 "element_has_working_locator": True,
                 "working_locator_type": working_type,
                 "working_locator_value": working_value,
             }
+            if same_selector:
+                working_entry.update(_extract_metadata(entry))
             locator = _build_locator(
                 working_entry,
                 bundle_name,
@@ -568,8 +576,25 @@ def _locator_rank(locator: Locator) -> Tuple[int, float, int]:
     return tier, locator.confidence, -normalized_order
 
 
+CANDIDATE_EVIDENCE_KEYS = frozenset({
+    "stability", "stability_category", "stability_score", "dynamic", "duplicate",
+    "warnings", "match_count", "identity_matches", "validated_at", "validation_url", "state_name",
+})
+
+
 def _merge_locator(existing: Locator, new: Locator) -> Locator:
     merged_metadata = _merge_metadata(existing.metadata, new.metadata)
+    # A working rollup names another selector; its record's own category and
+    # warnings must not contaminate that selector. Prefer concrete provenance,
+    # not the highest category across unrelated records.
+    existing_rollup = existing.metadata.get("smartlocator_origin") == "working_rollup"
+    new_rollup = new.metadata.get("smartlocator_origin") == "working_rollup"
+    concrete = new if existing_rollup and not new_rollup else existing if new_rollup and not existing_rollup else None
+    if concrete is not None:
+        for key in CANDIDATE_EVIDENCE_KEYS:
+            merged_metadata.pop(key, None)
+            if key in concrete.metadata:
+                merged_metadata[key] = concrete.metadata[key]
     description = existing.description or new.description
     if existing.description and new.description and existing.description != new.description:
         description = f"{existing.description}; {new.description}"
@@ -583,7 +608,7 @@ def _merge_locator(existing: Locator, new: Locator) -> Locator:
 
     fallback = existing.fallback and new.fallback
 
-    confidence = max(existing.confidence, new.confidence)
+    confidence = concrete.confidence if concrete is not None else max(existing.confidence, new.confidence)
     preferred = existing if _locator_rank(existing) >= _locator_rank(new) else new
     return preferred.model_copy(
         update={

@@ -171,6 +171,7 @@ class AgentRegistry:
         project_context: Optional[Dict[str, Any]] = None,
         request_config: Optional[RequestConfig] = None,
         locator_bundles: Optional[List[Dict[str, Any]]] = None,
+        dom_snapshot: Optional[str] = None,
         mcp_client=...,
     ) -> Dict[str, Any]:
         selected_mcp = self._mcp_client if mcp_client is ... else mcp_client
@@ -202,12 +203,17 @@ class AgentRegistry:
                 raise RuntimeError("test_generator_agent_unavailable")
             agent = existing_agent
         bundles = locator_bundles or []
+        if request_config is not None:
+            # Request-local bindings stay local to deterministic compilation;
+            # they are not injected into model prompts or shared process state.
+            agent.environment_values = request_config.values
         logger.info(
             "Automation request: project_context=%s config_source=%s bundles=%d llm_available=%s",
             project_context is not None,
             ",".join(request_config.diagnostics.sources) if request_config else "legacy",
             len(bundles), bool(llm_client),
         )
+        snapshot_kwargs = {"dom_snapshot": dom_snapshot} if dom_snapshot is not None else {}
         result = agent.automate_from_manual_tests(
             manual_tests=manual_tests,
             application_url=application_url,
@@ -216,7 +222,7 @@ class AgentRegistry:
             use_pom=use_pom,
             use_bdd=use_bdd,
             keywords=keywords,
-            locator_bundles=bundles,
+            locator_bundles=bundles, **snapshot_kwargs,
         )
         result.setdefault("metadata", {})
         result["metadata"].update({

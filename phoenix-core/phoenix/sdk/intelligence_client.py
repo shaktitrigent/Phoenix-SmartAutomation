@@ -184,6 +184,7 @@ class IntelligenceClient:
         mcp_timeout: int = 60,
         project_context: Optional[Union[ProjectContext, Dict[str, Any]]] = None,
         locator_bundles: Optional[List[Dict[str, Any]]] = None,
+        dom_snapshot: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
@@ -204,6 +205,8 @@ class IntelligenceClient:
             payload["project_context"] = ProjectContext.model_validate(project_context).model_dump()
         if locator_bundles is not None:
             payload["locator_bundles"] = locator_bundles
+        if dom_snapshot is not None:
+            payload["dom_snapshot"] = dom_snapshot
         return self._post("/api/v1/tests/automate", payload)
 
     def fix_script(

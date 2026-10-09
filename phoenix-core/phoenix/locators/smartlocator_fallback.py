@@ -176,12 +176,29 @@ def build_unresolved_payload(
             if element_data.get(key)
         }
 
+    # CRITICAL FIX: Use a stable identifier for page names, not human-readable text
+    # Priority: element_identity > id > hash of bundle element_name
+    # Never use error messages, visible text, or labels as filesystem identifiers
+    import re
+    import hashlib
+    element_identity = metadata.get("element_identity")
+    if element_identity and isinstance(element_identity, str):
+        # Use the identity if available (stable unique identifier)
+        safe_element_name = re.sub(r'[^\w\-]', '_', str(element_identity)[:50]).lower()
+    elif element_data.get("id"):
+        # Use the DOM id if available
+        safe_element_name = re.sub(r'[^\w\-]', '_', str(element_data["id"])[:50]).lower()
+    else:
+        # Fallback to hash of element_name to avoid Windows path issues
+        safe_element_name = hashlib.md5(bundle.element_name.encode()).hexdigest()[:16]
+
     return {
         "element_identity": metadata.get("element_identity"),
         "custom_name": _first_present(
             (metadata, "custom_name"), (first_record, "custom_name")
         ),
-        "element_name": bundle.element_name,
+        "element_name": safe_element_name,  # Use sanitized identifier instead of bundle.element_name
+        "original_element_name": bundle.element_name,  # Preserve original for reference
         "page": bundle.page,
         "page_url": page_url,
         "element_data": element_data,
@@ -365,7 +382,10 @@ def resolve_with_locator_expert(
     started_at = time.perf_counter()
 
     for payload in payloads:
-        identity = str(payload.get("element_identity") or f"name:{payload['element_name']}")
+        # Use original_element_name for identity lookup to match by_identity key construction
+        # payload['element_name'] may be sanitized hash, but by_identity uses original bundle.element_name
+        original_name = payload.get("original_element_name") or payload.get("element_name")
+        identity = str(payload.get("element_identity") or f"name:{original_name}")
         bundle = by_identity[identity]
         llm_calls += 1
         try:

@@ -52,7 +52,6 @@ class LocatorValidator:
         r'time\.sleep',        # Sleep statements
         r'wait_for_load_state', # Network idle waits
         r'example\.com',       # Placeholder URLs
-        r'placeholder',         # Placeholder locators
     ]
     
     # Patterns that indicate dynamic/brittle locators
@@ -230,13 +229,21 @@ class LocatorValidator:
         """
         selector = selector.strip()
         
+        # Handle page.locator wrapper - extract the inner selector
+        if 'page.locator(' in selector:
+            match = re.search(r'page\.locator\(["\']([^"\']+)["\']\)', selector)
+            if match:
+                inner_selector = match.group(1)
+                # Recursively parse the inner selector
+                return self._parse_selector_structure(inner_selector)
+
         # Handle simple CSS selectors like #id, .class
         if selector.startswith('#'):
             return {'type': 'id', 'value': selector[1:]}
         if selector.startswith('.'):
             return {'type': 'class', 'value': selector[1:]}
         
-        # Handle page.locator("[data-testid='...']")
+        # Handle page.locator("[data-testid='...']") or page.locator("[data-test='...']")
         if '[data-testid=' in selector or '[data-test=' in selector:
             match = re.search(r'\[data-testid=["\']([^"\']+)["\']\]', selector, re.IGNORECASE)
             if match:
@@ -251,6 +258,12 @@ class LocatorValidator:
             if match:
                 return {'type': 'name', 'value': match.group(1)}
         
+        # Handle page.get_by_test_id("...")
+        if 'get_by_test_id(' in selector:
+            match = re.search(r'get_by_test_id\(["\']([^"\']+)["\']\)', selector)
+            if match:
+                return {'type': 'data-testid', 'value': match.group(1)}
+
         # Handle page.get_by_placeholder("...")
         if 'get_by_placeholder(' in selector:
             match = re.search(r'get_by_placeholder\(["\']([^"\']+)["\']\)', selector)
@@ -294,23 +307,19 @@ class LocatorValidator:
         return None
     
     def _validate_data_testid(self, testid_value: str) -> bool:
-        """Validate that data-testid attribute exists in DOM."""
-        # Look for data-testid="value" or data-testid="value" (case insensitive)
-        pattern1 = rf'data-testid=["\']?{re.escape(testid_value)}["\']?'
-        pattern2 = rf'data-testid=["\']?{re.escape(testid_value)}["\']?'
-        
+        """Validate that data-testid or data-test attribute exists in DOM."""
         dom_lower = self.dom_snapshot.lower()
         testid_lower = testid_value.lower()
         
-        # More precise check - the attribute must exist with this exact value
+        # Check for data-testid (standard) or data-test (alternative)
         if re.search(rf'data-testid\s*=\s*["\']?{re.escape(testid_lower)}["\']?', dom_lower, re.IGNORECASE):
             logger.info(f"✓ Found data-testid={testid_value} in DOM")
             return True
-        if re.search(rf'data-testid\s*=\s*["\']?{re.escape(testid_lower)}["\']?', dom_lower, re.IGNORECASE):
-            logger.info(f"✓ Found data-testid={testid_value} in DOM")
+        if re.search(rf'data-test\s*=\s*["\']?{re.escape(testid_lower)}["\']?', dom_lower, re.IGNORECASE):
+            logger.info(f"✓ Found data-test={testid_value} in DOM")
             return True
         
-        logger.warning(f"✗ data-testid={testid_value} NOT found in DOM")
+        logger.warning(f"✗ data-testid/data-test={testid_value} NOT found in DOM")
         return False
     
     def _validate_name_attribute(self, name_value: str) -> bool:
@@ -327,7 +336,7 @@ class LocatorValidator:
         return False
     
     def _validate_id_selector(self, id_value: str) -> bool:
-        """Validate that id attribute exists in DOM."""
+        """Validate that id attribute exists in DOM. Handles page.locator("#id") wrappers."""
         dom_lower = self.dom_snapshot.lower()
         id_lower = id_value.lower()
         

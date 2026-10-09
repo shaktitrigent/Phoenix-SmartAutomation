@@ -797,7 +797,9 @@ def test_locator_expert_receives_only_unresolved_and_provenance_persists(tmp_pat
         validate=lambda *_args: {"match_count": 1, "identity_matches": True},
     )
 
-    assert [payload["element_name"] for payload in expert_targets] == ["Purchase button"]
+    # element_name is sanitized to hash when no element_identity/id exists
+    # original_element_name preserves the original for reference
+    assert [payload.get("original_element_name", payload["element_name"]) for payload in expert_targets] == ["Purchase button"]
     assert result["locator_expert_calls"] == 1
     assert result["unresolved"] == []
     assert "#purchase" in tests[0]["script_code"]

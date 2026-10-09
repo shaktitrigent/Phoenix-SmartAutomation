@@ -265,6 +265,74 @@ class OutputManager:
 
     def __init__(self, project_root: Path) -> None:
         self.root = project_root
+        self._ensure_pom_infrastructure()
+
+    def _ensure_pom_infrastructure(self) -> None:
+        """Ensure pages/ directory and base_page.py exist for POM mode.
+        
+        Uses the existing scaffold template mechanism to create BasePage
+        from the Jinja2 template, matching the phoenix init architecture.
+        """
+        pages_dir = self.root / "pages"
+        base_page_path = pages_dir / "base_page.py"
+        
+        # If base_page.py already exists, no action needed
+        if base_page_path.exists():
+            return
+        
+        # Create pages directory if it doesn't exist
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create __init__.py if it doesn't exist
+        init_path = pages_dir / "__init__.py"
+        if not init_path.exists():
+            init_path.write_text('"""Page objects package."""\n', encoding="utf-8")
+        
+        # Render base_page.py from template using scaffold's _render_template
+        try:
+            from phoenix.scaffold import _render_template
+            context = {
+                "project_name": self.root.name,
+            }
+            base_page_code = _render_template("pages_base_page.py.j2", context)
+            if base_page_code:
+                base_page_path.write_text(base_page_code, encoding="utf-8")
+        except Exception:
+            # If scaffold import fails, create minimal BasePage as fallback
+            base_page_path.write_text(
+                '"""BasePage — shared foundation for all Page Object classes."""\n'
+                'from __future__ import annotations\n\n'
+                'import os\n'
+                'import re\n'
+                'from pathlib import Path\n'
+                'from typing import Optional, Union\n\n'
+                'from playwright.sync_api import Locator, Page, expect\n\n\n'
+                'class BasePage:\n'
+                '    """Base class for all page objects."""\n\n'
+                '    URL_PATH: str = "/"\n'
+                '    ACTION_TIMEOUT_MS: int = 30_000\n'
+                '    NAVIGATION_TIMEOUT_MS: int = 60_000\n\n'
+                '    def __init__(self, page: Page) -> None:\n'
+                '        self._page = page\n'
+                '        self._page.set_default_timeout(self.ACTION_TIMEOUT_MS)\n'
+                '        self._page.set_default_navigation_timeout(self.NAVIGATION_TIMEOUT_MS)\n\n'
+                '    def navigate(self, path: Optional[str] = None) -> None:\n'
+                '        configured_base = os.environ.get("APP_URL", "").strip()\n'
+                '        if not configured_base:\n'
+                '            raise ValueError("APP_URL must be supplied explicitly before navigation")\n'
+                '        base = configured_base.rstrip("/")\n'
+                '        url = base + (path if path.startswith("/") else f"/{path}") if path else configured_base\n'
+                '        self._page.goto(url, timeout=self.NAVIGATION_TIMEOUT_MS)\n\n'
+                '    def click(self, locator: Locator) -> None:\n'
+                '        expect(locator).to_be_visible(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        expect(locator).to_be_enabled(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        locator.click()\n\n'
+                '    def fill(self, locator: Locator, value: str) -> None:\n'
+                '        expect(locator).to_be_visible(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        locator.clear()\n'
+                '        locator.fill(value)\n',
+                encoding="utf-8"
+            )
 
     def apply(self, bundle: Dict[str, Any]) -> List[str]:
         """Apply a parsed pom_bundle to disk.

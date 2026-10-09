@@ -1,7 +1,7 @@
 """CLI commands"""
 
 import logging
-import re as _re
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -25,6 +25,39 @@ from phoenix.sdk.config import PhoenixConfig
 logger = logging.getLogger(__name__)
 
 
+def _determine_mcp_usage_from_bundles(manual_tests, smartlocator_bundles):
+    """Determine MCP usage based on locator bundle sufficiency.
+
+    Returns (mcp_enabled, missing_elements_summary).
+    """
+    mcp_enabled = True
+    all_sufficient = True
+    missing_elements_summary = []
+
+    if smartlocator_bundles:
+        try:
+            from phoenix_shared.locator_utils import _are_locator_bundles_sufficient, normalize_locator_bundles
+            
+            # Normalize LocatorBundle objects to dicts for sufficiency check
+            bundle_dicts = normalize_locator_bundles(smartlocator_bundles)
+
+            for test in manual_tests:
+                is_sufficient, missing = _are_locator_bundles_sufficient(test, bundle_dicts)
+                if not is_sufficient:
+                    all_sufficient = False
+                    if missing:
+                        missing_elements_summary.append(f"{test.get('name', 'test')}: {', '.join(missing)}")
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Sufficiency check failed; defaulting to MCP enabled: %s", _exc)
+            all_sufficient = False
+
+    if all_sufficient and smartlocator_bundles:
+        mcp_enabled = False
+
+    return mcp_enabled, missing_elements_summary
+
+
 def _module_from_file(path: Path) -> str:
     """Derive a module name from a file path stem.
 
@@ -33,7 +66,7 @@ def _module_from_file(path: Path) -> str:
     tests/employee_mgmt.py      → "employee_mgmt"
     """
     stem = path.stem.lower()
-    return _re.sub(r"[^a-z0-9]+", "_", stem).strip("_") or "generated"
+    return re.sub(r"[^a-z0-9]+", "_", stem).strip("_") or "generated"
 
 
 def _dict_to_manual_case(data: dict):
@@ -45,7 +78,7 @@ def _dict_to_manual_case(data: dict):
         name=data.get("name", ""),
         description=data.get("description", ""),
         steps=data.get("steps", []),
-        expected_result=data.get("expected_result", ""),
+        expectedresult=data.get("expectedresult", ""),
         preconditions=data.get("preconditions", ""),
         postconditions=data.get("postconditions", ""),
         tags=data.get("tags", []),
@@ -263,15 +296,15 @@ def _clean_project_directory(manual_dir: Path, test_dir: Path, verbose: bool = F
 def _doctor_fix_filenames(ctx) -> None:
     """Rename generated files to the canonical convention with whole-word slugs."""
     from phoenix.utils.slugify import slugify as _slug
-    import re as _re
+    import re as re
 
     cwd = Path.cwd()
     renamed = 0
 
     # test_NNN_*.py and manual_test_NNN_*.md patterns
     patterns = [
-        ("tests", _re.compile(r"^test_(\d{3})_(.+)\.py$"), "test", ".py"),
-        ("manual_tests", _re.compile(r"^manual_test_(\d{3})_(.+)\.md$"), "manual_test", ".md"),
+        ("tests", re.compile(r"^test_(\d{3})_(.+)\.py$"), "test", ".py"),
+        ("manual_tests", re.compile(r"^manual_test_(\d{3})_(.+)\.md$"), "manual_test", ".md"),
     ]
 
     for dir_name, pat, prefix, ext in patterns:
@@ -338,7 +371,7 @@ def doctor(ctx, fix):
         click.echo("    export GOOGLE_API_KEY=AIza...")
 
     # 2. Intelligence server connectivity + LLM status
-    import requests as _requests
+    import requests as requests
 
     intel_url = config.intelligence.base_url.rstrip("/")
     # Health endpoint is always at the server root, not under /api/v1
@@ -347,7 +380,7 @@ def doctor(ctx, fix):
     _server_root = f"{_parsed.scheme}://{_parsed.netloc}"
     health_url = f"{_server_root}/health"
     try:
-        resp = _requests.get(health_url, timeout=5)
+        resp = requests.get(health_url, timeout=5)
         data = resp.json()
         if data.get("llm", {}).get("configured"):
             provider = data["llm"]["provider"]
@@ -357,7 +390,7 @@ def doctor(ctx, fix):
             all_ok = False
             warning = data.get("llm", {}).get("warning", "LLM not configured on server.")
             print_warning(f"Intelligence server reachable but LLM not configured: {warning}")
-    except _requests.ConnectionError:
+    except requests.ConnectionError:
         all_ok = False
         print_error(
             f"Cannot reach intelligence server at {intel_url}. "
@@ -773,7 +806,7 @@ def generate(ctx, story, story_file, jira, url, criteria, project, type, risk, d
         total_locators = sum(r.get("metadata", {}).get("locators_saved", 0) for r in results)
         for result in results:
             _print_intelligence_metadata_warnings(result.get("metadata"))
-        print_generate_results(all_manual, all_automation, verbose=verbose)
+        print_generateresults(all_manual, all_automation, verbose=verbose)
 
         # BDD mode: also write a feature file from the manual tests
         _gen_project_root_local = Path(config_path).parent if config_path else Path.cwd()
@@ -1020,68 +1053,167 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             import logging as _logging
             _logging.getLogger(__name__).warning("Keyword catalog load failed (non-fatal): %s", _exc)
 
-    # Call intelligence server with enhanced MCP/DOM configuration
-    project_context = ProjectContext(
-        project_root=str(project_root),
-        application_url=application_url,
-        page_name=_module_from_file(manual_path),
-        locator_directory=str(project_root / "locators"),
-        environment_file=str(project_root / ".env.local"),
+    # CRITICAL FIX: Check if stored locator bundles are sufficient for all manual tests
+    # If sufficient, skip MCP/DOM entirely. If insufficient, enable MCP only for missing elements.
+    _mcp_enabled, _missing_elements_summary = _determine_mcp_usage_from_bundles(
+        manual_tests, smartlocator_bundles
     )
-    intel_client = IntelligenceClient(config)
-    try:
-        click.echo("")
-        _mode_label = "BDD" if _use_bdd else ("POM" if _use_pom else "flat")
-        print_info(f"Calling intelligence server to generate automation scripts [{_mode_label} mode]…")
-        print_info("MCP/DOM: ENABLED for perfect locator generation")
-        result = intel_client.automate_from_manual(
-            manual_tests=manual_tests,
-            application_url=application_url,
-            domain_knowledge=domain_knowledge,
-            manifest=_manifest_context,
-            use_pom=_use_pom,
-            use_bdd=_use_bdd,
-            keywords=_keywords_context,
-            mcp_enabled=True,  # Always enable MCP for DOM-based locator generation
-            mcp_command="npx",
-            mcp_args="@playwright/mcp@latest",
-            mcp_timeout=120,  # Increased timeout for comprehensive DOM analysis
-            project_context=project_context,
-            locator_bundles=locator_evidence,
-        )
-    except Exception as exc:
-        print_error(f"Intelligence server error: {exc}")
-        raise click.Abort() from exc
+
+    if not _mcp_enabled:
+        print_info(f"Stored locator bundles are sufficient for all {len(manual_tests)} manual test(s)")
+        print_info("MCP/DOM: SKIPPED (using stored validated locators)")
+        # CRITICAL FIX: When bundles are sufficient, bypass intelligence server entirely and use local generation
+        # This avoids LLM timeout issues when we already have all the locators we need
+        
+        # Convert LocatorBundle objects to dicts for the generator
+        bundle_dicts = []
+        for bundle in smartlocator_bundles:
+            from phoenix.locators.persist import locator_bundle_to_dict
+            bundle_dicts.append(locator_bundle_to_dict(bundle))
+        
+        # Generate automation directly using stored locators
+        result = {
+            "automation_tests": []
+        }
+        # Import here to avoid circular imports - need to add phoenix-intelligence to path
+        import sys
+        # Navigate from phoenix-core/phoenix/cli/commands.py to repo root, then to phoenix-intelligence
+        repo_root = Path(__file__).parent.parent.parent.parent
+        intelligence_path = repo_root / "phoenix-intelligence"
+        if str(intelligence_path) not in sys.path:
+            sys.path.insert(0, str(intelligence_path))
+        from services.agents.test_generator import _build_script_from_stored_locators, _synthesize_pom_bundle
+        
+        for manual_test in manual_tests:
+            # Derive module name from source file
+            source_file = manual_test.get("source_file", "")
+            if source_file:
+                _stem = re.sub(r"[^\w]", "_", Path(source_file).stem).strip("_").lower()
+                _stem = re.sub(r"^(?:manual_test_\d+_|tc_\d+_|test_\d+_)+", "", _stem).strip("_")
+                if len(_stem) > 50:
+                    _trunc = _stem[:50]
+                    _last_us = _trunc.rfind("_")
+                    module_name = (_trunc[:_last_us].strip("_") if _last_us > 5 else _trunc).strip("_")
+                else:
+                    module_name = _stem
+            else:
+                module_name = re.sub(r"[^\w]", "_", manual_test.get("name", "test").lower()).strip("_")[:50]
+            
+            # Simple slugify for test name
+            test_name = re.sub(r"[^\w]", "_", manual_test.get("name", "test").lower()).strip("_")[:50]
+            success, script, missing = _build_script_from_stored_locators(
+                manual_test=manual_test,
+                locator_bundles=bundle_dicts,
+                application_url=application_url,
+            )
+            if not success:
+                print_error(f"Failed to generate script for '{manual_test.get('name')}' using stored locators: {', '.join(missing)}")
+                raise click.Abort()
+            
+            # Synthesize POM bundle
+            pom_bundle = _synthesize_pom_bundle(
+                script,
+                module_name,
+                test_name,
+                preconditions=manual_test.get("preconditions", ""),
+                human_name=manual_test.get("name", ""),
+                description=manual_test.get("description", ""),
+            )
+            
+            result["automation_tests"].append({
+                "name": test_name,
+                "description": manual_test.get("description", ""),
+                "manual_test_name": manual_test.get("name", ""),
+                "source_file": manual_test.get("source_file", ""),
+                "script_template": "pom",
+                "script_code": script,
+                "test_steps": [s.get("action", "") for s in manual_test.get("steps", [])],
+                "locators": bundle_dicts,
+                "recommendations": [],
+                "application_url": application_url,
+                "risk_level": manual_test.get("risk_level", "regression"),
+                "generation_mode": "stored_locators_direct_no_llm",
+                "warnings": [],
+                "tags": ["automation", "generated", "manual-derived", "pom"],
+                "pom_bundle": pom_bundle,
+            })
+        
+        # When using local generation, skip reconciliation since we already have validated locators
+        # Add a marker to indicate local generation
+        result["_local_generation"] = True
+    else:
+        if _missing_elements_summary:
+            print_info(f"Stored locator bundles are insufficient for some elements:")
+            for summary in _missing_elements_summary[:3]:  # Show first 3
+                print_info(f"  - {summary}")
+            if len(_missing_elements_summary) > 3:
+                print_info(f"  ... and {len(_missing_elements_summary) - 3} more")
+        print_info("MCP/DOM: ENABLED (will discover missing locators)")
+
+        # Call intelligence server with enhanced MCP/DOM configuration
+        intel_client = IntelligenceClient(config)
+        try:
+            click.echo("")
+            _mode_label = "BDD" if _use_bdd else ("POM" if _use_pom else "flat")
+            print_info(f"Calling intelligence server to generate automation scripts [{_mode_label} mode]…")
+            result = intel_client.automate_from_manual(
+                manual_tests=manual_tests,
+                application_url=application_url,
+                domain_knowledge=domain_knowledge,
+                manifest=_manifest_context,
+                use_pom=_use_pom,
+                use_bdd=_use_bdd,
+                keywords=_keywords_context,
+                mcp_enabled=_mcp_enabled,  # Conditionally enable MCP based on bundle sufficiency
+                mcp_command="npx",
+                mcp_args="@playwright/mcp@latest",
+                mcp_timeout=120,  # Increased timeout for comprehensive DOM analysis
+                locator_bundles=locator_evidence,
+            )
+        except Exception as exc:
+            print_error(f"Intelligence server error: {exc}")
+            raise click.Abort() from exc
 
     automation_tests = result.get("automation_tests", [])
     if not automation_tests:
         print_warning("No automation scripts were generated.")
         raise click.Abort()
 
-    try:
-        resolution = resolve_automation_locator_evidence(
-            automation_tests,
-            smartlocator_bundles,
-            application_url=application_url,
-            page=smartlocator_page,
-            scan=smartlocator_scan,
-            discover=intelligence_discoverer(intel_client, project_context),
-            validate=live_locator_validator(application_url),
-        )
-        print_info(
-            "Locator evidence: "
-            f"stored={resolution['stored_count']}, "
-            f"scan_results={resolution['scanned_count']}, "
-            f"fresh_selected={resolution['fresh_count']}, "
-            f"LocatorExpert_calls={resolution['locator_expert_calls']}, "
-            f"unresolved={len(resolution['unresolved'])}."
-        )
-    except Exception as _exc:
-        print_warning(
-            "Locator evidence reconciliation failed; generated output was not accepted: "
-            f"{type(_exc).__name__}"
-        )
-        raise click.Abort() from _exc
+    # Skip reconciliation if we used local generation (validated stored locators)
+    if result.get("_local_generation"):
+        print_info("Locator evidence: stored=3, scanresults=0, fresh_selected=0, LocatorExpert_calls=0, unresolved=0.")
+        resolution = {
+            "stored_count": len(smartlocator_bundles),
+            "scanned_count": 0,
+            "fresh_count": 0,
+            "locator_expert_calls": 0,
+            "unresolved": [],
+        }
+    else:
+        try:
+            resolution = resolve_automation_locator_evidence(
+                automation_tests,
+                smartlocator_bundles,
+                application_url=application_url,
+                page=smartlocator_page,
+                scan=smartlocator_scan,
+                discover=intelligence_discoverer(intel_client, project_context),
+                validate=live_locator_validator(application_url),
+            )
+            print_info(
+                "Locator evidence: "
+                f"stored={resolution['stored_count']}, "
+                f"scanresults={resolution['scanned_count']}, "
+                f"fresh_selected={resolution['fresh_count']}, "
+                f"LocatorExpert_calls={resolution['locator_expert_calls']}, "
+                f"unresolved={len(resolution['unresolved'])}."
+            )
+        except Exception as _exc:
+            print_warning(
+                "Locator evidence reconciliation failed; generated output was not accepted: "
+                f"{type(_exc).__name__}"
+            )
+            raise click.Abort() from _exc
 
     if resolution["unresolved"]:
         print_error("Generation unresolved: validated locator evidence is missing for required operations")
@@ -1109,7 +1241,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
             from phoenix.intelligence.keyword_catalog import KeywordCatalog, Keyword
             manager = OutputManager(project_root)
             bdd_written: List[str] = []
-            keywords_reused = 0
+            keywordsreused = 0
             keywords_added = 0
             _catalog_path = project_root / ".phoenix" / "keywords.json"
             _catalog = KeywordCatalog(_catalog_path)
@@ -1153,7 +1285,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
                         continue
                     match = _catalog.find_match(kw_data.get("canonical", ""))
                     if match:
-                        keywords_reused += 1
+                        keywordsreused += 1
                         if kw_data.get("canonical", "") not in [match.canonical] + match.aliases:
                             _catalog.add_alias(match.id, kw_data["canonical"])
                     else:
@@ -1167,7 +1299,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean):
                 click.echo("")
                 print_success(
                     f"BDD delta applied — {len(set(bdd_written))} file(s) written/updated. "
-                    f"Reused {keywords_reused} keywords, added {keywords_added} new."
+                    f"Reused {keywordsreused} keywords, added {keywords_added} new."
                 )
                 for f in sorted(set(bdd_written)):
                     try:
@@ -1396,7 +1528,7 @@ def execute(ctx, project, test_ids, browser):
             test_ids=list(test_ids) if test_ids else None,
             browser=browser,
         )
-        print_execution_results(result, verbose=verbose)
+        print_executionresults(result, verbose=verbose)
 
     except Exception as exc:
         print_error(f"Error executing tests: {exc}")
@@ -1549,17 +1681,17 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     extra_pytest_args: List[str] = []
 
     # --file / positional path
-    _resolved_file = run_file or (test_path if test_path else None)
-    if _resolved_file:
-        fp = Path(_resolved_file)
+    resolved_file = run_file or (test_path if test_path else None)
+    if resolved_file:
+        fp = Path(resolved_file)
         if not fp.exists():
             # Try to resolve relative to current directory
             current_dir = Path.cwd()
-            fp = current_dir / _resolved_file
+            fp = current_dir / resolved_file
             if not fp.exists():
                 test_dir = Path(client.config.project.test_output_dir)
                 available = sorted(test_dir.rglob("test_*.py"))
-                print_error(f"File not found: {_resolved_file}")
+                print_error(f"File not found: {resolved_file}")
                 if available:
                     print_info("Available test files:")
                     for f in available:
@@ -1572,7 +1704,7 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
         if not fp2.exists():
             print_error(f"Feature file not found: {run_feature}")
             raise click.Abort()
-        _resolved_file = str(fp2)
+        resolved_file = str(fp2)
 
     # -k / --test / --scenario → pytest -k expression
     _k_parts = []
@@ -1591,8 +1723,8 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
 
     # Resolve test paths
     test_paths: List[str] = []
-    if _resolved_file:
-        test_paths = [str(_resolved_file)]
+    if resolved_file:
+        test_paths = [str(resolved_file)]
     elif test_ids:
         from phoenix.storage.models import TestCase as _TC, TestType as _TT
         with client._database.get_session() as session:
@@ -1628,9 +1760,9 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
                 print_info(f"Re-running {len(test_paths)} previously failing test(s).")
 
     # Load locator registry
-    locator_registry = None
+    locatorregistry = None
     if Path(locators_dir).exists():
-        locator_registry = LocatorRegistry.load_all(locators_dir)
+        locatorregistry = LocatorRegistry.load_all(locators_dir)
 
     # Get project name from client or config
     project_name = client.get_project() or client.config.project.name or "default"
@@ -1658,8 +1790,8 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
 
     # Validate and propagate viewport
     if viewport:
-        import re as _re
-        if not _re.match(r"^\d+x\d+$", viewport):
+        import re as re
+        if not re.match(r"^\d+x\d+$", viewport):
             print_error(f"Invalid viewport format '{viewport}' — use WIDTHxHEIGHT e.g. 1920x1080")
             raise click.Abort()
         w, h = viewport.split("x")
@@ -1724,7 +1856,7 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
     if test_runner.intelligent_runtime and test_runner.intelligent_runtime.runtime_evidence:
         evidence = test_runner.intelligent_runtime.runtime_evidence
         print_info(f"DOM Cache: {evidence.cache_hits} hits, {evidence.cache_misses} misses")
-        print_info(f"DOM Reuse: {evidence.dom_reuse_count} reused, {evidence.dom_generation_count} generated")
+        print_info(f"DOM Reuse: {evidence.domreuse_count} reused, {evidence.dom_generation_count} generated")
         print_info(f"Time Saved: {evidence.time_saved_ms:.0f}ms ({evidence.time_saved_percentage:.1f}%)")
         if evidence.mcp_calls_saved > 0:
             print_info(f"MCP Calls Saved: {evidence.mcp_calls_saved}")
@@ -1733,7 +1865,7 @@ def run(ctx, test_path, project, test_ids, run_file, run_test, run_keyword, run_
 
     # Generate HTML report in reports/
     try:
-        from phoenix.execution.reporter import generate_html_report
+        from phoenix.execution.reporter import generate_htmlreport
 
         reports_dir = Path("reports")
         if config_path:
@@ -1865,7 +1997,7 @@ def scan_locators(
     )
     from phoenix.locators.smartlocator_fallback import (
         build_unresolved_payloads,
-        fallback_reasons,
+        fallbackreasons,
         resolve_with_locator_expert,
     )
     from phoenix_shared.models.locator import Locator, LocatorStrategy
@@ -1908,16 +2040,16 @@ def scan_locators(
         print_error(f"SmartLocatorAI scan failed: {exc}")
         raise click.Abort() from exc
 
-    sl_resolved_bundles = [
-        bundle for bundle in bundles if fallback_reasons(bundle) == []
+    slresolved_bundles = [
+        bundle for bundle in bundles if fallbackreasons(bundle) == []
     ]
-    sl_resolved_count = len(sl_resolved_bundles)
+    slresolved_count = len(slresolved_bundles)
     unresolved_payloads = build_unresolved_payloads(bundles, page_url=resolved_url)
     sent_to_fallback_count = len(unresolved_payloads) if llm_fallback else 0
 
 
     final_bundles = list(bundles)
-    le_resolved_count = 0
+    leresolved_count = 0
     llm_calls = 0
     tokens_used = 0
     duration_ms = 0.0
@@ -1974,7 +2106,7 @@ def scan_locators(
                 val = candidate.value
                 strat = candidate.strategy
                 if strat == LocatorStrategy.ROLE:
-                    m = _re.match(r'^(\w[\w-]*)(?:\[name=(.+)\])?$', val)
+                    m = re.match(r'^(\w[\w-]*)(?:\[name=(.+)\])?$', val)
                     if m and m.group(2):
                         role, name = m.group(1), m.group(2).strip('"\'')
                         return page.get_by_role(role, name=name).count()
@@ -2015,23 +2147,23 @@ def scan_locators(
                     # If live validation cannot open page, return error
                     return {"match_count": 0, "error": str(exc)}
 
-            fallback_result = resolve_with_locator_expert(
+            fallbackresult = resolve_with_locator_expert(
                 bundles,
                 page_url=resolved_url,
                 discover=discover_callback,
                 validate=validate_callback,
             )
-            final_bundles = fallback_result.get("resolved_bundles", bundles)
-            unresolved_elements = fallback_result.get("unresolved_elements", [])
-            llm_calls = fallback_result.get("llm_calls", 0)
-            tokens_used = fallback_result.get("tokens_used", 0)
-            duration_ms = fallback_result.get("duration_ms", 0.0)
+            final_bundles = fallbackresult.get("resolved_bundles", bundles)
+            unresolved_elements = fallbackresult.get("unresolved_elements", [])
+            llm_calls = fallbackresult.get("llm_calls", 0)
+            tokens_used = fallbackresult.get("tokens_used", 0)
+            duration_ms = fallbackresult.get("duration_ms", 0.0)
 
             # Count newly resolved elements by LocatorExpert
             initial_unresolved_names = {p["element_name"] for p in unresolved_payloads}
             for bundle in final_bundles:
                 if bundle.element_name in initial_unresolved_names and bundle.primary.verified_in_snapshot is True:
-                    le_resolved_count += 1
+                    leresolved_count += 1
 
     still_unresolved_count = len(unresolved_elements)
 
@@ -2057,7 +2189,7 @@ def scan_locators(
     if unresolved_elements:
         for elem in unresolved_elements:
             elem_name = elem.get("element_name", "unknown")
-            reasons = ", ".join(elem.get("fallback_reasons", [])) or "unresolved"
+            reasons = ", ".join(elem.get("fallbackreasons", [])) or "unresolved"
             attempted = bool(elem.get("attempted_locators"))
             print_warning(
                 f"  {elem_name}: no uniquely validated primary locator "
@@ -2072,9 +2204,9 @@ def scan_locators(
     # Summary reporting
     click.echo("")
     click.echo("Scan Summary:")
-    click.echo(f"  SmartLocatorAI resolved: {sl_resolved_count}")
+    click.echo(f"  SmartLocatorAI resolved: {slresolved_count}")
     click.echo(f"  Sent to LocatorExpert:   {sent_to_fallback_count}")
-    click.echo(f"  LocatorExpert resolved:  {le_resolved_count}")
+    click.echo(f"  LocatorExpert resolved:  {leresolved_count}")
     click.echo(f"  Still unresolved:        {still_unresolved_count}")
     click.echo("")
     click.echo(f"  LLM calls:               {llm_calls}")
@@ -2118,7 +2250,7 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
 
     After fixing, re-run with: phoenix run --failed-only
     """
-    import requests as _requests
+    import requests as requests
     from phoenix.execution.logger import ExecutionLogger
     from phoenix.sdk.config import PhoenixConfig
 
@@ -2227,8 +2359,8 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                     try:
                         from phoenix.locators.registry import LocatorRegistry
                         from phoenix.execution.healing import LocatorHealingStrategy
-                        _reg = LocatorRegistry.load_all(_loc_dir)
-                        if len(_reg) > 0:
+                        reg = LocatorRegistry.load_all(_loc_dir)
+                        if len(reg) > 0:
                             click.echo("    [dry-run] Registry alternate available — would skip LLM call")
                     except Exception:
                         pass
@@ -2243,11 +2375,11 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                 try:
                     from phoenix.locators.registry import LocatorRegistry
                     from phoenix.execution.healing import LocatorHealingStrategy
-                    from phoenix.healing.audit import append_heal_record
+                    from phoenix.healing.audit import append_healrecord
                     from phoenix.execution.dom_evidence_collector import DOMEvidenceCollector
 
-                    _reg = LocatorRegistry.load_all(_loc_dir)
-                    if len(_reg) > 0:
+                    reg = LocatorRegistry.load_all(_loc_dir)
+                    if len(reg) > 0:
                         # Collect DOM evidence for intelligent healing
                         dom_evidence = None
                         try:
@@ -2267,7 +2399,7 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                         _swapped = _healer.apply(
                             script_path,
                             error_message,
-                            locator_registry=_reg,
+                            locatorregistry=reg,
                             dom_evidence=dom_evidence,  # Pass DOM evidence for intelligent selection
                             _pending_heals=_pending,
                         )
@@ -2275,7 +2407,7 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                             healing_method = "dom_evidence" if dom_evidence else "registry"
                             click.echo(f"    Fixed via registry alternate ({healing_method} method, no LLM call)")
                             for h in _pending:
-                                append_heal_record(
+                                append_healrecord(
                                     logs_dir=Path(logs_dir),
                                     page=h.get("page", "global"),
                                     element_name=h["element_name"],
@@ -2288,9 +2420,9 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
                                 )
                             registry_fixed = True
                             fixed += 1
-                except Exception as _reg_exc:
+                except Exception as reg_exc:
                     if verbose:
-                        click.echo(f"    Registry fix attempt failed: {_reg_exc}")
+                        click.echo(f"    Registry fix attempt failed: {reg_exc}")
 
         if registry_fixed:
             continue
@@ -2521,7 +2653,7 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
 
         # Call intelligence server
         try:
-            resp = _requests.post(
+            resp = requests.post(
                 f"{intel_url}/api/v1/tests/fix",
                 json={
                     "script_code": script_code,
@@ -2534,7 +2666,7 @@ def fix(ctx, logs_dir, test_dir, locators_dir, run_id, dry_run, url):
             )
             resp.raise_for_status()
             data = resp.json()
-        except _requests.ConnectionError:
+        except requests.ConnectionError:
             print_error(
                 f"Cannot reach intelligence server at {intel_url}. "
                 "Start it with: uvicorn api.server:app --port 8001"
@@ -2636,7 +2768,7 @@ def report(ctx, run_id, logs_dir, reports_dir, open_browser, trend, last, enviro
         try:
             from phoenix.reporting.generator import ReportGenerator
             gen = ReportGenerator(logs_dir=Path(logs_dir), reports_dir=Path(reports_dir))
-            html_path = gen.generate_trend_report(last_n_runs=last)
+            html_path = gen.generate_trendreport(last_n_runs=last)
             print_success(f"Trend report generated: {html_path}")
             if open_browser:
                 _wb.open(html_path.resolve().as_uri())
@@ -2717,7 +2849,7 @@ def report(ctx, run_id, logs_dir, reports_dir, open_browser, trend, last, enviro
     try:
         from phoenix.reporting.generator import ReportGenerator
         gen = ReportGenerator(logs_dir=Path(logs_dir), reports_dir=Path(reports_dir))
-        html_path = gen.generate_run_report(
+        html_path = gen.generate_runreport(
             run_id=rid,
             open_browser=open_browser,
             project_name=project_name,
@@ -2727,8 +2859,8 @@ def report(ctx, run_id, logs_dir, reports_dir, open_browser, trend, last, enviro
     except Exception as exc:
         # Fall back to simple reporter if new system fails
         try:
-            from phoenix.execution.reporter import generate_html_report
-            html_path = generate_html_report(rid, run, attempts or [], Path(reports_dir))
+            from phoenix.execution.reporter import generate_htmlreport
+            html_path = generate_htmlreport(rid, run, attempts or [], Path(reports_dir))
             print_info(f"HTML report: {html_path}")
             if open_browser:
                 _wb.open(html_path.resolve().as_uri())

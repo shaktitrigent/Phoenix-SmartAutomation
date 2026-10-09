@@ -42,11 +42,6 @@ def resolve_config_path(
 
 def _load_toml(path: Path) -> Dict[str, Any]:
     """Load a TOML file using stdlib tomllib (3.11+) or the tomli back-port."""
-    print("[DEBUG] ===== _load_toml() called =====")
-    print("[DEBUG] filepath:", path)
-    print("[DEBUG] filepath.resolve():", path.resolve())
-    print("[DEBUG] filepath.exists():", path.exists())
-    
     if sys.version_info >= (3, 11):
         import tomllib
 
@@ -196,28 +191,16 @@ class PhoenixConfig(BaseModel):
     @classmethod
     def from_file(cls, config_path: Optional[str] = None) -> "PhoenixConfig":
         """Load configuration from a TOML (.phoenixrc) or YAML file."""
-        print("[DEBUG] ===== PhoenixConfig.from_file() called =====")
-        print("[DEBUG] Caller stack:")
-        traceback.print_stack()
-        print("[DEBUG] config_path parameter:", config_path)
-        
         config_path = resolve_config_path(config_path)
 
         if config_path is None or not Path(config_path).exists():
-            print("[DEBUG] No config file found, loading from environment")
             return cls.from_env()
 
         cfg_path = Path(config_path)
-        print("[DEBUG] from_file path:", cfg_path)
-        print("[DEBUG] cfg_path.resolve():", cfg_path.resolve())
-        print("[DEBUG] File suffix:", cfg_path.suffix)
-        print("[DEBUG] File name:", cfg_path.name)
         if cfg_path.suffix == "" or cfg_path.name == ".phoenixrc":
             # Treat as TOML
-            print("[DEBUG] Loading as TOML")
             config_data: Dict[str, Any] = _load_toml(cfg_path)
         else:
-            print("[DEBUG] Loading as YAML")
             with open(cfg_path, "r", encoding="utf-8") as f:
                 config_data = yaml.safe_load(f) or {}
 
@@ -263,8 +246,4 @@ class PhoenixConfig(BaseModel):
         If *config_path* is None, auto-discover `phoenix.yaml` or `config.yaml`
         in the current directory or its parent directory.
         """
-        print("[DEBUG] config_path:", config_path)
-        print("[DEBUG] cwd:", Path.cwd())
-        if config_path is None:
-            print("[DEBUG] Auto discovering config...")
         return cls.from_file(config_path)

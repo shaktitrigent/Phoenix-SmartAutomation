@@ -126,6 +126,7 @@ preflight/_sandbox/
 .pytest_cache/
 __pycache__/
 # Local verification artifacts
+mvp-evidence/
 dashboard_verification.png
 login_page_verification.png
 test_dom_snapshot.png

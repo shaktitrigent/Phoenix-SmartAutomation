@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from pathlib import Path
 import sys
@@ -25,6 +27,8 @@ def test_scan_persists_only_uniquely_validated_bundles(monkeypatch, tmp_path):
                 "locator_type": "CSS Selector",
                 "locator_value": "#username",
                 "validated": True,
+                "identity_matches": True,
+                "stability": "High",
                 "match_count": 1,
                 "recommended": True,
                 "element_data": {"tag": "input", "id": "username"},
@@ -177,7 +181,7 @@ def test_scan_with_llm_fallback_enabled(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
 
     fallback_called = []
-    def fake_resolve(bundles_in, page_url, discover, validate):
+    def fake_resolve(bundles_in, page_url, discover, validate, **kwargs):
         fallback_called.append((bundles_in, page_url))
         # Simulate LLM returning a valid candidate (match_count == 1)
         response = {
@@ -238,7 +242,7 @@ def test_scan_llm_fallback_rejects_ambiguous_and_invalid(monkeypatch, tmp_path):
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
 
-    def fake_resolve(bundles_in, page_url, discover, validate):
+    def fake_resolve(bundles_in, page_url, discover, validate, **kwargs):
         return {
             "resolved_bundles": [],
             "unresolved_elements": [{
@@ -282,6 +286,8 @@ def test_repeated_scans_do_not_duplicate_locators(tmp_path):
             "locator_type": "CSS Selector",
             "locator_value": "#submit",
             "validated": True,
+                "identity_matches": True,
+                "stability": "High",
             "match_count": 1,
         }
     ], page="checkout")
@@ -315,6 +321,8 @@ def test_registry_reload_preserves_bundle_integrity(tmp_path):
                 "locator_type": "CSS Selector",
                 "locator_value": "#user",
                 "validated": True,
+                "identity_matches": True,
+                "stability": "High",
             },
             "context_strategy": "role-first",
             "stability_category": "stable",
@@ -332,3 +340,20 @@ def test_registry_reload_preserves_bundle_integrity(tmp_path):
     assert reloaded.primary.verified_in_snapshot is True
     assert reloaded.metadata["context_strategy"] == "role-first"
 
+
+
+@pytest.fixture(autouse=True)
+def injected_cli_browser_session(monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from phoenix.locators import smartlocator_integration as integration
+    @contextmanager
+    def session(*args, **kwargs):
+        yield SimpleNamespace(
+            scan=lambda *a, **kw: integration.generate_smartlocator_bundles(*a, **kw),
+            revalidate=lambda bundles: bundles,
+            generation_snapshot=lambda: "<body>Current request state</body>",
+            validate=lambda candidate,payload: {"match_count":0,"identity_matches":False},
+            capture=lambda payload,round_number: {"capture_status":"captured","context_fingerprint":str(round_number)},
+        )
+    monkeypatch.setattr("phoenix.locators.live_session.live_session",session)

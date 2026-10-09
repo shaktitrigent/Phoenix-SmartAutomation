@@ -255,3 +255,20 @@ def test_api_route_forwards_context_without_changing_legacy_calls(
         assert kwargs["project_context"] == context
     else:
         assert "project_context" not in kwargs
+
+
+@pytest.fixture(autouse=True)
+def injected_cli_browser_session(monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from phoenix.locators import smartlocator_integration as integration
+    @contextmanager
+    def session(*args, **kwargs):
+        yield SimpleNamespace(
+            scan=lambda *a, **kw: integration.generate_smartlocator_bundles(*a, **kw),
+            revalidate=lambda bundles: bundles,
+            generation_snapshot=lambda: "<body>Current request state</body>",
+            validate=lambda candidate,payload: {"match_count":0,"identity_matches":False},
+            capture=lambda payload,round_number: {"capture_status":"captured","context_fingerprint":str(round_number)},
+        )
+    monkeypatch.setattr("phoenix.locators.live_session.live_session",session)

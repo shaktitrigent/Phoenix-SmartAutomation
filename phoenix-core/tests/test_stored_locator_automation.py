@@ -21,13 +21,11 @@ def _bundle(verified=True):
         "page": "login",
         "primary": {
             "element_name": "LoginButton", "strategy": "css", "value": "#login",
-            "confidence": 0.9, "verified_in_snapshot": verified,
-        },
+            "confidence": 0.9, "verified_in_snapshot": verified, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "alternates": [{
             "element_name": "LoginButton", "strategy": "role",
             "value": "button[name=Login]", "confidence": 0.8,
-            "verified_in_snapshot": True,
-        }],
+            "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}}],
         "metadata": {"context_strategy": "form"},
     }
 
@@ -199,8 +197,7 @@ def test_action_sentence_matches_context_qualified_login_email_and_not_signup_em
         "primary": {
             "strategy": "context",
             "value": '''page.locator("div").filter({ hasText: "Login to your account" }).locator("form").filter({ hasText: "Login" }).locator("input[name='email']")''',
-            "verified_in_snapshot": True,
-        },
+            "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "metadata": {
             "element_identity": "login-email-identity",
             "element_data": {
@@ -213,8 +210,7 @@ def test_action_sentence_matches_context_qualified_login_email_and_not_signup_em
     signup_email = {
         "element_name": "EmailAddressInput_Signup",
         "primary": {
-            "strategy": "css", "value": "#signup-email", "verified_in_snapshot": True,
-        },
+            "strategy": "css", "value": "#signup-email", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "metadata": {
             "element_identity": "signup-email-identity",
             "element_data": {
@@ -236,7 +232,7 @@ def test_action_sentence_matches_context_qualified_login_email_and_not_signup_em
 def test_login_button_action_sentence_matches_login_button_bundle():
     login_button = {
         "element_name": "LoginButton",
-        "primary": {"strategy": "css", "value": "#login-button", "verified_in_snapshot": True},
+        "primary": {"strategy": "css", "value": "#login-button", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "metadata": {
             "element_identity": "login-button-identity",
             "element_data": {"tag": "button", "text": "Login"},
@@ -254,8 +250,7 @@ def test_context_chain_converts_to_python_and_is_inserted_into_generated_code():
         "element_name": "EmailAddressInput_Login",
         "primary": {
             "strategy": "context", "value": context_value,
-            "verified_in_snapshot": True,
-        },
+            "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "metadata": {
             "element_identity": "login-email-identity",
             "element_data": {
@@ -284,7 +279,7 @@ def test_context_chain_converts_to_python_and_is_inserted_into_generated_code():
 def test_null_primary_without_validated_alternate_is_not_usable():
     item = {
         "element_name": "EmailAddressInput_Login",
-        "primary": {"strategy": "css", "value": None, "verified_in_snapshot": True},
+        "primary": {"strategy": "css", "value": None, "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "alternates": [],
         "metadata": {"element_identity": "login-email-identity"},
     }
@@ -295,7 +290,7 @@ def test_null_primary_without_validated_alternate_is_not_usable():
 def test_password_input_stored_primary_regression():
     password = {
         "element_name": "PasswordInput",
-        "primary": {"strategy": "css", "value": "[name='password']", "verified_in_snapshot": True},
+        "primary": {"strategy": "css", "value": "[name='password']", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "metadata": {
             "element_identity": "password-identity",
             "element_data": {"tag": "input", "type": "password", "name": "password"},
@@ -308,7 +303,7 @@ def test_password_input_stored_primary_regression():
 def test_semantic_matching_is_domain_agnostic_for_unbranded_elements():
     address = {
         "element_name": "ShippingAddressInput",
-        "primary": {"strategy": "css", "value": "#shipping-address", "verified_in_snapshot": True},
+        "primary": {"strategy": "css", "value": "#shipping-address", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
         "metadata": {
             "element_identity": "shipping-address-identity",
             "element_data": {
@@ -330,7 +325,7 @@ def test_all_login_elements_resolve_without_scan_or_locator_expert():
             "strategy": "context",
             "value": '''page.locator("div").filter({ hasText: "Login to your account" }).locator("form").filter({ hasText: "Login" }).locator("input[name='email']")''',
             "verified_in_snapshot": True,
-            "metadata": {"locator_source": "stored_primary"},
+            "metadata": {"locator_source": "stored_primary", 'match_count':1, 'identity_matches':True, 'stability':'High'},
         },
         "metadata": {
             "element_identity": "login-email-identity",
@@ -346,7 +341,7 @@ def test_all_login_elements_resolve_without_scan_or_locator_expert():
         "element_name": "PasswordInput",
         "primary": {
             "strategy": "css", "value": "[name='password']", "verified_in_snapshot": True,
-            "metadata": {"locator_source": "stored_primary"},
+            "metadata": {"locator_source": "stored_primary", 'match_count':1, 'identity_matches':True, 'stability':'High'},
         },
         "metadata": {
             "element_identity": "password-identity", "locator_source": "stored_primary",
@@ -357,7 +352,7 @@ def test_all_login_elements_resolve_without_scan_or_locator_expert():
         "element_name": "LoginButton",
         "primary": {
             "strategy": "css", "value": "#login-button", "verified_in_snapshot": True,
-            "metadata": {"locator_source": "stored_primary"},
+            "metadata": {"locator_source": "stored_primary", 'match_count':1, 'identity_matches':True, 'stability':'High'},
         },
         "metadata": {
             "element_identity": "login-button-identity", "locator_source": "stored_primary",
@@ -424,7 +419,7 @@ def test_output_manager_reconciles_actual_email_or_chain_and_login_button(tmp_pa
     stored = [
         {
             "element_name": "EmailAddressInput_Login",
-            "primary": {"strategy": "context", "value": email_context, "verified_in_snapshot": True},
+            "primary": {"strategy": "context", "value": email_context, "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
             "alternates": [],
             "metadata": {
                 "element_identity": "login-email-identity",
@@ -438,7 +433,7 @@ def test_output_manager_reconciles_actual_email_or_chain_and_login_button(tmp_pa
         },
         {
             "element_name": "EmailAddressInput_Signup",
-            "primary": {"strategy": "css", "value": "#signup-email", "verified_in_snapshot": True},
+            "primary": {"strategy": "css", "value": "#signup-email", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
             "alternates": [],
             "metadata": {
                 "element_identity": "signup-email-identity",
@@ -452,7 +447,7 @@ def test_output_manager_reconciles_actual_email_or_chain_and_login_button(tmp_pa
         },
         {
             "element_name": "PasswordInput",
-            "primary": {"strategy": "css", "value": "[name='password']", "verified_in_snapshot": True},
+            "primary": {"strategy": "css", "value": "[name='password']", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
             "alternates": [],
             "metadata": {
                 "element_identity": "password-identity",
@@ -462,7 +457,7 @@ def test_output_manager_reconciles_actual_email_or_chain_and_login_button(tmp_pa
         },
         {
             "element_name": "LoginButton",
-            "primary": {"strategy": "role", "value": "button[name=Login]", "verified_in_snapshot": True},
+            "primary": {"strategy": "role", "value": "button[name=Login]", "verified_in_snapshot": True, 'metadata': {'match_count': 1, 'identity_matches': True, 'stability': 'High'}},
             "alternates": [],
             "metadata": {
                 "element_identity": "login-button-identity",
@@ -514,7 +509,7 @@ def test_output_manager_reconciles_actual_email_or_chain_and_login_button(tmp_pa
     assert "filter(has_text='Login')" in final_page
     assert "input[name='email']" in final_page
     assert "[name='password']" in final_page
-    assert "get_by_role('button', name='Login')" in final_page
+    assert "get_by_role('button', name='Login')" in ast.unparse(ast.parse(final_page))
     assert ".or_(" not in final_page
     assert "#signup-email" not in final_page
     assert {item["source"] for item in tests[0]["locator_provenance"]} == {"stored_primary"}
@@ -568,7 +563,7 @@ def test_persist_merge_preserves_validated_bundle_when_legacy_selector_collides(
             "value": "#login-button",
             "confidence": 1.0,
             "verified_in_snapshot": True,
-            "metadata": {"locator_source": "stored_primary"},
+            "metadata": {"locator_source": "stored_primary", 'match_count':1, 'identity_matches':True, 'stability':'High'},
         },
         "alternates": [],
         "metadata": {"locator_source": "stored_primary"},
@@ -599,7 +594,7 @@ def test_persist_merge_keeps_provenance_on_equal_validated_primary():
             "strategy": "css",
             "value": "#user-name",
             "verified_in_snapshot": True,
-            "metadata": {"validated": True},
+            "metadata": {"validated": True, 'match_count':1, 'identity_matches':True, 'stability':'High'},
         },
         "alternates": [],
         "metadata": {"element_identity": "username-identity"},
@@ -711,7 +706,7 @@ def test_partial_coverage_scans_and_selects_only_unresolved_element():
         "match_count": 1,
         "recommended": True,
         "element_data": {"tag": "input", "id": "user-name", "aria-label": "Username"},
-    }], page="login")
+     'identity_matches': True, 'stability': 'High', 'stability_score': 9}], page="login")
     scan_results = convert_locators([
         {
             "custom_name": "UsernameInput",
@@ -721,7 +716,7 @@ def test_partial_coverage_scans_and_selects_only_unresolved_element():
             "match_count": 1,
             "recommended": True,
             "element_data": {"tag": "input", "id": "scanned-user"},
-        },
+         'identity_matches': True, 'stability': 'High', 'stability_score': 9},
         {
             "custom_name": "PurchaseButton",
             "locator_type": "CSS Selector",
@@ -730,7 +725,7 @@ def test_partial_coverage_scans_and_selects_only_unresolved_element():
             "match_count": 1,
             "recommended": True,
             "element_data": {"tag": "button", "id": "purchase", "text": "Purchase"},
-        },
+         'identity_matches': True, 'stability': 'High', 'stability_score': 9},
     ], page="login")
     tests = [{
         "script_code": (
@@ -775,7 +770,7 @@ def test_locator_expert_receives_only_unresolved_and_provenance_persists(tmp_pat
         "match_count": 1,
         "recommended": True,
         "element_data": {"tag": "input", "id": "user-name", "aria-label": "Username"},
-    }], page="login")
+     'identity_matches': True, 'stability': 'High', 'stability_score': 9}], page="login")
     tests = [{
         "script_code": (
             'def checkout(page):\n'
@@ -797,7 +792,9 @@ def test_locator_expert_receives_only_unresolved_and_provenance_persists(tmp_pat
         validate=lambda *_args: {"match_count": 1, "identity_matches": True},
     )
 
-    assert [payload["element_name"] for payload in expert_targets] == ["Purchase button"]
+    # element_name is sanitized to hash when no element_identity/id exists
+    # original_element_name preserves the original for reference
+    assert [payload.get("original_element_name", payload["element_name"]) for payload in expert_targets] == ["Purchase button"]
     assert result["locator_expert_calls"] == 1
     assert result["unresolved"] == []
     assert "#purchase" in tests[0]["script_code"]

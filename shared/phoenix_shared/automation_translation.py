@@ -275,6 +275,10 @@ def step_coverage(script: str, steps: list) -> dict:
     first_blocking_line = None
     unreachable_operations = 0
     tests = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name.startswith("test_")]
+    for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+        tests.extend(n for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and not n.name.startswith('_') and n.name not in {'configure_page', 'navigate', 'click', 'fill'}
+                     and not n.name.endswith('_ready'))
     for fn in tests:
         blocked = False
         for statement in fn.body:
@@ -295,7 +299,11 @@ def step_coverage(script: str, steps: list) -> dict:
                 kind = {"fill_ready": "fill", "click_ready": "click", "assert_contract": "expect"}.get(name, name)
                 if name.startswith(("to_", "not_to_")):
                     kind = "expect"
-                if kind not in _ACTIONS:
+                # Handle page.goto() as a goto operation - special case for navigation
+                if name == "goto" and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "page":
+                    # This is a valid page.goto() call - count it as goto even though "goto" isn't in _ACTIONS
+                    kind = "goto"
+                elif kind not in _ACTIONS:
                     continue
                 if kind == "expect" and name != "assert_contract" and (name == "expect" or "locator('body')" in ast.unparse(node) or 'locator("body")' in ast.unparse(node)):
                     continue
@@ -314,7 +322,13 @@ def step_coverage(script: str, steps: list) -> dict:
         for part in parts:
             words = set(re.findall(r"[a-z0-9]+", part.lower()))
             kinds = {kind for kind, aliases in _ACTIONS.items() if words & aliases}
-            meaningful = words - _FILLER - set().union(*_ACTIONS.values())
+            # Remove action keywords from meaningful tokens, but keep the action kind itself for matching
+            all_action_keywords = set().union(*_ACTIONS.values())
+            meaningful = words - _FILLER - all_action_keywords
+            # For goto operations, be more permissive - match on URL/domain tokens
+            if "goto" in kinds:
+                # Use URL tokens instead of removing all action keywords
+                meaningful = words - _FILLER
             found = next((i for i, (kind, tokens) in enumerate(operations)
                           if i not in consumed | pending and kind in kinds and meaningful & tokens), None)
             if found is None:

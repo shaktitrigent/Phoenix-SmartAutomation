@@ -128,7 +128,7 @@ def test_journey_fallback_is_scoped_and_rejects_unique_wrong_message(tmp_path, m
             result = capture_journey('https://fixture.test', states, tmp_path/'raw',
                                      tmp_path/'locators', values={}, discover=discover)
             assert len(calls) == 1
-            assert calls[0]['element_name'] == 'AccountRequired'
+            assert calls[0]['original_element_name'] == 'AccountRequired'
             assert calls[0]['state_name'] == 'validation'
             saved = list(LocatorRegistry.load_page(tmp_path/'locators/validation.json'))
             required = next(b for b in saved if b.element_name == 'AccountRequired')

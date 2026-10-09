@@ -14,6 +14,12 @@ def physical_key(bundle):
     # identity and structural scope must still agree; names alone never merge.
     identity = {k: data[k] for k in ('tag', 'id', 'name', 'type', 'role', 'placeholder', 'aria-label') if data.get(k)}
     scope = {k: ancestor[k] for k in ('container_tag', 'container_id', 'container_testid', 'container_class', 'section_context') if ancestor.get(k)}
+    # A shared native name does not identify separate fields in different forms.
+    # Keep textual scope when no stronger physical identifier establishes it.
+    if data.get('tag') in {'input','select','textarea'} and not data.get('id') and not ancestor.get('container_id') and not ancestor.get('container_test_id') and not ancestor.get('container_testid'):
+        section = ancestor.get('section_context') or {}
+        if not any(section.get(k) for k in ('section_id','section_test_id','section_heading')):
+            if ancestor.get('container_text'): scope['container_text'] = ancestor['container_text']
     if data.get('tag') in {'button','a','h1','h2','h3','h4','h5','h6','span','p'}:
         identity['text'] = data.get('text')
     if data.get('tag') in {'span','p'}:

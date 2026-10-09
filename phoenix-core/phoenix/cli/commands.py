@@ -25,6 +25,38 @@ from phoenix.sdk.config import PhoenixConfig
 logger = logging.getLogger(__name__)
 
 
+def _determine_mcp_usage_from_bundles(manual_tests, smartlocator_bundles):
+    """Determine MCP usage based on locator bundle sufficiency.
+
+    Returns (mcp_enabled, missing_elements_summary).
+    """
+    mcp_enabled = True
+    all_sufficient = True
+    missing_elements_summary = []
+
+    if smartlocator_bundles:
+        try:
+            from phoenix_shared.locator_utils import _are_locator_bundles_sufficient, normalize_locator_bundles
+
+            # Normalize LocatorBundle objects to dicts for sufficiency check
+            bundle_dicts = normalize_locator_bundles(smartlocator_bundles)
+
+            for test in manual_tests:
+                is_sufficient, missing = _are_locator_bundles_sufficient(test, bundle_dicts)
+                if not is_sufficient:
+                    all_sufficient = False
+                    if missing:
+                        missing_elements_summary.append(f"{test.get('name', 'test')}: {', '.join(missing)}")
+        except Exception as _exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("Sufficiency check failed; defaulting to MCP enabled: %s", _exc)
+            all_sufficient = False
+
+    if all_sufficient and smartlocator_bundles:
+        mcp_enabled = False
+
+    return mcp_enabled, missing_elements_summary
+
 def _module_from_file(path: Path) -> str:
     """Derive a module name from a file path stem.
 
@@ -1050,6 +1082,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
             locator_directory=str(locator_directory),
             environment_file=str(project_root / ".env.local"),
         )
+        _needs_mcp, _missing = _determine_mcp_usage_from_bundles(manual_tests, smartlocator_bundles)
         intel_client = IntelligenceClient(config)
         try:
             click.echo("")
@@ -1064,7 +1097,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
                 use_pom=_use_pom,
                 use_bdd=_use_bdd,
                 keywords=_keywords_context,
-                mcp_enabled=config.intelligence.mcp_enabled,
+                mcp_enabled=config.intelligence.mcp_enabled and _needs_mcp,
                 mcp_command=config.intelligence.mcp_command,
                 mcp_args=config.intelligence.mcp_args,
                 mcp_timeout=config.intelligence.mcp_timeout,

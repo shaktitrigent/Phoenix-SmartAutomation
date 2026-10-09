@@ -6,6 +6,7 @@ from phoenix_shared.automation_translation import (
     explicit_step_data, fill_operation_evidence,
 )
 from phoenix_shared.manual_semantics import bound_actions, final_artifact_issues
+from phoenix_shared.locator_utils import _are_locator_bundles_sufficient, normalize_locator_bundles
 import json
 import logging
 import re
@@ -333,8 +334,12 @@ def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
     )
     if explicit_locator_match:
         explicit_locator = explicit_locator_match.group(1)
-        # Use the explicit locator as the field label
-        return explicit_locator, _normalise_fill_value(quoted or cleaned)
+        value_before_locator = re.sub(r"\s+(?:in|into|for)\s+(?:the\s+)?(?:field|input|box|area|textbox|text\s+box)\s+.*$", "", cleaned, flags=re.I).strip()
+        return explicit_locator, _normalise_fill_value(quoted or value_before_locator)
+
+    embedded = re.fullmatch(r"(username|password|email|user|pass|name)\s+(.+)", cleaned, re.I)
+    if quoted is None and embedded and not re.match(r"(?:in|into|for|field|with|as|value)\b", embedded[2], re.I):
+        return _normalise_field_label(embedded[1]), _normalise_fill_value(embedded[2])
 
     field_match = re.search(
         r"(?:in|into|for)\s+(?:the\s+)?[`'\"]?([a-zA-Z\s]+?)[`'\"]?\s+(?:field|input|box|area|textbox|text\s+box)",
@@ -783,6 +788,26 @@ def _criterion_to_playwright_lines_atomic(
         lines.append(_manual_review_warning_line("Criterion not mapped to a stable automation step", criterion))
 
     return lines
+
+
+def _build_script_from_stored_locators(manual_test, locator_bundles, application_url):
+    """Direct stored generation uses the same accepted evidence/business compiler."""
+    from services.agents.evidence_fallback import compile_fallback
+    compiled = compile_fallback(manual_test, application_url, normalize_locator_bundles(locator_bundles),
+        manual_test.get('_dom_snapshot') or '', extract_fill=_extract_fill_target_and_value,
+        extract_click=_extract_click_target, split_actions=_split_compound_actions,
+        extract_select=_extract_select_option, missing_fill_data=_missing_fill_data,
+        environment_values=manual_test.get('_environment_values'),
+        test_name=re.sub(r'[^a-z0-9_]', '_', manual_test.get('name','test').lower()))
+    manual_test['_compiled_fallback'] = compiled
+    missing = []
+    for i in compiled['unresolved_steps']:
+        action = str(manual_test.get('steps',[])[i-1].get('action') or '')
+        field, _ = _extract_fill_target_and_value(action)
+        if re.match(r'(?:enter|type|fill)\b', action, re.I) and field: missing.append(field)
+        else: missing.append(f'Step {i}')
+    if compiled['overall_outcome_unresolved']: missing.append('Overall expected result')
+    return not missing, compiled['script_code'], missing
 
 
 def _criterion_to_playwright_lines(
@@ -1753,6 +1778,9 @@ class TestGeneratorAgent(BaseAgent):
         3. Falls back to heuristic if LLM unavailable.
     """
 
+    # Request-local values shadow this immutable default; never share a dict.
+    environment_values = None
+
     def process(self, input_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         user_story = input_data.get("user_story", "")
         application_url = input_data.get("application_url")
@@ -2139,8 +2167,22 @@ class TestGeneratorAgent(BaseAgent):
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
         page_snapshot: str = "",
         manifest: str = "",
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Translate a single manual test into a Playwright script via LLM or fallback."""
+        if locator_bundles is not None and '_validated_locator_bundles' not in manual_test:
+            manual_test['_environment_values'] = getattr(self, 'environment_values', None)
+            sufficient, missing = _are_locator_bundles_sufficient(manual_test, locator_bundles)
+            if sufficient:
+                success, script, missing = _build_script_from_stored_locators(manual_test, locator_bundles, application_url)
+                if success:
+                    return {'script_code': _normalise_generated_script(script),
+                        'generation_mode': 'stored_locators_direct_skip_llm' if self.llm_client else 'stored_locators_direct_no_llm',
+                        'locators': locator_bundles, 'recommendations': []}
+            if locator_bundles and not self.llm_client:
+                return {'script_code':'', 'generation_mode':'unresolved_insufficient_bundles',
+                    'locators':locator_bundles, 'recommendations':['Missing accepted business evidence: '+', '.join(missing)+' - manual review required']}
+
         if "_validated_locator_bundles" in manual_test:
             from services.agents.evidence_fallback import compile_fallback
             compiled = compile_fallback(manual_test, application_url,

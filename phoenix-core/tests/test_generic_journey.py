@@ -20,11 +20,23 @@ def test_journey_persistence_keeps_state_identity(tmp_path,monkeypatch):
     import phoenix.locators.journey as journey
     import phoenix_smartlocatorai.dynamic_states as scanner
     f=tmp_path/'states.json';f.write_text('{"states":[{"name":"login"},{"name":"cart"}]}')
-    manifest={'states':[{'name':'login','locators_json':'login.json'},{'name':'cart','locators_json':'cart.json'}]}
-    monkeypatch.setattr(scanner,'scan_dynamic_states',Mock(return_value=manifest))
-    monkeypatch.setattr(journey,'convert_file',Mock(side_effect=lambda path,page:[page]))
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from phoenix_shared.models.locator import Locator,LocatorBundle,LocatorStrategy
+    pages=[]
+    @contextmanager
+    def session(*args,**kwargs):
+        shared_page=Mock(url="https://example.test")
+        def scan(**kw):
+            pages.append(shared_page)
+            return [LocatorBundle(element_name="Field",page=kw["page"],primary=Locator(
+                element_name="Field",strategy=LocatorStrategy.CSS,value="#field",verified_in_snapshot=True,
+                metadata={"match_count":1,"identity_matches":True,"stability":"High"}))]
+        yield SimpleNamespace(page=shared_page,scan=scan)
+    monkeypatch.setattr("phoenix.locators.live_session.live_session",session)
     save=Mock();monkeypatch.setattr(journey,'persist_locators',save)
     capture_journey('https://example.test',f,tmp_path,tmp_path/'locators',values={})
+    assert len(pages)==2 and pages[0] is pages[1]
     assert [c.args[0][0]['page'] for c in save.call_args_list]==['login','cart']
 
 def test_scaffold_migration_dry_run_and_backup(tmp_path):

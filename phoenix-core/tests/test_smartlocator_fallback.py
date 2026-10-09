@@ -12,7 +12,7 @@ from phoenix.locators.smartlocator_fallback import (
 from phoenix_shared.models.locator import Locator, LocatorBundle, LocatorStrategy
 
 
-def _bundle(*, verified=False, match_count=0, stability="Low", warnings=None):
+def _bundle(*, verified=False, match_count=0, stability="High", warnings=None):
     record = {
         "custom_name": "SubmitButton",
         "locator_type": "CSS Selector",
@@ -38,6 +38,7 @@ def _bundle(*, verified=False, match_count=0, stability="Low", warnings=None):
             strategy=LocatorStrategy.CSS,
             value="#submit" if verified else ".submit",
             verified_in_snapshot=verified,
+            metadata={"match_count":match_count,"identity_matches":verified,"stability":stability},
         ),
         metadata={
             "element_identity": "element_data:submit",
@@ -106,7 +107,7 @@ def test_resolved_bundle_causes_zero_locator_expert_calls():
         [_bundle(verified=True, match_count=1)],
         page_url="https://app.example",
         discover=lambda payload: calls.append(payload) or {},
-        validate=lambda candidate, payload: {"match_count": 1},
+        validate=lambda candidate, payload: {"match_count": 1, "identity_matches": True},
     )
 
     assert calls == []
@@ -115,7 +116,7 @@ def test_resolved_bundle_causes_zero_locator_expert_calls():
 
 
 def test_only_live_unique_llm_candidate_is_merged_as_primary():
-    validations = iter([{"match_count": 2}, {"match_count": 1}])
+    validations = iter([{"match_count": 2}, {"match_count": 1, "identity_matches": True}])
 
     result = resolve_with_locator_expert(
         [_bundle(match_count=2, stability="Medium")],
@@ -164,7 +165,7 @@ def test_locator_expert_failure_remains_unresolved():
         [_bundle(match_count=0)],
         page_url="https://app.example",
         discover=lambda _payload: (_ for _ in ()).throw(RuntimeError("service down")),
-        validate=lambda _candidate, _payload: {"match_count": 1},
+        validate=lambda _candidate, _payload: {"match_count": 1, "identity_matches": True},
     )
     assert result["resolved_bundles"] == []
     assert "locator_expert_failed" in result["unresolved_elements"][0]["error"]
@@ -211,7 +212,7 @@ def test_empty_locator_expert_response_has_final_failure_reason():
         [_bundle(match_count=0)],
         page_url="https://app.example",
         discover=lambda _payload: {"locators": []},
-        validate=lambda _candidate, _payload: {"match_count": 1},
+        validate=lambda _candidate, _payload: {"match_count": 1, "identity_matches": True},
     )
 
     assert result["unresolved_elements"][0]["final_failure_reason"] == (

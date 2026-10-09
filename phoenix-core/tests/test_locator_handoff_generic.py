@@ -9,7 +9,7 @@ from phoenix.locators.reconciliation import match_locator_bundle, reconcile_gene
 
 def bundle(page="alpha", value="#validated", name="EmailInput", tag="input"):
     return {"page": page, "element_name": name,
-            "primary": {"strategy": "css", "value": value, "verified_in_snapshot": True},
+            "primary": {"strategy": "css", "value": value, "verified_in_snapshot": True, "metadata":{"match_count":1,"identity_matches":True,"stability":"High"}},
             "alternates": [], "metadata": {"element_identity": "shared-dom-id", "element_data": {"tag": tag}}}
 
 

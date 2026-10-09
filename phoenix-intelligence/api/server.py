@@ -11,6 +11,68 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Configure logger with enhanced error handling
+logger = logging.getLogger(__name__)
+
+# CRITICAL FIX: Add detailed error logging for startup issues
+def _enhance_error_logging():
+    """Enhance error logging with detailed context."""
+    if not logger.handlers:
+        # Add console handler if none exists
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('[%(levelname)s] %(name)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+_enhance_error_logging()
+
+# Load environment variables from project directory if available
+def _load_project_env():
+    """Load .env files from project directory for API keys."""
+    try:
+        import dotenv
+        
+        # Try to find the project directory (look for .phoenixrc)
+        project_dir = None
+        current = Path.cwd()
+        
+        # Check current directory first
+        if (current / ".phoenixrc").exists():
+            project_dir = current
+        else:
+            # Check parent directories
+            for parent in current.parents:
+                if (parent / ".phoenixrc").exists():
+                    project_dir = parent
+                    break
+        
+        if project_dir:
+            env_files = [
+                project_dir / ".env.local",
+                project_dir / ".env",
+            ]
+            for env_file in env_files:
+                if env_file.exists():
+                    logger.info(f"Loading environment variables from {env_file}")
+                    dotenv.load_dotenv(env_file, override=True)
+                    
+                    # Log if ANTHROPIC_API_KEY was loaded
+                    if "ANTHROPIC_API_KEY" in os.environ:
+                        logger.info("✓ ANTHROPIC_API_KEY loaded from .env file")
+                    else:
+                        logger.warning("⚠ ANTHROPIC_API_KEY not found in .env file")
+        else:
+            logger.warning("No .phoenixrc found in current or parent directories")
+            logger.warning("Environment variables will be loaded from system environment only")
+    except ImportError:
+        logger.warning("python-dotenv not installed, .env files will not be loaded")
+    except Exception as e:
+        logger.warning(f"Failed to load .env files: {e}")
+
+_load_project_env()
+
 from fastapi import FastAPI
 from services.cache import Cache
 from services.config import IntelligenceSettings, LLMSettings, MCPSettings
@@ -18,6 +80,7 @@ from services.knowledge.base import KnowledgeBase
 from services.llm.client import LLMClient
 from services.mcp.client import MCPClient
 from services.agents.registry import AgentRegistry
+from services.request_config import load_request_config
 from api.models import (
     AutomateRequest,
     AutomateResponse,
@@ -31,8 +94,6 @@ from api.models import (
     ScriptFixResponse,
 )
 
-logger = logging.getLogger(__name__)
-
 app = FastAPI(title="Phoenix Intelligence API", version="2.0.0")
 
 # ---------------------------------------------------------------------------
@@ -43,51 +104,98 @@ _knowledge_base = KnowledgeBase()
 
 
 def _provider_key_name(provider: str) -> str:
-    provider = provider.lower()
-    if provider == "openai":
-        return "OPENAI_API_KEY"
-    if provider == "gemini":
-        return "GOOGLE_API_KEY"
-    if provider == "ollama":
-        return ""
+    """Only Anthropic is supported."""
     return "ANTHROPIC_API_KEY"
 
 
 _llm_settings = LLMSettings()
 _llm_client = None
-_provider_key = _provider_key_name(_llm_settings.provider)
-if _provider_key and os.environ.get(_provider_key, ""):
-    _llm_client = LLMClient(_llm_settings)
-    logger.info(
-        "LLM client initialised (provider=%s model=%s)",
-        _llm_settings.provider,
-        _llm_settings.model,
-    )
-else:
+
+# Enhanced API key validation for Anthropic only
+def _check_llm_availability() -> tuple[bool, str, list[str]]:
+    """Check Anthropic API key availability."""
+    warnings = []
+
+    # Reinitialize settings to pick up any environment changes
+    _llm_settings.__post_init__()
+
+    # Check if Anthropic API key is configured
+    if _llm_settings.is_configured():
+        logger.info("Anthropic API key is configured and valid")
+        return True, "anthropic", []
+    else:
+        warnings.append("ANTHROPIC_API_KEY is not configured or invalid")
+        logger.warning("ANTHROPIC_API_KEY is not configured or invalid")
+        return False, "None", warnings
+
+_llm_available, _available_providers_list, _llm_warnings = _check_llm_availability()
+
+if _llm_available:
+    try:
+        _llm_client = LLMClient(_llm_settings)
+        logger.info(
+            "LLM client initialised (provider=%s model=%s available=%s)",
+            _llm_settings.provider,
+            _llm_settings.model,
+            _available_providers_list,
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM client: {e}")
+        _llm_client = None
+        _llm_available = False
+        _llm_warnings.append(f"LLM client initialization failed: {str(e)}")
+
+if not _llm_available:
     _banner = (
         "\n"
         "╔══════════════════════════════════════════════════════════╗\n"
-        "║  ⚠  LLM API KEY NOT CONFIGURED                          ║\n"
+        "║  ⚠  ANTHROPIC API KEY NOT CONFIGURED                    ║\n"
         "╠══════════════════════════════════════════════════════════╣\n"
-        f"║  Provider : {_llm_settings.provider:<46} ║\n"
-        f"║  Required : {(_provider_key or 'N/A'):<46} ║\n"
+        "║  Provider : Anthropic (Claude)                          ║\n"
+        "║  Required : ANTHROPIC_API_KEY                           ║\n"
         "╠══════════════════════════════════════════════════════════╣\n"
         "║  Without an API key:                                     ║\n"
         "║  • Automation scripts will be heuristic stubs only       ║\n"
         "║  • All generated output is fallback / placeholder        ║\n"
+        "║  • DOM-based healing will be limited                    ║\n"
         "╠══════════════════════════════════════════════════════════╣\n"
         "║  Fix:  export ANTHROPIC_API_KEY=sk-ant-...               ║\n"
-        "║        export OPENAI_API_KEY=sk-...                      ║\n"
-        "║        export GOOGLE_API_KEY=AIza...                     ║\n"
         "║  Then restart the phoenix-intelligence server.           ║\n"
         "╚══════════════════════════════════════════════════════════╝\n"
     )
     logger.warning(_banner)
 
+    # Log individual warnings
+    for warning in _llm_warnings:
+        logger.warning(f"LLM Configuration Warning: {warning}")
+
 _mcp_settings = MCPSettings()
 _mcp_client = None
+
+# Initialize intelligent runtime components for DOM reuse
+_artifacts_manager = None
+_dom_snapshot_manager = None
+
+try:
+    from phoenix.execution.artifacts import get_artifacts_manager
+    from phoenix.execution.dom_snapshot_manager import DOMSnapshotManager
+    
+    # Initialize artifacts manager
+    _artifacts_manager = get_artifacts_manager(base_dir="PhoenixRuntime/artifacts")
+    
+    # Initialize DOM snapshot manager
+    _dom_snapshot_manager = DOMSnapshotManager(base_dir="PhoenixRuntime")
+    
+    logger.info("Intelligent runtime components initialized for DOM reuse")
+except ImportError as e:
+    logger.warning(f"Could not initialize intelligent runtime components: {e}")
+
 if _mcp_settings.enabled:
-    _mcp_client = MCPClient(_mcp_settings)
+    _mcp_client = MCPClient(
+        _mcp_settings, 
+        artifacts_manager=_artifacts_manager,
+        dom_snapshot_manager=_dom_snapshot_manager
+    )
     logger.info("MCP client initialised (command=%s %s)", _mcp_settings.command, _mcp_settings.args)
 else:
     logger.info("MCP is disabled via PHOENIX_MCP_ENABLED=false")
@@ -98,21 +206,79 @@ _agent_registry = AgentRegistry(
 
 
 def _decorate_metadata(result: dict) -> dict:
-    result.setdefault("metadata", {})
-    result["metadata"]["generated_at"] = datetime.now(timezone.utc).isoformat()
-    result["metadata"]["version"] = "2.0.0"
-    result["metadata"]["llm_configured"] = _llm_client is not None
-    result["metadata"]["prompt_hot_reload"] = True
+    metadata = result.setdefault("metadata", {})
+    metadata["generated_at"] = datetime.now(timezone.utc).isoformat()
+    metadata["version"] = "2.0.0"
+    metadata["llm_configured"] = _llm_settings.is_configured()
+    metadata["prompt_hot_reload"] = True
 
-    warnings = list(result["metadata"].get("warnings", []))
-    for test in result.get("automation_tests", []):
+    tests = result.get("automation_tests", [])
+    manual_tests = result.get("manual_tests", [])
+    warnings = list(metadata.get("warnings", []))
+    reasons = []
+
+    for test in tests:
         warnings.extend(test.get("warnings", []))
+
+        for recommendation in test.get("recommendations", []):
+            if not isinstance(recommendation, str):
+                continue
+
+            if recommendation.startswith("Invalid locators rejected:"):
+                details = recommendation.split(":", 1)[1].strip()
+                candidates = [
+                    line.strip().lstrip("- ")
+                    for line in details.splitlines()
+                ]
+            elif (
+                "rejected" in recommendation.lower()
+                or "invalid locator" in recommendation.lower()
+            ):
+                candidates = [recommendation]
+            else:
+                continue
+
+            for reason in candidates:
+                if reason and reason not in reasons:
+                    reasons.append(reason)
+
     if warnings:
         deduped = []
         for warning in warnings:
             if warning not in deduped:
                 deduped.append(warning)
-        result["metadata"]["warnings"] = deduped
+        metadata["warnings"] = deduped
+
+    # These counts describe generated outputs, not browser-passing tests.
+    valid_auto_count = sum(
+        1 for test in tests
+        if (test.get("script_code") or test.get("pom_bundle") or test.get("bdd_bundle"))
+        and not (test.get("generation_quality") or {}).get("requires_manual_review")
+        and (test.get("generation_quality") or {}).get("status") != "partial"
+    )
+    rejected_auto_count = len(tests) - valid_auto_count
+    accepted_count = valid_auto_count if tests else len(manual_tests)
+    partial = (
+        bool(rejected_auto_count)
+        or bool(reasons)
+        or metadata.get("translation_status") == "partial"
+        or any(
+            (test.get("generation_quality") or {}).get("status") == "partial"
+            or (test.get("generation_quality") or {}).get("requires_manual_review")
+            for test in tests
+        )
+    )
+    status = (
+        "failed" if not accepted_count
+        else "partial" if partial
+        else "success"
+    )
+
+    metadata["status"] = status
+    metadata["accepted_count"] = accepted_count
+    metadata["rejected_count"] = rejected_auto_count + len(reasons)
+    metadata["rejection_reasons"] = reasons
+    result.setdefault("status", status)
     return result
 
 
@@ -124,7 +290,8 @@ def _decorate_metadata(result: dict) -> dict:
 @app.get("/health")
 def health_check():
     """Health check endpoint — reports LLM and MCP availability."""
-    llm_ok = _llm_client is not None
+    llm_ok = _llm_settings.is_configured()
+    _provider_key = _provider_key_name(_llm_settings.provider)
     return {
         "status": "ok" if llm_ok else "degraded",
         "llm": {
@@ -152,6 +319,26 @@ def generate_tests(payload: TestGenerationRequest):
     test_type = options.test_type if options else "both"
     risk_level = options.risk_level if options else None
 
+    # Extract MCP configuration from payload if provided
+    mcp_config = getattr(payload, "mcp_config", None)
+    if mcp_config and mcp_config.get("enabled"):
+        # Temporarily update MCP settings for this request
+        from services.config import MCPSettings
+        original_enabled = _mcp_settings.enabled
+        original_command = _mcp_settings.command
+        original_args = _mcp_settings.args
+        original_timeout = _mcp_settings.timeout
+
+        _mcp_settings.enabled = mcp_config.get("enabled", True)
+        _mcp_settings.command = mcp_config.get("command", "npx")
+        _mcp_settings.args = mcp_config.get("args", "@playwright/mcp@latest")
+        _mcp_settings.timeout = mcp_config.get("timeout", 60)
+
+        # Reinitialize MCP client with new settings
+        if _mcp_settings.enabled:
+            from services.mcp.client import MCPClient
+            _mcp_client = MCPClient(settings=_mcp_settings)
+
     supporting_documents = [
         doc.model_dump() for doc in (payload.supporting_documents or [])
     ]
@@ -165,6 +352,18 @@ def generate_tests(payload: TestGenerationRequest):
         supporting_documents=supporting_documents,
     )
 
+    # Restore original MCP settings
+    if mcp_config:
+        _mcp_settings.enabled = original_enabled
+        _mcp_settings.command = original_command
+        _mcp_settings.args = original_args
+        _mcp_settings.timeout = original_timeout
+
+        # Reinitialize MCP client with original settings
+        if _mcp_settings.enabled:
+            from services.mcp.client import MCPClient
+            _mcp_client = MCPClient(settings=_mcp_settings)
+
     return _decorate_metadata(result)
 
 
@@ -172,13 +371,36 @@ def generate_tests(payload: TestGenerationRequest):
 def discover_locators(payload: LocatorDiscoveryRequest):
     """Discover locators for the requested elements on a page."""
     results = []
-    for element in payload.elements:
+    request_config = (
+        load_request_config(payload.project_context)
+        if payload.project_context is not None
+        else None
+    )
+    contexts = [context for context in payload.element_contexts if isinstance(context, dict)]
+    contextual_names = {
+        str(context.get("element_name")) for context in contexts if context.get("element_name")
+    }
+    requests = [
+        (str(context.get("element_name", "")), context)
+        for context in contexts
+        if context.get("element_name")
+    ]
+    requests.extend((element, None) for element in payload.elements if element not in contextual_names)
+    for element, context in requests:
         locators = _agent_registry.discover_locators(
             page_url=payload.page_url,
             element_name=element,
             dom_snapshot=payload.dom_snapshot,
+            element_context=context,
+            require_llm=payload.require_llm,
+            request_config=request_config,
         )
-        results.extend(locators.get("locators", []))
+        for locator in locators.get("locators", []):
+            enriched = dict(locator)
+            enriched.setdefault("element_name", element)
+            if context and context.get("element_identity"):
+                enriched.setdefault("element_identity", context["element_identity"])
+            results.append(enriched)
 
     return {
         "locators": results,
@@ -201,14 +423,26 @@ def analyze_failure(payload: FailureAnalysisRequest):
 @app.post("/api/v1/tests/automate", response_model=AutomateResponse)
 def automate_from_manual(payload: AutomateRequest):
     """Generate automation scripts from pre-written manual tests (1 script per test)."""
+    
+    context_kwargs = {}
+    if payload.project_context is not None:
+        context_kwargs["project_context"] = payload.project_context.model_dump()
+        context_kwargs["request_config"] = load_request_config(payload.project_context)
+    mcp_config = getattr(payload, "mcp_config", None)
+    if mcp_config is not None:
+        from services.config import MCPSettings
+        from services.mcp.client import MCPClient
+        local_settings = MCPSettings(**mcp_config)
+        context_kwargs["mcp_client"] = (
+            MCPClient(settings=local_settings, artifacts_manager=_artifacts_manager,
+                      dom_snapshot_manager=_dom_snapshot_manager)
+            if local_settings.enabled else None
+        )
     result = _agent_registry.automate_from_manual(
-        manual_tests=payload.manual_tests,
-        application_url=payload.application_url,
-        domain_knowledge=payload.domain_knowledge or "",
-        manifest=payload.manifest or "",
-        use_pom=payload.use_pom,
-        use_bdd=payload.use_bdd,
-        keywords=payload.keywords or "",
+        manual_tests=payload.manual_tests, application_url=payload.application_url,
+        domain_knowledge=payload.domain_knowledge or "", manifest=payload.manifest or "",
+        use_pom=payload.use_pom, use_bdd=payload.use_bdd, keywords=payload.keywords or "",
+        locator_bundles=payload.locator_bundles, **context_kwargs,
     )
     return _decorate_metadata(result)
 

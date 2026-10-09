@@ -90,32 +90,84 @@ def _extract_new_methods(new_class_source: str, existing_names: List[str]) -> st
 
 
 def _splice_methods_into_class(existing_source: str, class_name: str, new_methods_source: str) -> str:
-    """Insert *new_methods_source* methods just before the closing of *class_name* in *existing_source*.
+    """Replace same-named generated methods and append newly generated methods."""
+    try:
+        existing_tree = ast.parse(existing_source)
+        incoming_tree = ast.parse(new_methods_source)
+    except SyntaxError:
+        return existing_source
 
-    Falls back to appending at end-of-file if the class cannot be located.
-    """
-    existing_names = _get_existing_method_names(existing_source, class_name)
+    target_class = next(
+        (node for node in ast.walk(existing_tree)
+         if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
+    )
+    incoming_class = next(
+        (node for node in ast.walk(incoming_tree)
+         if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
+    )
+
+    if target_class is None or incoming_class is None:
+        return existing_source + "\n\n" + _extract_new_methods(new_methods_source, [])
+
+    existing_lines = existing_source.splitlines(keepends=True)
+    incoming_lines = new_methods_source.splitlines(keepends=True)
+
+    def line_offsets(lines: List[str]) -> List[int]:
+        offsets = []
+        total = 0
+        for line in lines:
+            offsets.append(total)
+            total += len(line.encode("utf-8"))
+        return offsets
+
+    existing_offsets = line_offsets(existing_lines)
+    incoming_offsets = line_offsets(incoming_lines)
+
+    def method_span(method: ast.FunctionDef | ast.AsyncFunctionDef, offsets: List[int]) -> tuple[int, int]:
+        start_node = method.decorator_list[0] if method.decorator_list else method
+        start = offsets[start_node.lineno - 1] + start_node.col_offset
+        end = offsets[method.end_lineno - 1] + method.end_col_offset
+        return start, end
+
+    existing_methods = {
+        method.name: method
+        for method in target_class.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    incoming_methods = [
+        method for method in incoming_class.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    source = existing_source.encode("utf-8")
+    replacements = []
+    for method in incoming_methods:
+        current = existing_methods.get(method.name)
+        if current is None:
+            continue
+        start, end = method_span(current, existing_offsets)
+        incoming_start, incoming_end = method_span(method, incoming_offsets)
+        replacements.append((start, end, new_methods_source.encode("utf-8")[incoming_start:incoming_end]))
+    for start, end, replacement in sorted(replacements, reverse=True):
+        source = source[:start] + replacement + source[end:]
+    updated_source = source.decode("utf-8")
+
+    existing_names = _get_existing_method_names(updated_source, class_name)
     new_code = _extract_new_methods(new_methods_source, existing_names)
     if not new_code:
-        return existing_source  # nothing new to add
+        return updated_source
 
-    # Find the last line of the class body and insert before the next class/EOF
-    try:
-        tree = ast.parse(existing_source)
-    except SyntaxError:
-        return existing_source + "\n\n" + new_code
-
-    target_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            target_class = node
-            break
-
+    updated_tree = ast.parse(updated_source)
+    target_class = next(
+        (node for node in ast.walk(updated_tree)
+         if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
+    )
     if target_class is None:
-        return existing_source + "\n\n" + new_code
-
-    lines = existing_source.splitlines(keepends=True)
-    insert_at = target_class.end_lineno  # type: ignore[attr-defined]
+        return updated_source + "\n\n" + new_code
+    lines = updated_source.splitlines(keepends=True)
+    insert_at = target_class.end_lineno
 
     # Indent the new methods with 4 spaces to sit inside the class
     indented = "\n".join(
@@ -213,6 +265,74 @@ class OutputManager:
 
     def __init__(self, project_root: Path) -> None:
         self.root = project_root
+        self._ensure_pom_infrastructure()
+
+    def _ensure_pom_infrastructure(self) -> None:
+        """Ensure pages/ directory and base_page.py exist for POM mode.
+        
+        Uses the existing scaffold template mechanism to create BasePage
+        from the Jinja2 template, matching the phoenix init architecture.
+        """
+        pages_dir = self.root / "pages"
+        base_page_path = pages_dir / "base_page.py"
+        
+        # If base_page.py already exists, no action needed
+        if base_page_path.exists():
+            return
+        
+        # Create pages directory if it doesn't exist
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create __init__.py if it doesn't exist
+        init_path = pages_dir / "__init__.py"
+        if not init_path.exists():
+            init_path.write_text('"""Page objects package."""\n', encoding="utf-8")
+        
+        # Render base_page.py from template using scaffold's _render_template
+        try:
+            from phoenix.scaffold import _render_template
+            context = {
+                "project_name": self.root.name,
+            }
+            base_page_code = _render_template("pages_base_page.py.j2", context)
+            if base_page_code:
+                base_page_path.write_text(base_page_code, encoding="utf-8")
+        except Exception:
+            # If scaffold import fails, create minimal BasePage as fallback
+            base_page_path.write_text(
+                '"""BasePage — shared foundation for all Page Object classes."""\n'
+                'from __future__ import annotations\n\n'
+                'import os\n'
+                'import re\n'
+                'from pathlib import Path\n'
+                'from typing import Optional, Union\n\n'
+                'from playwright.sync_api import Locator, Page, expect\n\n\n'
+                'class BasePage:\n'
+                '    """Base class for all page objects."""\n\n'
+                '    URL_PATH: str = "/"\n'
+                '    ACTION_TIMEOUT_MS: int = 30_000\n'
+                '    NAVIGATION_TIMEOUT_MS: int = 60_000\n\n'
+                '    def __init__(self, page: Page) -> None:\n'
+                '        self._page = page\n'
+                '        self._page.set_default_timeout(self.ACTION_TIMEOUT_MS)\n'
+                '        self._page.set_default_navigation_timeout(self.NAVIGATION_TIMEOUT_MS)\n\n'
+                '    def navigate(self, path: Optional[str] = None) -> None:\n'
+                '        configured_base = os.environ.get("APP_URL", "").strip()\n'
+                '        if not configured_base:\n'
+                '            raise ValueError("APP_URL must be supplied explicitly before navigation")\n'
+                '        base = configured_base.rstrip("/")\n'
+                '        url = base + (path if path.startswith("/") else f"/{path}") if path else configured_base\n'
+                '        self._page.goto(url, timeout=self.NAVIGATION_TIMEOUT_MS)\n\n'
+                '    def click(self, locator: Locator) -> None:\n'
+                '        expect(locator).to_be_visible(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        expect(locator).to_be_enabled(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        locator.click()\n\n'
+                '    def fill(self, locator: Locator, value: str) -> None:\n'
+                '        expect(locator).to_be_visible(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        locator.clear()\n'
+                '        locator.fill(value)\n',
+                encoding="utf-8"
+            )
 
     def apply(self, bundle: Dict[str, Any]) -> List[str]:
         """Apply a parsed pom_bundle to disk.

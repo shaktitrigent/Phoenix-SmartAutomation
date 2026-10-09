@@ -29,8 +29,11 @@ Example usage::
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from phoenix_shared.models.locator import LocatorBundle
@@ -44,6 +47,8 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
     The LLM prompts emit ``element_id``, ``selector``, and ``interaction_type``
     whereas the Pydantic model uses ``element_name``, ``value``, and (ignores
     interaction_type).  ``verified_in_snapshot`` is passed through directly.
+    
+    Also preserves SmartLocatorAI metadata fields.
     """
     item = dict(item)
 
@@ -51,17 +56,43 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
     if "element_name" not in item and "element_id" in item:
         item["element_name"] = item.pop("element_id")
 
+    # Get the element_name for propagation to sub-dicts
+    element_name = item.get("element_name")
+
+    if "primary" in item and item["primary"] is None:
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("unresolved_reason", "primary_missing")
+        metadata["locator_source"] = "unresolved"
+        item["metadata"] = metadata
+        item["primary"] = {
+            "element_name": element_name or "unresolved",
+            "strategy": "css",
+            "value": "",
+            "confidence": 0.0,
+            "fallback": False,
+            "verified_in_snapshot": False,
+            "metadata": {"unresolved_reason": "primary_missing", "locator_source": "unresolved"},
+        }
+
     # ``primary`` locator sub-dict normalisation
     if "primary" in item and isinstance(item["primary"], dict):
         p = dict(item["primary"])
         if "element_name" not in p and "element_id" in p:
             p["element_name"] = p.pop("element_id")
+        # Ensure element_name is present (required by Pydantic Locator model)
+        if "element_name" not in p and element_name:
+            p["element_name"] = element_name
         # LLM emits "selector" for the raw CSS/XPath/attribute string
         if "value" not in p and "selector" in p:
             p["value"] = p.pop("selector")
+        if not isinstance(p.get("value"), str):
+            p["value"] = ""
         # Pass through verified_in_snapshot (prompt may omit it)
         if "verified_in_snapshot" in item and "verified_in_snapshot" not in p:
             p["verified_in_snapshot"] = item["verified_in_snapshot"]
+        # Preserve metadata field
+        if "metadata" in item and "metadata" not in p:
+            p["metadata"] = item["metadata"]
         # interaction_type is not a model field — remove to avoid validation noise
         p.pop("interaction_type", None)
         p.pop("label", None)
@@ -75,8 +106,15 @@ def _normalise_raw_bundle(item: Dict[str, Any]) -> Dict[str, Any]:
                 alt = dict(alt)
                 if "element_name" not in alt and "element_id" in alt:
                     alt["element_name"] = alt.pop("element_id")
+                # Ensure element_name is present (required by Pydantic Locator model)
+                if "element_name" not in alt and element_name:
+                    alt["element_name"] = element_name
                 if "value" not in alt and "selector" in alt:
                     alt["value"] = alt.pop("selector")
+                # Preserve metadata field
+                if "metadata" in alt:
+                    # Keep metadata as-is
+                    pass
                 alt.pop("interaction_type", None)
                 alt.pop("label", None)
             normed.append(alt)
@@ -89,7 +127,7 @@ class LocatorRegistry:
     """In-memory registry of LocatorBundles, backed by per-page JSON files."""
 
     def __init__(self) -> None:
-        self._bundles: Dict[str, LocatorBundle] = {}  # keyed by element_name
+        self._bundles: Dict[tuple[str, str], LocatorBundle] = {}  # keyed by (page, element_name)
 
     # ------------------------------------------------------------------
     # Loading
@@ -122,28 +160,42 @@ class LocatorRegistry:
                 try:
                     item = _normalise_raw_bundle(item)
                     bundle = LocatorBundle.from_dict(item)
-                    self._bundles[bundle.element_name] = bundle
-                except Exception:
-                    pass
-        except (json.JSONDecodeError, OSError):
-            pass
+                    self._bundles[(bundle.page, bundle.element_name)] = bundle
+                except Exception as e:
+                    logger.warning(f"Failed to load locator bundle from {path}: {e}")
+                    logger.debug(f"Failed item data: {item}")
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to read or parse locator file {path}: {e}")
 
     # ------------------------------------------------------------------
     # Querying
     # ------------------------------------------------------------------
 
-    def get(self, element_name: str) -> Optional[LocatorBundle]:
-        """Return the bundle for *element_name*, or None if not found."""
-        return self._bundles.get(element_name)
+    def get(self, element_name: str, page: Optional[str] = None) -> Optional[LocatorBundle]:
+        """Find a page-scoped bundle, or an unambiguous legacy name.
 
-    def require(self, element_name: str) -> LocatorBundle:
-        """Return the bundle for *element_name*, raising KeyError if absent."""
-        bundle = self._bundles.get(element_name)
+        Without a page, duplicate names return None rather than selecting
+        a locator from an unrelated page.
+        """
+        if page is not None:
+            return self._bundles.get((page, element_name))
+        matches = [b for b in self._bundles.values() if b.element_name == element_name]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning("Ambiguous locator name %r; specify page (candidates: %s)",
+                           element_name, sorted(b.page for b in matches))
+        return None
+
+    def require(self, element_name: str, page: Optional[str] = None) -> LocatorBundle:
+        """Require a bundle; ambiguous legacy names must specify a page."""
+        bundle = self.get(element_name, page=page)
         if bundle is None:
             available = sorted(self._bundles.keys())
             raise KeyError(
-                f"element_id={element_name!r} not found in locators registry. "
-                f"Available element_ids: {available}"
+                f"element_id={element_name!r}, page={page!r} not found or ambiguous "
+                f"in locators registry. Specify page for duplicate names. "
+                f"Available (page, element_id): {available}"
             )
         return bundle
 
@@ -162,12 +214,15 @@ class LocatorRegistry:
     # ------------------------------------------------------------------
 
     def upsert(self, bundle: LocatorBundle) -> None:
-        """Add or replace a bundle by element_name."""
-        self._bundles[bundle.element_name] = bundle
+        """Add or replace a bundle by (page, element_name)."""
+        self._bundles[(bundle.page, bundle.element_name)] = bundle
 
-    def remove(self, element_name: str) -> bool:
-        """Remove a bundle. Returns True if it existed."""
-        return self._bundles.pop(element_name, None) is not None
+    def remove(self, element_name: str, page: Optional[str] = None) -> bool:
+        """Remove one scoped bundle; ambiguous names leave all pages intact."""
+        bundle = self.get(element_name, page=page)
+        if bundle is None:
+            return False
+        return self._bundles.pop((bundle.page, bundle.element_name), None) is not None
 
     # ------------------------------------------------------------------
     # Persistence

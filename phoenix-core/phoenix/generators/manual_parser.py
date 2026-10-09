@@ -70,7 +70,7 @@ def _parse_table_rows(block: str) -> List[List[str]]:
         line = line.strip()
         if not line.startswith("|"):
             continue
-        cells = [_strip_md_cell(c) for c in line.strip("|").split("|")]
+        cells = [_strip_md_cell(c).replace(r"\|", "|").replace("<br>", "\n") for c in re.split(r"(?<!\\)\|", line.strip("|"))]
         if not cells:
             continue
         # Skip separator rows like |---|---|
@@ -84,16 +84,121 @@ _LIST_ITEM_RE = re.compile(
     r"^\s*(?:(?P<num>\d+)[.)]\s+|[-*]\s+)(?P<text>.+)$"
 )
 
+# BDD/Gherkin keyword patterns
+_BDD_KEYWORD_RE = re.compile(
+    r"^\s*(?P<keyword>Given|When|Then|And)\s+(?P<text>.+)$",
+    re.IGNORECASE
+)
+
+
+def _parse_bdd_steps(block: str) -> List[Dict[str, Any]]:
+    """Extract steps from BDD/Gherkin format (Given/When/Then/And).
+
+    Semantic interpretation:
+    - Given: setup/context -> becomes action with preconditions context
+    - When: the action -> becomes action
+    - Then: expected result/assertion -> becomes expected_result
+    - And: extends the previous semantic step (never becomes a field/selector/locator)
+
+    Example:
+        Given I am on the login page
+        When I enter username "x"
+        And I enter password "y"
+        And I click Login
+        Then I should see the dashboard
+
+    Result: 4 steps with proper action/expected_result mapping.
+
+    Compound actions:
+        When I enter username "x"
+        And I enter password "y"
+    Result: 2 separate steps, both with actions.
+
+    Compound assertions:
+        Then I should see the dashboard
+        And I should see the products list
+    Result: 1 step with combined expected_result.
+    """
+    steps: List[Dict[str, Any]] = []
+    lines = block.splitlines()
+    
+    # Track the previous semantic keyword to handle "And" correctly
+    last_keyword = None
+    
+    for line in lines:
+        m = _BDD_KEYWORD_RE.match(line)
+        if not m:
+            continue
+        
+        keyword = m.group("keyword").capitalize()  # Normalize to Given/When/Then/And
+        text = m.group("text").strip()
+        
+        if not text:
+            continue
+        
+        # Determine semantic role based on keyword
+        if keyword == "Given":
+            # Given is setup/context - treat as action
+            role = "action"
+            last_keyword = "Given"
+        elif keyword == "When":
+            # When is the action
+            role = "action"
+            last_keyword = "When"
+        elif keyword == "Then":
+            # Then is the expected result/assertion
+            role = "expected_result"
+            last_keyword = "Then"
+        elif keyword == "And":
+            # And extends the previous semantic step
+            if last_keyword == "Then":
+                # And after Then: combine into same step's expected_result
+                role = "expected_result_append"
+            else:
+                # And after Given or When: create new action step
+                role = "action"
+        else:
+            # Fallback: treat as action
+            role = "action"
+        
+        step_num = len(steps) + 1
+        
+        if role == "action":
+            # Always create a new step for actions (including And after Given/When)
+            steps.append({
+                "step_number": step_num,
+                "action": text,
+                "expected_result": "",
+                "test_data": "",
+            })
+        elif role == "expected_result":
+            # Then: create a new step with expected_result
+            steps.append({
+                "step_number": step_num,
+                "action": "",
+                "expected_result": text,
+                "test_data": "",
+            })
+        elif role == "expected_result_append":
+            # And after Then: append to previous step's expected_result
+            if steps:
+                steps[-1]["expected_result"] += " " + text
+    
+    return steps
+
 
 def _parse_list_steps(block: str) -> List[Dict[str, Any]]:
     """Extract steps from a numbered or bulleted plain list.
 
     Handles:
         1. Navigate to the login page
-        2. Enter admin / admin123
+        2. Enter username / password
         - Click Login button
+    Also handles embedded numbered lists in text blocks.
     """
     steps: List[Dict[str, Any]] = []
+    
+    # First try the standard line-by-line parsing
     for line in block.splitlines():
         m = _LIST_ITEM_RE.match(line)
         if not m:
@@ -112,6 +217,32 @@ def _parse_list_steps(block: str) -> List[Dict[str, Any]]:
             "expected_result": "",
             "test_data": "",
         })
+    
+    # If no steps found, try to extract numbered patterns from the entire text
+    if not steps:
+        # Look for patterns like "1. Action" anywhere in the text
+        # This handles cases where steps are embedded in paragraphs like "Main Flow 1. Open 2. Enter"
+        # Improved pattern to handle embedded markdown formatting and bullet points
+        numbered_pattern = re.compile(r'(?:^|\s)(\d+)\.\s+([^.!?]+[.!?]?)', re.MULTILINE)
+        matches = numbered_pattern.findall(block)
+        
+        for num_str, action in matches:
+            action = action.strip()
+            # Clean up common markdown artifacts but preserve backticks for value extraction
+            action = re.sub(r'\*\*', '', action)  # Remove bold markdown
+            # Don't remove backticks - they are needed for value extraction
+            if action:
+                try:
+                    step_num = int(num_str)
+                except (TypeError, ValueError):
+                    step_num = len(steps) + 1
+                steps.append({
+                    "step_number": step_num,
+                    "action": action,
+                    "expected_result": "",
+                    "test_data": "",
+                })
+    
     return steps
 
 
@@ -185,7 +316,8 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
         # Pad to at least 4 cells
         while len(row) < 4:
             row.append("")
-        step_num_raw, action, expected, test_data = row[0], row[1], row[2], row[3]
+        step_num_raw, action, expected = row[0], row[1], row[2]
+        test_data = " | ".join(c for c in row[3:] if c) if len(row) > 4 else row[3]
         try:
             step_num = int(step_num_raw)
         except ValueError:
@@ -201,13 +333,22 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
             }
         )
 
-    # Fallback: plain numbered/bulleted list when no pipe table was found
+    # Fallback: try BDD/Gherkin format first, then plain numbered/bulleted list
     if not steps and steps_block:
-        steps = _parse_list_steps(steps_block)
+        # Try BDD parsing (Given/When/Then/And)
+        steps = _parse_bdd_steps(steps_block)
+        
+        # If BDD parsing didn't yield steps, try list parsing
+        if not steps:
+            steps = _parse_list_steps(steps_block)
 
-    # Last resort: try extracting steps from description or acceptance criteria blocks
+    # If still no steps, extract steps from description if available (Main Flow, etc.)
+    if not steps and description:
+        steps = _parse_list_steps(description)
+
+    # Last resort: try extracting steps from alternative blocks
     if not steps:
-        for section_key in ("acceptance criteria", "criteria", "steps", "scenario"):
+        for section_key in ("acceptance criteria", "criteria", "steps", "scenario", "main flow", "test case flow", "flow", "mainflow"):
             alt_block = sections.get(section_key, "")
             if alt_block:
                 steps = _parse_list_steps(alt_block)

@@ -22,6 +22,7 @@ class LocatorQuality:
     is_brittle: bool
     follows_priority_rules: bool
     alternate_locators: List[str]
+    snapshot_status: Optional[str] = None
 
 
 class LocatorValidator:
@@ -98,7 +99,14 @@ class LocatorValidator:
         is_duplicate = self._check_duplicate(selector, element_id)
         
         # Check if selector exists in DOM snapshot
-        exists_in_dom = self._check_exists_in_dom(selector)
+        selector_info = self._parse_selector_structure(selector)
+        supported = selector_info is not None and not re.search(r'\)\s*\.|:has\(|[>+~]', selector)
+        if selector.startswith(('#', '.')) and not re.fullmatch(r'[#.][\w-]+', selector):
+            supported = False
+        snapshot_status = ('missing_snapshot' if not self.dom_snapshot else
+                           'unsupported_selector_syntax' if not supported else None)
+        exists_in_dom = self._check_exists_in_dom(selector) if snapshot_status is None else False
+        snapshot_status = snapshot_status or ('matched' if exists_in_dom else 'not_found')
         
         # Calculate confidence score
         confidence_score = self._calculate_confidence_score(
@@ -128,7 +136,8 @@ class LocatorValidator:
             if is_duplicate:
                 rejection_reason = "Duplicate locator"
             elif not exists_in_dom:
-                rejection_reason = "Locator not found in DOM snapshot"
+                rejection_reason = ("Locator not found in DOM snapshot" if snapshot_status == 'not_found'
+                                    else snapshot_status)
             elif not follows_priority:
                 rejection_reason = "Does not follow locator priority rules"
             elif confidence_score < 0.5:
@@ -147,7 +156,8 @@ class LocatorValidator:
             is_duplicate=is_duplicate,
             is_brittle=is_brittle,
             follows_priority_rules=follows_priority,
-            alternate_locators=alternate_locators
+            alternate_locators=alternate_locators,
+            snapshot_status=snapshot_status
         )
     
     def _check_forbidden_patterns(self, selector: str) -> Optional[str]:

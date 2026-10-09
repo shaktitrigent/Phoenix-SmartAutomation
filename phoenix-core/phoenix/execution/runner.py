@@ -252,9 +252,6 @@ class TestRunner:
         print("[PHOENIX] ============================================")
 
         try:
-            # Use python -m pytest to ensure it uses the correct Python environment
-            cmd = [sys.executable, "-m"] + cmd
-            
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir, env=env)
             
             # Check if any tests were collected

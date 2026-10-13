@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urljoin
 
@@ -42,10 +43,16 @@ class IntelligenceClient:
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = self._build_url(path)
         last_error: Optional[Exception] = None
+        request_id = uuid.uuid4().hex[:12]
+        started = time.monotonic()
+        logger.info("Intelligence request started id=%s path=%s", request_id, path)
 
         for attempt in range(self.retry_count):
             try:
-                response = requests.post(url, json=payload, timeout=self.timeout)
+                response = requests.post(
+                    url, json=payload, timeout=self.timeout,
+                    headers={"X-Correlation-ID": request_id},
+                )
 
                 if response.status_code in _RETRYABLE_STATUS:
                     logger.warning(
@@ -69,6 +76,10 @@ class IntelligenceClient:
                         len(metadata["warnings"]),
                         "; ".join(metadata["warnings"][:3]),
                     )
+                logger.info(
+                    "Intelligence request completed id=%s path=%s status=%d elapsed_seconds=%.2f",
+                    request_id, path, response.status_code, time.monotonic() - started,
+                )
                 return data
 
             except requests.ConnectionError as exc:
@@ -82,14 +93,18 @@ class IntelligenceClient:
                 time.sleep(_BASE_BACKOFF * (2**attempt))
 
             except requests.Timeout as exc:
-                logger.warning(
-                    "Timeout on attempt %d/%d: %s",
-                    attempt + 1,
-                    self.retry_count,
-                    exc,
+                # A timed-out POST may still be running on the server. Retrying
+                # automation generation can duplicate expensive LLM work and
+                # write competing artifacts, so surface the ambiguous outcome.
+                elapsed = time.monotonic() - started
+                logger.error(
+                    "Intelligence request timed out id=%s path=%s elapsed_seconds=%.2f; not retrying",
+                    request_id, path, elapsed,
                 )
-                last_error = exc
-                time.sleep(_BASE_BACKOFF * (2**attempt))
+                raise RuntimeError(
+                    f"Phoenix Intelligence request {request_id} timed out after "
+                    f"{elapsed:.1f}s; server completion is unknown. Check server logs before retrying."
+                ) from exc
 
             except requests.HTTPError as exc:
                 # Non-retryable 4xx — re-raise immediately

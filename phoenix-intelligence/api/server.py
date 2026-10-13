@@ -73,7 +73,7 @@ def _load_project_env():
 
 _load_project_env()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from services.cache import Cache
 from services.config import IntelligenceSettings, LLMSettings, MCPSettings
 from services.knowledge.base import KnowledgeBase
@@ -421,8 +421,16 @@ def analyze_failure(payload: FailureAnalysisRequest):
 
 
 @app.post("/api/v1/tests/automate", response_model=AutomateResponse)
-def automate_from_manual(payload: AutomateRequest):
+def automate_from_manual(payload: AutomateRequest, request: Request = None):
     """Generate automation scripts from pre-written manual tests (1 script per test)."""
+    import time
+    started = time.monotonic()
+    request_id = (request.headers.get("X-Correlation-ID", "unassigned") if request else "unassigned")[:64]
+    logger.info(
+        "Automation request received id=%s tests=%d bundles=%d dom_chars=%d pom=%s",
+        request_id, len(payload.manual_tests), len(payload.locator_bundles),
+        len(payload.dom_snapshot or ""), payload.use_pom,
+    )
     
     context_kwargs = {}
     if payload.project_context is not None:
@@ -440,11 +448,22 @@ def automate_from_manual(payload: AutomateRequest):
                       dom_snapshot_manager=_dom_snapshot_manager)
             if local_settings.enabled else None
         )
-    result = _agent_registry.automate_from_manual(
-        manual_tests=payload.manual_tests, application_url=payload.application_url,
-        domain_knowledge=payload.domain_knowledge or "", manifest=payload.manifest or "",
-        use_pom=payload.use_pom, use_bdd=payload.use_bdd, keywords=payload.keywords or "",
-        locator_bundles=payload.locator_bundles, **context_kwargs,
+    try:
+        result = _agent_registry.automate_from_manual(
+            manual_tests=payload.manual_tests, application_url=payload.application_url,
+            domain_knowledge=payload.domain_knowledge or "", manifest=payload.manifest or "",
+            use_pom=payload.use_pom, use_bdd=payload.use_bdd, keywords=payload.keywords or "",
+            locator_bundles=payload.locator_bundles, **context_kwargs,
+        )
+    except Exception:
+        logger.exception("Automation request failed id=%s elapsed_seconds=%.2f",
+                         request_id, time.monotonic() - started)
+        raise
+    tests = result.get("automation_tests", [])
+    status = (result.get("metadata") or {}).get("status", "unknown")
+    logger.info(
+        "Automation request completed id=%s tests=%d status=%s elapsed_seconds=%.2f",
+        request_id, len(tests), status, time.monotonic() - started,
     )
     return _decorate_metadata(result)
 

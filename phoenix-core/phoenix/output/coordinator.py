@@ -175,62 +175,79 @@ def _splice_methods_into_class(existing_source: str, class_name: str, new_method
         source = source[:start] + replacement + source[end:]
     updated_source = source.decode("utf-8")
 
-    existing_names = _get_existing_method_names(updated_source, class_name)
-    new_code = _extract_new_methods(new_methods_source, existing_names)
-    if not new_code:
-        return updated_source
+    # Page-specific generation carries selectors/provenance for independent
+    # methods. Extending a page must preserve earlier accessor metadata too.
+    merged_tree=ast.parse(updated_source)
+    merged_class=next(n for n in merged_tree.body if isinstance(n,ast.ClassDef) and n.name==class_name)
+    def provenance_assignment(cls):
+        return next((n for n in cls.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='LOCATOR_PROVENANCE' for t in n.targets)),None)
+    incoming_provenance=provenance_assignment(incoming_class)
+    if incoming_provenance is not None:
+        incoming_values=ast.literal_eval(incoming_provenance.value)
+        if not isinstance(incoming_values,dict):raise ValueError('Locator provenance must be a mapping')
+        previous=provenance_assignment(merged_class)
+        if previous is None:
+            merged_class.body.insert(0,incoming_provenance)
+        else:
+            previous_values=ast.literal_eval(previous.value)
+            if not isinstance(previous_values,dict):raise ValueError('Existing locator provenance must be a mapping')
+            previous.value=ast.parse(repr({**previous_values,**incoming_values}),mode='eval').body
+        ast.fix_missing_locations(merged_tree)
+        updated_source=ast.unparse(merged_tree)+'\n'
 
-    updated_tree = ast.parse(updated_source)
-    target_class = next(
-        (node for node in ast.walk(updated_tree)
-         if isinstance(node, ast.ClassDef) and node.name == class_name),
-        None,
-    )
-    if target_class is None:
-        return updated_source + "\n\n" + new_code
-    lines = updated_source.splitlines(keepends=True)
-    insert_at = target_class.end_lineno
-
-    # Indent the new methods with 4 spaces to sit inside the class
-    indented = "\n".join(
-        ("    " + ln if ln.strip() else ln)
-        for ln in new_code.splitlines()
-    )
-    lines.insert(insert_at, "\n" + indented + "\n")
-    return "".join(lines)
+    existing_names = set(_get_existing_method_names(updated_source, class_name))
+    updated_tree=ast.parse(updated_source)
+    target_class=next(n for n in updated_tree.body if isinstance(n,ast.ClassDef) and n.name==class_name)
+    for method in incoming_class.body:
+        if isinstance(method,(ast.FunctionDef,ast.AsyncFunctionDef)) and method.name not in existing_names:
+            target_class.body.append(method)
+    ast.fix_missing_locations(updated_tree)
+    merged=ast.unparse(updated_tree)+'\n'
+    compile(merged,'<merged-page-object>','exec')
+    return merged
 
 
 def _append_test_functions(existing_source: str, new_source: str) -> str:
-    """Append test functions from *new_source* to *existing_source*, skipping duplicates."""
-    try:
-        existing_tree = ast.parse(existing_source)
-        new_tree = ast.parse(new_source)
-    except SyntaxError:
-        return existing_source + "\n\n" + new_source
+    """Refresh incoming top-level tests and their imports; keep unrelated tests."""
+    existing_tree=ast.parse(existing_source)
+    incoming=ast.parse(new_source)
+    tests={n.name:n for n in incoming.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))
+           and n.name.startswith('test_')}
+    if not tests:return existing_source
+    updated=[];replaced=set()
+    for node in existing_tree.body:
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in tests:
+            updated.append(tests[node.name]);replaced.add(node.name)
+        else:updated.append(node)
+    imports={ast.dump(n,include_attributes=False) for n in updated if isinstance(n,(ast.Import,ast.ImportFrom))}
+    additions=[n for n in incoming.body if isinstance(n,(ast.Import,ast.ImportFrom))
+               and ast.dump(n,include_attributes=False) not in imports]
+    def imported_bindings(node):
+        if isinstance(node,ast.ImportFrom):
+            return {a.asname or a.name:(node.module,a.name) for a in node.names}
+        if isinstance(node,ast.Import):
+            return {a.asname or a.name.split('.')[0]:(a.name,None) for a in node.names}
+        return {}
+    previous={k:v for n in updated for k,v in imported_bindings(n).items()}
+    for node in additions:
+        for name,value in imported_bindings(node).items():
+            if name in previous and previous[name]!=value:
+                raise ValueError(f"Generated test import conflicts with existing binding: {name}")
+    # Keep future imports before ordinary imports and executable statements.
+    futures=[n for n in additions if isinstance(n,ast.ImportFrom) and n.module=='__future__']
+    ordinary=[n for n in additions if n not in futures]
+    index=1 if updated and isinstance(updated[0],ast.Expr) and isinstance(updated[0].value,ast.Constant) and isinstance(updated[0].value.value,str) else 0
+    updated[index:index]=futures
+    index+=len(futures)
+    while index<len(updated) and isinstance(updated[index],ast.ImportFrom) and updated[index].module=='__future__':index+=1
+    updated[index:index]=ordinary
+    updated.extend(node for name,node in tests.items() if name not in replaced)
+    existing_tree.body=updated
+    ast.fix_missing_locations(existing_tree)
+    result=ast.unparse(existing_tree)+'\n'
+    compile(result,'<updated-generated-tests>','exec')
+    return result
 
-    existing_funcs = {
-        n.name for n in ast.walk(existing_tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-    new_lines = new_source.splitlines(keepends=True)
-    parts_to_add: List[str] = []
-
-    for node in ast.walk(new_tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if not node.name.startswith("test_"):
-            continue
-        if node.name in existing_funcs:
-            continue
-        start = node.decorator_list[0].lineno - 1 if node.decorator_list else node.lineno - 1
-        end = node.end_lineno  # type: ignore[attr-defined]
-        parts_to_add.append("".join(new_lines[start:end]))
-
-    if not parts_to_add:
-        return existing_source
-
-    return existing_source.rstrip() + "\n\n\n" + "\n\n\n".join(parts_to_add) + "\n"
 
 
 # ---------------------------------------------------------------------------

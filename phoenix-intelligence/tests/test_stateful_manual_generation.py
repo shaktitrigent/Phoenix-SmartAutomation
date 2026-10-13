@@ -7,7 +7,7 @@ from phoenix_shared.manual_semantics import expectation_parts
 from phoenix_shared.generation_contract import Snapshot, artifact_plan_issues
 from phoenix.locators.smartlocator_integration import validated_locator_bundles
 from services.agents.evidence_fallback import select_subject
-from services.agents.test_generator import TestGeneratorAgent, _extract_click_target, _detect_truncated_generation
+from services.agents.test_generator import TestGeneratorAgent, _extract_click_target, _detect_truncated_generation, _split_compound_actions
 from services.knowledge.base import KnowledgeBase
 from services.cache import Cache
 
@@ -58,6 +58,92 @@ def test_form_error_text_changes_preserve_same_scope_and_distinct_sections():
     assert len(grouped)==1 and len(grouped[0]['metadata']['state_evidence'])==2
     other=deepcopy(error);other['metadata']['element_data']['ancestor_context']['section_context']['section_heading']='Newsletter'
     assert len(group_state_evidence([first,other]))==2
+
+
+def test_tc002_generates_from_stored_login_locators_without_llm():
+    import ast
+    from pathlib import Path
+    from phoenix.generators.manual_parser import load_manual_tests_from_file
+    from phoenix.locators.smartlocator_integration import (
+        locator_bundle_evidence, resolve_automation_locator_evidence,
+        validated_locator_bundles,
+    )
+
+    project = Path(__file__).resolve().parents[2] / "Orange-Test"
+    manual = load_manual_tests_from_file(
+        project / "manual_tests" /
+        "manual_test_002_tc_002_login_failures_invalid_credentials_and_empty_field_validation.md"
+    )[0]
+    stored = validated_locator_bundles(project / "locators", "manual_tests", [manual])
+    evidence = locator_bundle_evidence(stored)
+    agent = TestGeneratorAgent(KnowledgeBase(), Cache(), llm_client=Mock())
+    agent.environment_values = {"TEST_USERNAME": "test-user", "TEST_INVALID_PASSWORD": "invalid-password"}
+
+    generated = agent.automate_from_manual_tests(
+        [manual],
+        application_url="https://opensource-demo.orangehrmlive.com/web/index.php/auth/login",
+        locator_bundles=evidence,
+        dom_snapshot="",
+        use_pom=True,
+    )["automation_tests"][0]
+    script = generated["script_code"]
+    ast.parse(script)
+    assert generated["generation_mode"] == "deterministic"
+    assert agent.llm_client.generate.call_count == 0
+    assert '.get_by_role("textbox", name="Username")' in script
+    assert 'page.locator("[name=\'password\']")' in script
+    assert '.get_by_role("button", name="Login")' in script
+    assert 'page.locator(".orangehrm-login-button")' not in script
+    assert any(c['kind']=='field_messages' and c['expected_count']==2 for c in generated['assertion_contracts'])
+    assert any(c['kind']=='absent' and c.get('dynamic_state')=='after_action' for c in generated['assertion_contracts'])
+
+    pom = generated["pom_bundle"]
+    page_object = pom["page_objects"][0]["code"]
+    test_script = pom["tests"][0]["code"]
+    assert "get_by_role('textbox', name='Username')" in ast.unparse(ast.parse(page_object))
+    assert "[name='password']" in page_object
+    assert "from pages." in test_script
+    assert any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and isinstance(n.func.value,ast.Name) and n.func.value.id.startswith('_po_') for n in ast.walk(ast.parse(test_script)))
+
+    scan_calls = []
+    resolution = resolve_automation_locator_evidence(
+        [generated], stored,
+        application_url="https://opensource-demo.orangehrmlive.com/web/index.php/auth/login",
+        page="login",
+        scan=lambda *args, **kwargs: scan_calls.append(kwargs) or [],
+        discover=lambda payload: pytest.fail("LocatorExpert must not run for TC-002"),
+        validate=lambda *_args, **_kwargs: {"match_count": 0, "identity_matches": False},
+    )
+    assert resolution["unresolved"] == []
+    assert scan_calls == []
+
+
+def test_orange_test_locator_pages_load_as_validated_bundles():
+    from pathlib import Path
+
+    project = Path(__file__).resolve().parents[2] / "Orange-Test"
+    for page, expected_names in {
+        "login": {"UsernameInput", "PasswordInput", "LoginButton"},
+        "dashboard": {"PimLink"},
+        "employee_list": {"EmployeeListLink", "SearchButton"},
+        "add_employee": {"FirstNameInput", "MiddleNameInput", "LastNameInput", "SaveButton"},
+    }.items():
+        bundles = validated_locator_bundles(project / "locators", page)
+        assert expected_names <= {bundle.element_name for bundle in bundles}
+        assert all(bundle.page == page for bundle in bundles)
+
+
+def test_navigation_breadcrumbs_and_account_menu_missing_state_are_explicit():
+    from services.agents.evidence_fallback import missing_state_evidence_diagnostic
+
+    assert _split_compound_actions('Navigate to PIM > Employee List') == [
+        'Click PIM', 'Click Employee List']
+    assert _split_compound_actions('Click PIM in the application navigation, then open Add Employee') == [
+        'Click PIM', 'open Add Employee']
+    diagnostic = missing_state_evidence_diagnostic('user profile dropdown', 'interaction')
+    assert 'post_interaction_locator_evidence' in diagnostic
+    assert 'requested page' in diagnostic and 'prerequisite interaction' in diagnostic
+    assert missing_state_evidence_diagnostic('Save', 'button') is None
 
 
 def test_same_message_selector_strategies_keep_widest_validated_state_coverage():

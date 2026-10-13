@@ -59,8 +59,17 @@ SUPPORTED_PATTERNS: List[str] = [
 # ---------------------------------------------------------------------------
 
 def _strip_md_cell(cell: str) -> str:
-    """Strip whitespace and inline backtick code markers from a table cell."""
-    return cell.strip().strip("`").strip()
+    """Strip whitespace and a wrapper code span without damaging placeholders.
+
+    Test-data cells often contain multiple inline code spans such as
+    ``Username: `${TEST_USERNAME}`; Password: `${TEST_PASSWORD}```.  Stripping
+    every edge backtick truncates the final runtime placeholder, so only unwrap
+    a code span when it encloses the entire cell.
+    """
+    value = cell.strip()
+    if len(value) >= 2 and value.startswith("`") and value.endswith("`") and value.count("`") == 2:
+        value = value[1:-1].strip()
+    return value
 
 
 def _parse_table_rows(block: str) -> List[List[str]]:
@@ -332,6 +341,20 @@ def parse_manual_test_file(file_path: str | Path) -> Optional[Dict[str, Any]]:
                 "test_data": test_data,
             }
         )
+
+    # Optional explicit verification contracts live in the manual project,
+    # never in application branches in the compiler.
+    verification_block=sections.get("assertion evidence", "").strip()
+    if verification_block:
+        import json
+        verification_block=re.sub(r'^```(?:json)?\s*|\s*```$', '', verification_block)
+        evidence=json.loads(verification_block)
+        if not isinstance(evidence,dict):raise ValueError("Assertion Evidence must map step numbers to contract arrays")
+        for step in steps:
+            supplied=evidence.get(str(step['step_number']),[])
+            if not isinstance(supplied,list) or not all(isinstance(v,dict) for v in supplied):
+                raise ValueError("Assertion Evidence entries must be contract arrays")
+            if supplied:step['assertion_evidence']=supplied
 
     # Fallback: try BDD/Gherkin format first, then plain numbered/bulleted list
     if not steps and steps_block:

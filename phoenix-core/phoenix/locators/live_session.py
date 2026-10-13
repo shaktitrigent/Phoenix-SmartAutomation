@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -60,7 +61,9 @@ _DESCRIBE = r"""(element, policy) => {
  const structure = node => ({tag:node.tagName.toLowerCase(),attributes:attrs(node),
    text:slots.includes(node) ? '[mutable-display]' : [...node.childNodes].filter(n=>n.nodeType===3).map(n=>clean(n.nodeValue)).filter(Boolean).join(' '),
    children:[...node.children].map(structure)});
- return {tag:element.tagName.toLowerCase(), ...attrs(element), table_context,
+ const column_headers=element.matches('table,[role=table],[role=grid]') ?
+   [...element.querySelectorAll('th,[role=columnheader]')].map(n=>clean(n.textContent)).filter(Boolean) : [];
+ return {tag:element.tagName.toLowerCase(), ...attrs(element), table_context, column_headers,
          ...(policy ? {content_structure:structure(element), mutable_display_values:slots.map(n=>clean(n.textContent))} : {}),
          text:element.matches('input') ? (['submit','button','reset'].includes(element.type) ? clean(element.value) : '') : snapshotText(element),
          siblings:[...(element.parentElement?.children||[])].filter(n=>n!==element).slice(0,4).map(n=>({tag:n.tagName.toLowerCase(),...attrs(n),text:snapshotText(n).slice(0,300)})),
@@ -94,7 +97,12 @@ def identity_matches(actual: dict, expected: dict) -> bool:
     if text:
         checks["text"] = text
     # A tag alone cannot establish which physical control was requested.
-    if not any(k != "tag" for k in checks):
+    context = data.get("ancestor_context") or {}
+    contextual_identity = bool(context.get('container_id') or context.get('container_test_id') or
+                               context.get('container_testid') or context.get('distinguishing_text'))
+    headers=data.get('column_headers') or []
+    if headers and actual.get('column_headers')!=headers:return False
+    if not any(k != "tag" for k in checks) and not contextual_identity and not headers:
         return False
     if any(str(actual.get(k, "")) != v for k, v in checks.items()):
         return False
@@ -201,14 +209,26 @@ class LiveLocatorSession:
             policy = expected.get('content_identity')
             actual = target.evaluate(_DESCRIBE, policy) if count == 1 else {}
             identity = count == 1 and identity_matches(actual, expected)
+            anchor_count=None;identity_count=None
             if identity:
                 tag=str(expected.get("tag") or "")
-                anchors=self.page.locator(tag if re.fullmatch(r"[a-z][a-z0-9-]*", tag) else "button,input,a,select,textarea,[role]")
+                anchor_selector=tag if re.fullmatch(r"[a-z][a-z0-9-]*", tag) else "button,input,a,select,textarea,[role]"
+                # Every possible identity match must satisfy its declared role.
+                # Filtering by that requirement preserves duplicate detection
+                # without exhausting the budget on unrelated layout nodes.
+                role=str(expected.get("role") or "")
+                if tag and re.fullmatch(r"[a-z][a-z0-9-]*",tag) and re.fullmatch(r"[a-z][a-z0-9-]*",role):
+                    anchor_selector=tag+'[role='+json.dumps(role)+']'
+                anchors=self.page.locator(anchor_selector)
                 def matches(node):
                     try: return identity_matches(node.evaluate(_DESCRIBE, policy), expected)
                     except Exception: return False
-                identity = anchors.count() <= 500 and sum(matches(n) for n in anchors.all()) == 1
+                anchor_count=anchors.count()
+                identity_count=sum(matches(n) for n in anchors.all()) if anchor_count<=500 else None
+                identity=identity_count==1
             return {"match_count": count, "identity_matches": identity,
+                    "anchor_count":anchor_count,"identity_count":identity_count,
+                    "validation_reason":None if identity else "anchor_budget_exceeded" if anchor_count is not None and anchor_count>500 else "ambiguous_identity" if identity_count is not None and identity_count>1 else "identity_mismatch",
                     "validated_at": datetime.now(timezone.utc).isoformat(),
                     "validation_url": self.page.url, "state_name": self.state_name}
         except Exception as exc:
@@ -402,4 +422,12 @@ def live_session(application_url, *, page=None, storage_state=None, state_name="
                 _execute_state_action(current,action)
             yield LiveLocatorSession(current,state_name=state_name,stability_threshold=stability_threshold)
         finally:
-            browser.close()
+            active_error = sys.exc_info()[0] is not None
+            try:
+                browser.close()
+            except Exception:
+                # Preserve the operation's original failure. A disconnected
+                # Playwright driver during cleanup must not hide the error
+                # raised by locator reconciliation or generation.
+                if not active_error:
+                    raise

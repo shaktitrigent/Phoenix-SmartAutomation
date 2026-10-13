@@ -49,7 +49,7 @@ def test_cli_context_reaches_sdk_and_api_model(
     )
     captured = {}
 
-    def post(url, *, json, timeout):
+    def post(url, *, json, timeout, headers=None):
         captured.update(json)
         # Validate the actual SDK JSON against the actual API schema.
         request = api_models.model_validate(json)
@@ -97,7 +97,7 @@ def test_cli_locator_expert_discovery_reuses_project_context(tmp_path, monkeypat
     )
     captured_requests = []
 
-    def post(url, *, json, timeout):
+    def post(url, *, json, timeout, headers=None):
         captured_requests.append((url, json))
         if url.endswith("/api/v1/locators/discover"):
             return Mock(status_code=200, json=lambda: {
@@ -210,6 +210,20 @@ def test_sdk_and_model_keep_legacy_payload(monkeypatch, api_models, explicit_non
     assert path == "/api/v1/tests/automate"
     assert "project_context" not in payload
     assert api_models.model_validate(payload).project_context is None
+
+
+def test_intelligence_timeout_does_not_retry_inflight_automation_post(monkeypatch):
+    import requests
+
+    client = IntelligenceClient(PhoenixConfig())
+    post = Mock(side_effect=requests.Timeout("read timed out"))
+    monkeypatch.setattr("phoenix.sdk.intelligence_client.requests.post", post)
+
+    with pytest.raises(RuntimeError, match="server completion is unknown"):
+        client.automate_from_manual([{"name": "TC-002"}])
+
+    assert post.call_count == 1
+    assert post.call_args.kwargs["headers"]["X-Correlation-ID"]
 
 
 @pytest.mark.parametrize("context_mode", ["present", "absent", "null"])

@@ -990,8 +990,11 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
         actions.extend(st.get("actions", []))
         if st["name"] == selected_state:
             break
+    import time as _phase_time
+    _browser_started = _phase_time.monotonic()
     with live_session(application_url, storage_state=storage_state, state_name=selected_state,
                       actions=actions) as browser_session:
+        print_info(f"Browser session and requested UI state ready in {_phase_time.monotonic() - _browser_started:.1f}s.")
         # Load project-specific domain knowledge
         domain_knowledge = _load_domain_knowledge(project_root)
         if domain_knowledge:
@@ -1017,9 +1020,11 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
             )
 
             smartlocator_scan = browser_session.scan
+            _bundle_started = _phase_time.monotonic()
             smartlocator_bundles = validated_locator_bundles(
                 locator_directory, smartlocator_page, manual_tests, revalidate=browser_session.revalidate
             )
+            print_info(f"Stored locator discovery and live validation took {_phase_time.monotonic() - _bundle_started:.1f}s.")
             if smartlocator_bundles:
                 print_info(
                     f"SmartLocatorAI: loaded {len(smartlocator_bundles)} validated stored "
@@ -1089,6 +1094,8 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
             _mode_label = "BDD" if _use_bdd else ("POM" if _use_pom else "flat")
             print_info(f"Calling intelligence server to generate automation scripts [{_mode_label} mode]…")
             print_info("DOM evidence is supplied from the current browser session; locator validation is required")
+            import time as _time
+            _generation_started = _time.monotonic()
             result = intel_client.automate_from_manual(
                 manual_tests=manual_tests,
                 application_url=application_url,
@@ -1105,6 +1112,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
                 locator_bundles=locator_evidence,
                 dom_snapshot=browser_session.generation_snapshot(),
             )
+            print_info(f"Intelligence generation returned in {_time.monotonic() - _generation_started:.1f}s.")
         except Exception as exc:
             print_error(f"Intelligence server error: {exc}")
             raise click.Abort() from exc
@@ -1123,10 +1131,16 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
                     _known = {"missing_explicit_action_data", "missing_explicit_fill_data", "missing_navigation_url",
                         "missing_or_ambiguous_fill_target", "missing_or_ambiguous_click_target", "unsupported_action",
                         "unsupported_expected_outcome", "missing_expected_outcome", "missing_or_ambiguous_select_target",
-                        "missing_or_ambiguous_checkbox_target", "submission_outcome_not_supplied", "contradictory_expected_input_state"}
+                        "missing_or_ambiguous_checkbox_target", "submission_outcome_not_supplied", "contradictory_expected_input_state",
+                        "missing_or_ambiguous_assertion_target", "missing_observable_record_scope",
+                        "missing_observable_non_creation_evidence", "missing_validation_field_scope",
+                        "invalid_observable_assertion_evidence", "unbound_environment_heading"}
                     _reasons = [r for r in _step_contract.get("reasons", []) if r in _known]
                     print_warning(f"Translation step {_number}: " + ", ".join(_reasons or ["unresolved contract"]))
+                    for _outcome in _step_contract.get("unsupported_outcomes", []):
+                        print_warning(f"  Unsupported outcome: {_outcome}")
 
+        _resolution_started = _phase_time.monotonic()
         try:
             resolution = resolve_automation_locator_evidence(
                 automation_tests,
@@ -1147,6 +1161,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
                 f"LocatorExpert_calls={resolution['locator_expert_calls']}, "
                 f"unresolved={len(resolution['unresolved'])}."
             )
+            print_info(f"Locator reconciliation and fallback took {_phase_time.monotonic() - _resolution_started:.1f}s.")
         except Exception as _exc:
             print_warning(
                 "Locator evidence reconciliation failed; generated output was not accepted: "
@@ -1271,6 +1286,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
         if _use_pom:
             try:
                 from phoenix.output.coordinator import OutputManager
+                _write_started = _phase_time.monotonic()
                 manager = OutputManager(project_root)
                 pom_written: List[str] = []
                 for test in automation_tests:
@@ -1279,6 +1295,7 @@ def automate(ctx, manual_dir, manual_file, test_case, url, project, clean, locat
                         files = manager.apply(bundle)
                         pom_written.extend(files)
                 if pom_written:
+                    print_info(f"POM file application took {_phase_time.monotonic() - _write_started:.1f}s.")
                     click.echo("")
                     print_success(f"POM delta applied — {len(pom_written)} file(s) written/updated:")
                     for f in pom_written:
@@ -3149,6 +3166,7 @@ def jira_show(ctx, issue_key: str):
 @click.option("--fallback-rounds", default=2, type=click.IntRange(1, 3))
 def scan_locator_states(application_url, states_file, storage_state, output, locators_dir, llm_fallback=False, fallback_rounds=2):
     """Capture an explicit journey in one session; never guess routes or credentials."""
+    import json
     import os
     from dotenv import dotenv_values
     from phoenix.locators.journey import capture_journey
@@ -3161,6 +3179,8 @@ def scan_locator_states(application_url, states_file, storage_state, output, loc
         config_path = resolve_config_path(search_parents=True)
         root = Path(config_path).resolve().parent if config_path else Path.cwd()
         client = IntelligenceClient(PhoenixConfig.load(config_path))
+        client.timeout = min(client.timeout, 30)
+        client.retry_count = 1
         def discover(payload):
             context = ProjectContext(project_root=str(root), application_url=payload["page_url"],
                 page_name=payload["state_name"], locator_directory=str(Path(locators_dir).resolve()),
@@ -3171,6 +3191,17 @@ def scan_locator_states(application_url, states_file, storage_state, output, loc
         result = capture_journey(application_url, states_file, output, locators_dir,
                                  values=values, storage_state=storage_state, discover=discover,
                                  max_rounds=fallback_rounds)
+    except ValueError as exc:
+        raise click.ClickException(f"Journey capture failed: {exc}") from exc
     except Exception as exc:
         raise click.ClickException(f"Journey capture failed ({type(exc).__name__}); check supplied states and runtime diagnostics") from exc
+    for state in result['states']:
+        click.echo(f"State {state['name']}: accepted={state.get('accepted',0)}, unaccepted={state.get('unresolved',0)}, LocatorExpert_calls={state.get('llm_calls',0)}")
+        for stage,elapsed in state.get('stage_timings',{}).items():
+            click.echo(f"  {stage}: {elapsed:.2f}s")
+        for target in state.get('fallback_unresolved',[]):
+            click.echo(f"  Required target {target['element_name']}: {target.get('reason') or 'unresolved'}")
+    if any(state.get('fallback_unresolved') for state in result['states']):
+        raise click.ClickException('Required journey targets remain unresolved; see page/state diagnostics above')
     print_success(f"Captured and persisted {len(result['states'])} explicit page/state(s)")
+    click.echo(json.dumps(result, ensure_ascii=False, indent=2))

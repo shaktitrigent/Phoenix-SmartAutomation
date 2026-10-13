@@ -404,6 +404,8 @@ def _missing_fill_data(action: str) -> bool:
     if re.search(r"\b(?:username|email|password|credentials)\b", unquoted, re.I) and re.search(r"\band\b", unquoted, re.I):
         return True  # compound fields must be bound independently
     field, value = _extract_fill_target_and_value(action)
+    if _extract_quoted_value(action) is not None and field.lower() not in {'field','valid','invalid'}:
+        return False
     return (field.lower() in {"field", "valid", "invalid"}
             or value.lower() in {"value", "password", "username", "credentials", "a password", "valid credentials", "invalid credentials"}
             or re.match(r"^(?:valid|registered|test)\s+(?:username|email|password|credentials)\b", _strip_fill_action_prefix(action), re.I) is not None)
@@ -416,13 +418,8 @@ def _resolve_fill_value_expr(field: str, value: str) -> str:
 
 
 def _split_compound_actions(criterion: str) -> List[str]:
-    """Split compound criteria into atomic action steps if multiple distinct actions exist."""
-    if not criterion:
-        return []
-    pattern = r'\s+(?:and|then)\s+(?=(?:enter|type|fill|input|click|press|tap|submit|select|choose|check|uncheck|verify|assert|validate)\b)'
-    parts = re.split(pattern, criterion, flags=re.IGNORECASE)
-    parts = [p.strip() for p in parts if p.strip()]
-    return parts if len(parts) > 1 else [criterion]
+    from phoenix_shared.manual_semantics import split_actions
+    return split_actions(criterion)
 
 
 def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
@@ -498,6 +495,7 @@ def _extract_click_target(criterion: str) -> Tuple[str, str]:
         flags=re.IGNORECASE,
     )
     cleaned = cleaned.strip().strip("`'\"*. ")
+    cleaned = re.sub(r"\s+in\s+(?:the\s+)?(?:application\s+)?navigation(?:\s+menu)?$", "", cleaned, flags=re.I)
     quoted = (_extract_quoted_value(criterion) or cleaned).strip("`'\"*. ")
 
     if re.search(r'\bmenu\s+item\b|\boption\b.*\bmenu\b', lower):
@@ -1643,6 +1641,11 @@ def _synthesize_pom_bundle(
     validate→repair loop in ``AutomationTestGenerator`` still runs on the
     synthesized test file.
     """
+    from phoenix_shared.page_objects import synthesize_pages
+    fixture = 'authenticated_page' if _needs_authenticated_page(preconditions, name=human_name, description=description) else 'page'
+    synthesized = synthesize_pages(script_code, module_name, test_name, fixture)
+    if synthesized is not None:
+        return synthesized
     # Derive class name from the human-readable test name when available so that
     # the class captures the full intent (e.g. "SuccessfulLoginWithValidCredentialsPage")
     # rather than the truncated module slug.
@@ -2197,6 +2200,13 @@ class TestGeneratorAgent(BaseAgent):
                 return {"script_code": _normalise_generated_script(compiled["script_code"]),
                         "generation_mode": "fallback" if compiled["overall_outcome_unresolved"] else "deterministic",
                         "locators": [], "recommendations": []}
+        compiled = manual_test.get('_compiled_fallback')
+        if compiled and any(any(reason.startswith(('missing_', 'unbound_', 'contradictory_'))
+                                for reason in record.get('reasons',[]))
+                            for record in compiled.get('step_contracts',[])):
+            return {'script_code':_normalise_generated_script(compiled['script_code']),
+                    'generation_mode':'unresolved_evidence', 'locators':[],
+                    'recommendations':['Capture the named unresolved page/state targets or supply observable assertion evidence before retrying.']}
         if not self.llm_client:
             script = self._build_fallback_script_from_manual_test(
                 manual_test=manual_test,
@@ -2298,8 +2308,12 @@ class TestGeneratorAgent(BaseAgent):
             logger.info("DOM snapshot included: %s (%d chars)", "Yes" if page_snapshot else "No", len(page_snapshot) if page_snapshot else 0)
             
             try:
+                _llm_started = time.monotonic()
+                logger.info("LLM automation call started; prompt_chars=%d",
+                            len(system_prompt) + len(user_prompt))
                 raw = self.llm_client.generate(system_prompt, user_prompt)
-                logger.info("LLM response received (%d chars)", len(raw))
+                logger.info("LLM response received (%d chars) elapsed_seconds=%.2f",
+                            len(raw), time.monotonic() - _llm_started)
                 
                 script, locators, recommendations = _parse_structured_v2_output(raw)
             except Exception as llm_exc:
@@ -3007,6 +3021,15 @@ class TestGeneratorAgent(BaseAgent):
                 # Typed action/outcome mappings plus ordered artifact fidelity
                 # provide stronger coverage evidence than English token overlap.
                 coverage.update(implemented_steps=len(steps), unresolved_steps=[])
+            if result.get('step_contracts') and result.get('generation_plan') and not artifact_issues:
+                records=result['step_contracts']
+                partial=[r['step'] for r in records if r.get('status')!='translated']
+                first_partial=min(partial) if partial else None
+                compiled_count=sum(r.get('status')=='translated' for r in records)
+                reachable=[r['step'] for r in records if r.get('status')=='translated' and (first_partial is None or r['step']<first_partial)]
+                coverage.update(compiled_steps=compiled_count, compilation_unresolved_steps=partial,
+                    implemented_steps=len(reachable), unresolved_steps=[r['step'] for r in records if r['step'] not in reachable],
+                    unreachable_steps=[r['step'] for r in records if r.get('status')=='translated' and first_partial is not None and r['step']>first_partial])
             # Use the same authoritative coverage for warnings and acceptance.
             # Recomputing token-based coverage here can falsely reject a fully
             # mapped action/assertion plan (notably scoped absence assertions).

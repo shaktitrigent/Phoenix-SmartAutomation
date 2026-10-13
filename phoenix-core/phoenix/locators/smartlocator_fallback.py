@@ -435,7 +435,9 @@ def resolve_with_locator_expert(
                 if isinstance(tokens, int):
                     total_tokens += tokens
             except Exception as exc:
-                error = "locator_expert_failed: " + type(exc).__name__
+                cause=getattr(exc,'__cause__',None)
+                timed_out=isinstance(exc,TimeoutError) or type(cause).__name__ in {'Timeout','ReadTimeout','ConnectTimeout'}
+                error = 'locator_expert_timeout_completion_unknown' if timed_out else "locator_expert_failed: " + type(exc).__name__
                 break
             candidates = parse_locator_expert_candidates(response, payload)[:max_candidates]
             for candidate in candidates:

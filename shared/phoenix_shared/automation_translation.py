@@ -34,7 +34,12 @@ def environment_reference(value: str) -> str | None:
 
 def fill_value_expression(value: str) -> str:
     key = environment_reference(value)
-    return f"os.environ[{key!r}]" if key else repr(value)
+    if key:
+        return f"os.environ[{key!r}]"
+    # Interpolation keeps supplied literal separators and fails on missing vars.
+    parts = re.split(r'(\$\{[A-Za-z_][A-Za-z0-9_]*\})', value)
+    return ' + '.join(f"os.environ[{environment_reference(p)!r}]" if environment_reference(p) else repr(p)
+                      for p in parts if p) if len(parts) > 1 else repr(value)
 
 
 def resolve_script_environment_values(script: str) -> str:

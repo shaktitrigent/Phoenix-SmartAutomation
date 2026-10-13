@@ -210,7 +210,7 @@ class GeneratorIntegrationTests(unittest.TestCase):
             self.assertEqual(generated['generation_quality']['implemented_steps'], 1)
             self.assertIn("os.environ['ACCOUNT_EMAIL']", generated['script_code'])
             if use_pom:
-                page_code = generated['pom_bundle']['page_objects'][0]['code']
+                page_code = '\n'.join(p['code'] for p in generated['pom_bundle']['page_objects'])
                 self.assertIn('https://custom.example.invalid/contact', page_code)
                 self.assertNotIn('_po.navigate()', generated['pom_bundle']['tests'][0]['code'])
 
@@ -226,7 +226,7 @@ class GeneratorIntegrationTests(unittest.TestCase):
         script = 'def test_x(page: Page):\n    page.get_by_text("Contact page").click()\n'
         bundle = self.ns['_synthesize_pom_bundle'](script, 'contact', 'contact')
         code = bundle['page_objects'][0]['code']
-        self.assertIn('self._page.get_by_text("Contact page")', code)
+        self.assertIn("self._page.get_by_text('Contact page')", ast.unparse(ast.parse(code)))
 
     def test_partial_generation_emits_warning(self):
         agent = self.ns['TestGeneratorAgent'](); agent.llm_client = None; agent.mcp_client = None

@@ -90,18 +90,100 @@ def outcome_contract(expected,action,snapshot,step):
             'source':'manual_expected_result','expected_text':text,'action_text':action}
 
 
+def workflow_summary_binding(text, contracts, records):
+    """Bind recognized UI workflow prose to typed, already executed predicates."""
+    translated={r['step']:r for r in records if r.get('status')=='translated'}
+    cs=[c for c in contracts if c.get('step') in translated]
+    positive=[c for c in cs if c.get('kind')=='record_present' and c.get('target_evidence') and c.get('expected_values')]
+    saved=[c for c in cs if c.get('kind')=='data_visible' and c.get('expected_values')]
+    def refs(values):
+        return set(re.findall(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}', ' '.join(values)))
+    creation=[(a,b) for a in saved for b in positive if a['step']<b['step']
+              and refs(a['expected_values']) and refs(a['expected_values'])==refs(b['expected_values'])
+              and translated[a['step']].get('url_asserted')
+              and translated[a['step']].get('action_kind')=='click'
+              and re.search(r'\b(?:save|create|add|submit|register|apply|confirm)\b',translated[a['step']].get('action_text',''),re.I)]
+    def result(steps,scope='observable_ui'):
+        return {'summary':text,'steps':sorted(set(steps)),'proof_scope':scope}
+    plain=text.strip().rstrip('.,')
+    # Shared input conditions are preserved as one sentence, rather than split
+    # at field-list conjunctions and treated as independent business outcomes.
+    condition=re.fullmatch(r'(?:A|The) record is successfully created and searchable when (.+?) are supplied and (.+?) is omitted\.?',plain,re.I)
+    if condition and creation:
+        inputs={k:v for r in translated.values() for k,v in r.get('input_values',{}).items()}
+        requested=[x.strip() for x in re.split(r',\s*(?:and\s+)?|\s+and\s+',condition[1],flags=re.I)]
+        matched=lambda label:next((v for k,v in inputs.items() if ' '.join(words(k))==' '.join(words(label))),None)
+        values=[matched(label) for label in requested]
+        if values and all(v for v in values) and matched(condition[2])=='':
+            pairs=[(a,b) for a,b in creation if refs(values)==refs(a['expected_values'])]
+            if pairs:return result([c['step'] for pair in pairs for c in pair],'observable_saved_and_filtered_record')
+        return None
+    blocked=re.fullmatch(r'(?:The )?form blocks submission when required (?:fields|names) are empty\.?',plain,re.I)
+    if blocked:
+        proof=[c for c in cs if c.get('kind')=='no_new_records']
+        errors=[c for c in cs if c.get('kind')=='field_messages' and any(p['step']==c['step'] for p in proof)]
+        if proof and errors:return result([c['step'] for c in proof+errors],'configured_record_comparison_and_field_validation')
+        return None
+    pieces=[v.strip() for v in re.split(r',\s*(?:and\s+)?',plain) if v.strip()]
+    steps=[]
+    for piece in pieces:
+        if re.fullmatch(r'(?:(?:The )?(?:user|administrator|operator|customer) )?logs in(?: successfully)?',piece,re.I):
+            matches=[r for r in translated.values() if r.get('url_asserted') and
+                     re.search(r'\b(?:login|log in|sign in)\b',r.get('action_text',''),re.I) and
+                     any(c['step']==r['step'] and c.get('kind')=='visible' for c in cs)]
+            if not matches:return None
+            steps.extend(r['step'] for r in matches)
+        elif re.fullmatch(r'creates (?:a|an|the) [\w -]+',piece,re.I):
+            if not creation:return None
+            entity=re.sub(r'^creates (?:a|an|the) ', '',piece,flags=re.I)
+            matches=[pair for pair in creation if set(words(entity))<=set(words(pair[1].get('expected_text','')))]
+            if not matches:return None
+            steps.extend(c['step'] for pair in matches for c in pair)
+        elif re.fullmatch(r'finds (?:that|the) [\w -]+ in (?:the )?list',piece,re.I):
+            entity=re.sub(r'^finds (?:that|the) | in (?:the )?list$', '',piece,flags=re.I)
+            matches=[c for c in positive if set(words(entity))<=set(words(c.get('expected_text',''))) and translated[c['step']].get('action_kind')=='search']
+            if not matches:return None
+            steps.extend(c['step'] for c in matches)
+        elif re.fullmatch(r'logs out(?: successfully)?',piece,re.I):
+            matches=[r for r in translated.values() if r.get('url_asserted') and
+                     re.search(r'\b(?:logout|log out|sign out)\b',r.get('action_text',''),re.I) and
+                     any(c['step']==r['step'] and c.get('kind')=='absent' and c.get('scope') for c in cs) and
+                     any(c['step']==r['step'] and c.get('kind')=='visible' for c in cs)]
+            if not matches:return None
+            steps.extend(r['step'] for r in matches)
+        else:return None
+    return result(steps) if steps else None
+
+
 def summary_binding(text, contracts, records):
     """Bind narrative summaries to explicit outcomes, never invent a UI subject.
 
     Logged-out summaries here describe the observable UI only. They cannot
     establish server-side session invalidation or cookie/token absence.
     """
+    workflow=workflow_summary_binding(text,contracts,records)
+    if workflow:return workflow
     normalized = ' '.join(words(text))
+    displayed=re.fullmatch(r'.+? displays? (?:an? )?(.+?) (?:error|message)\.?',text,re.I)
+    if displayed:
+        message=set(words(displayed[1]))
+        candidates=[c for c in contracts if c['kind']=='visible' and message<=set(words(c.get('expected_text','')))]
+        if candidates:return {'summary':text,'steps':sorted({c['step'] for c in candidates}),'proof_scope':'observable_ui'}
+    empty_submission=re.fullmatch(r'Submitting .+? fields empty displays field.level validation errors\.?',text,re.I)
+    if empty_submission:
+        candidates=[c for c in contracts if c['kind'] in {'count','field_messages'} and c.get('expected_count',0)>0 and 'validation' in c.get('expected_text','').lower()]
+        empty_fills=[r for r in records if r.get('status')=='translated' and re.search(r'\bclear\b',r.get('action_text',''),re.I)]
+        if candidates and empty_fills:return {'summary':text,'steps':sorted({c['step'] for c in candidates}|{r['step'] for r in empty_fills}),'proof_scope':'observable_validation_messages'}
+    never=re.fullmatch(r'Neither attempt opens (?:the )?(.+?)\.?',text,re.I)
+    if never:
+        label=set(words(never[1]))
+        candidates=[c for c in contracts if c['kind'] in {'absent','hidden'} and label<=set(words(c.get('expected_text',''))) and c.get('scope')]
+        if len({c['step'] for c in candidates})==2:return {'summary':text,'steps':sorted({c['step'] for c in candidates}),'proof_scope':'observable_ui'}
     negative = [c for c in contracts if c['kind'] in {'hidden', 'absent'} and c.get('scope')
                 and re.search(r'\b(?:authenticated|authentication|account|signed|logged)\b',
                               c['action_text'] + ' ' + c['expected_text'], re.I)]
-    errors = [c for c in contracts if c['kind'] == 'visible'
-              and re.search(r'\b(?:error|rejection|rejected|denied|failure)\b',
+    errors = [c for c in contracts if c['kind'] in {'visible','count'}
+              and re.search(r'\b(?:error|rejection|rejected|denied|failure|validation)\b',
                             c['action_text'] + ' ' + c['expected_text'], re.I)]
     invalid = [c for c in contracts if c['kind'] in {'value_missing', 'invalid'}]
     completions = [r for r in records if r.get('deferred_to_steps')]
@@ -121,9 +203,30 @@ def summary_binding(text, contracts, records):
         proof=[c for c in contracts if c['kind']=='visible' and c.get('expected_heading_reference')
                and label<=set(words(c['expected_heading_reference']))]
         return {'summary':text,'steps':sorted({c['step'] for c in proof}),'proof_scope':'observable_ui'} if proof else None
+    quoted_summary = [next(v for v in group if v) for group in
+                      re.findall(r'`([^`]+)`|\'([^\']+)\'|"([^"]+)"', text)]
+    if quoted_summary and re.search(r'\b(?:error|rejection|failure)\b', normalized):
+        proof = [c for c in errors if any(q.casefold() in c['expected_text'].casefold() for q in quoted_summary)]
+        if proof:
+            return {'summary':text,'steps':sorted({c['step'] for c in proof}),'proof_scope':'observable_ui'}
+    if re.search(r'\b(?:error|rejection|failure)\b', normalized):
+        def message_core(contract):
+            core = re.sub(r'\s+(?:error|message)?\s*(?:is|are)?\s+(?:visible|displayed|shown)\.?$', '', contract['expected_text'], flags=re.I)
+            return re.sub(r'^(?:an?|the)\s+', '', core.strip(), flags=re.I).strip('`\'\" ').casefold()
+        proof = [c for c in errors if message_core(c) and message_core(c) in text.casefold()]
+        if proof:
+            return {'summary':text,'steps':sorted({c['step'] for c in proof}),'proof_scope':'observable_ui'}
     if re.fullmatch(r'(?:the )?[\w ]*(?:error|rejection|failure) (?:is )?(?:displayed|visible|shown)', normalized):
         wanted = set(words(text)) - {'the','is','displayed','visible','shown'}
         proof = [c for c in errors if wanted <= set(words(c['action_text'] + ' ' + c['expected_text']))]
+    elif re.search(r'\bvalidation errors?\b', normalized):
+        proof = [c for c in errors if c['kind'] in {'visible','count'}
+                 and re.search(r'\bvalidation message\b', c['expected_text'], re.I)
+                 and re.match(r'\s*(?:click|press|tap|submit)\b', c['action_text'], re.I)]
+    elif re.match(r'(?:neither|none)\b', normalized) and re.search(r'\b(?:opens?|reaches?|shows?)\b', normalized):
+        wanted = set(words(text)) - {'neither','none','attempt','attempts','opens','open','reaches','reach','shows','show','the','a','an'}
+        proof = [c for c in contracts if c['kind'] in {'hidden','absent'}
+                 and wanted & set(words(c['expected_text']))]
     elif re.fullmatch(r'(?:the )?[\w ]*(?:is |are )?(?:rejected|denied)', normalized):
         # Rejection requires an explicit rejected-input action and its submitted
         # error outcome. A random visible message or absent header is not enough.
@@ -157,14 +260,16 @@ def operation_signature(code, *, preserve_selectors=False):
                 return
             for statement in node.body:self.visit(statement)
         visit_AsyncFunctionDef=visit_FunctionDef
+        def visit_Assert(self,node):
+            events.append(('assert',ast.unparse(Canonical().visit(node))))
         def visit_Call(self,node):
             name=node.func.id if isinstance(node.func,ast.Name) else node.func.attr if isinstance(node.func,ast.Attribute) else ''
-            if name in {'fill_ready','click_ready'}:
+            if name in {'fill_ready','click_ready','select_autocomplete_option'}:
                 # Locator replacement may change strategy while preserving target.
                 # The immutable target description and supplied value remain checked.
                 events.append((name,ast.unparse(Canonical().visit(node)) if preserve_selectors else tuple(ast.unparse(a) for a in node.args[2:])))
                 return
-            if name in {'assert_contract','validate_target'}:
+            if name in {'assert_contract','validate_target','read_record_identities'}:
                 events.append((name,ast.unparse(node.args[1]) + repr([(k.arg,ast.unparse(k.value)) for k in node.keywords]) if len(node.args)>1 else 'missing'));return
             if name in {'goto','fill','click','select_option','check','uncheck','press','set_input_files'} or name.startswith(('to_','not_to_')):
                 if name=='to_be_visible' and "locator('body')" in ast.unparse(node):return
@@ -185,10 +290,20 @@ def artifact_plan_issues(test):
     pom=test.get('pom_bundle')
     if pom:
         observed=[]
-        for node in pom.get('page_objects',[]):observed.extend(operation_signature(node.get('code','')))
+        expanded=None
+        if pom.get('architecture')=='page_state':
+            from phoenix_shared.page_objects import expanded_pom_script
+            try:expanded=expanded_pom_script(pom)
+            except (ValueError,KeyError,SyntaxError) as exc:
+                issues.append('POM: invalid test-to-method call graph: '+str(exc))
+            if expanded is not None:observed=operation_signature(expanded)
+        else:
+            for node in pom.get('page_objects',[]):observed.extend(operation_signature(node.get('code','')))
         if observed!=expected:issues.append('POM: generated action/assertion order or data differs from the generation plan')
         exact=[]
-        for node in pom.get('page_objects',[]):exact.extend(operation_signature(node.get('code',''), preserve_selectors=True))
+        if expanded is not None:exact=operation_signature(expanded,preserve_selectors=True)
+        else:
+            for node in pom.get('page_objects',[]):exact.extend(operation_signature(node.get('code',''), preserve_selectors=True))
         if exact!=operation_signature(test.get('script_code') or '', preserve_selectors=True):
             issues.append('POM: executable selectors or assertions differ from the flat generation artifact')
     return issues

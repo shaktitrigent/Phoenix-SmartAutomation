@@ -41,6 +41,23 @@ User is logged in
     assert "btn_primary | click" in steps[2]["test_data"]
 
 
+def test_markdown_test_data_preserves_trailing_runtime_placeholder(tmp_path):
+    content = """# Placeholder binding
+
+## Test Steps
+| # | Action | Expected Result | Test Data |
+|---|--------|----------------|-----------|
+| 1 | Enter `${TEST_USERNAME}` in Username and `${TEST_PASSWORD}` in Password | Values are accepted | Username: `${TEST_USERNAME}`; Password: `${TEST_PASSWORD}` |
+"""
+    test_file = tmp_path / "manual_test_003_placeholders.md"
+    test_file.write_text(content, encoding="utf-8")
+
+    parsed = parse_manual_test_file(test_file)
+
+    assert parsed is not None
+    assert parsed["steps"][0]["test_data"].endswith("`${TEST_PASSWORD}`")
+
+
 def test_markdown_table_does_not_get_overwritten_by_description_steps(tmp_path):
     content = """# Test Case: Mixed Format Test
 

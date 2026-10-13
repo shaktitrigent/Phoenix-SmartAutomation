@@ -111,8 +111,9 @@ def validated_locator_bundles(
             test.get("name", ""),
             test.get("description", ""),
             test.get("preconditions", ""),
+            test.get("expected_result", ""),
             *[
-                step.get("action", "")
+                str(step.get("action", "")) + " " + str(step.get("expected_result", ""))
                 for step in test.get("steps", [])
                 if isinstance(step, dict)
             ],

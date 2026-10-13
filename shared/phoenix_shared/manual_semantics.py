@@ -17,69 +17,123 @@ def normalize_action(text):
 
 
 def expectation_parts(text, fields=()):
-    """Expand explicit shared predicates without splitting subject lists away."""
+    """Separate predicates while keeping shared field/control lists together."""
     from phoenix_shared.generation_contract import clauses
-    visible = re.compile(r'(?:The\s+)?(.+?)\s+(?:are|is)\s+visible\.?$', re.I)
-    sentences = re.split(r'(?<=[.!;])\s+', ' '.join(str(text or '').split()))
-    result = []
-    for sentence in sentences:
+    result=[]
+    for sentence in re.split(r'(?<=[.!;])\s+', ' '.join(str(text or '').split())):
+        sentence=sentence.rstrip(';').strip()
+        if not sentence:continue
+        if re.fullmatch(r'(?:A|The) record is successfully created and searchable when .+? are supplied and .+? is omitted\.?',sentence,re.I):
+            result.append(sentence);continue
         display=re.search(r'\bdisplays?\s+((?:the\s+)?[^.]+(?:field|button|control|input))\.?$',sentence,re.I)
         if display and ',' in display[1] and not re.search(r'\b(?:heading|URL)\b',display[1],re.I):
             prefix=sentence[:display.start()].strip().removesuffix('and').strip()
             if prefix:result.extend(expectation_parts(prefix,fields))
             result.extend(expectation_parts(display[1]+' are visible.',fields));continue
-        # Keep trailing lists with a shared predicate intact while separating
-        # preceding URL/other outcomes.
-        sentence=re.sub(r'^After [\w -]+,\s*', '',sentence,flags=re.I)
-        trailing=re.search(r'(?:,\s*(?:and\s+)?|\s+and\s+)((?:the\s+)?[^,]+ field, .+ (?:are|is) visible\.?)$',sentence,re.I)
-        if trailing and re.search(r'\b(?:URL|visible|empty)\b',sentence[:trailing.start()],re.I):
-            result.extend(expectation_parts(sentence[:trailing.start()],fields))
-            result.extend(expectation_parts(trailing[1],fields));continue
-        empty_prefix=re.match(r'(Both .+? (?:remain empty|contain empty values))(?=,|\.|$)',sentence,re.I)
+        empty_prefix=re.match(r'(Both .+? (?:remain empty|contain empty values|are empty|are blank))(?=,|\.|$)',sentence,re.I)
         if empty_prefix and empty_prefix.end()<len(sentence.rstrip('.')):
             result.extend(expectation_parts(empty_prefix[1],fields))
             result.extend(expectation_parts(sentence[empty_prefix.end():].lstrip(', ').removeprefix('and '),fields));continue
-        match = visible.fullmatch(sentence)
+        required=re.fullmatch(r'(?:A\s+)?[`\"]([^`\"]+)[`\"] (?:validation(?: message)?|message) is (?:visible|shown) for (?:both )?(.+?)\.?',sentence,re.I)
+        if required:
+            names=re.split(r',\s*(?:and\s+)?|\s+and\s+',required[2])
+            result.append(f'{len(names)} "{required[1]}" validation messages are visible for '+', '.join(names)+'.');continue
+        required=re.fullmatch(r'[`\"]([^`\"]+)[`\"] validation is shown for (.+?)\.?',sentence,re.I)
+        if required:
+            names=re.split(r',\s*(?:and\s+)?|\s+and\s+',required[2])
+            result.append(f'{len(names)} "{required[1]}" validation messages are visible for '+', '.join(names)+'.');continue
+        # Shared visibility or empty predicates apply independently to every name.
+        match=re.fullmatch(r'(?:The\s+)?(.+?)\s+(?:are|is)\s+(visible|empty|absent)\.?',sentence,re.I)
         if match and (',' in match[1] or ' and ' in match[1]):
-            subjects = re.split(r',\s*(?:and\s+)?|\s+and\s+', match[1])
-            if all(re.search(r'\b(?:field|button|control|input|heading|menu item)\b', s, re.I) for s in subjects):
-                result.extend(f'{s.strip()} is visible.' for s in subjects)
-                continue
-        empty = re.fullmatch(r'Both (.+?) (?:remain empty|contain empty values)\.?', sentence, re.I)
+            names=re.split(r',\s*(?:and\s+)?|\s+and\s+',match[1]);predicate=match[2]
+            shared=re.search(r'\b(controls?|fields?|buttons?)$',names[-1],re.I)
+            if shared:
+                suffix={'controls':'control','fields':'field','buttons':'button'}.get(shared[1].lower(),shared[1].lower())
+                names=[n if re.search(r'\b(fields?|buttons?|controls?|input|heading|menu item)\b',n,re.I) else n+' '+suffix for n in names]
+            if all(re.search(r'\b(fields?|buttons?|controls?|input|heading|menu item)\b',n,re.I) for n in names):
+                names=[re.sub(r'\b(controls|fields|buttons)$',lambda m:m[1][:-1],n.strip()) for n in names]
+                result.extend(f'{n} is {predicate}.' for n in names);continue
+        empty=re.fullmatch(r'Both (.+?) (?:are empty|remain empty|contain empty values|are blank)\.?',sentence,re.I)
         if empty:
-            names = list(fields) if empty[1].lower() in {'credential fields', 'fields'} else re.split(r'\s+and\s+', empty[1], flags=re.I)
-            if len(names) >= 2:
-                result.extend(f'The {name} field contains an empty value ("").' for name in names)
-                continue
-        result.extend(clauses(sentence))
+            names=list(fields) if empty[1].lower() in {'fields','credential fields'} else re.split(r'\s+and\s+',empty[1],flags=re.I)
+            if len(names)>=2:
+                result.extend(f'The {n} field contains an empty value ("").' for n in names);continue
+        # Preserve explicitly named subjects with a shared value predicate.
+        shared=re.fullmatch(r'(.+?)\s+(?:show|contain) (?:the )?(?:supplied|entered) values\.?',sentence,re.I)
+        if shared:
+            names=re.split(r',\s*(?:and\s+)?|\s+and\s+',shared[1])
+            if len(names)>1:
+                result.extend(f'{n} field contains the supplied value.' for n in names);continue
+        result.extend(p.rstrip(';') for p in clauses(sentence))
+    return result
+
+
+def data_bindings(data):
+    """Read explicit JSON or semicolon-separated field/value cells."""
+    if isinstance(data, dict):
+        return data if all(isinstance(k,str) and isinstance(v,str) for k,v in data.items()) else {}
+    if not isinstance(data,str):return {}
+    try:
+        parsed=json.loads(data)
+        if isinstance(parsed,dict):return data_bindings(parsed)
+    except ValueError:pass
+    result={}
+    for part in data.split(';'):
+        match=re.fullmatch(r'\s*([^:]+):\s*(.*?)\s*',part)
+        if not match:return {}
+        key,value=match.groups()
+        value=value.strip().strip('`')
+        if value.casefold()=='empty':value=''
+        result[key.strip()]=value
+    return result
+
+
+def split_actions(text):
+    """Split ordered verbs outside quotes; carry only explicit fill grammar."""
+    saved=[]
+    def hide(m):saved.append(m[0]);return f'QUOTEDTOKEN{len(saved)-1}X'
+    hidden=re.sub(r"`[^`]*`|\"(?:[^\"\\]|\\.)*\"|(?<!\w)'(?:[^'\\]|\\.)*'",hide,normalize_action(text))
+    verbs=r'enter|type|fill|input|provide|click|press|tap|submit|select|choose|check|uncheck|verify|assert|validate|open|navigate|leave|clear|wait|search'
+    if re.search(r'\brespective fields\b',hidden,re.I):
+        hidden=re.sub(r'(QUOTEDTOKEN\d+X|\$\{[^}]+\})\s+and\s+(?=QUOTEDTOKEN|\$\{)',r'\1 RESPECTIVEJOIN ',hidden)
+    parts=re.split(r';\s*|,?\s+(?:and|then)\s+(?=(?:'+verbs+r')\b)|\s+and\s+(?=(?:QUOTEDTOKEN\d+X|\$\{[A-Za-z_][A-Za-z0-9_]*\})\s+(?:in|into)\b)',hidden,flags=re.I)
+    result=[]
+    for part in parts:
+        part=re.sub(r'QUOTEDTOKEN(\d+)X',lambda m:saved[int(m[1])],part).replace('RESPECTIVEJOIN','and').strip()
+        if result and re.match(r"[`\"']|\$\{",part) and re.match(r'(?:enter|fill|type|input|provide)\b',result[-1],re.I):part='Enter '+part
+        path=re.fullmatch(r'(?:navigate|go) to (.+?)\s*>\s*(.+)',part,re.I)
+        if path:
+            result.extend('Click '+p.strip() for p in re.split(r'\s*>\s*',path[1]+' > '+path[2]));continue
+        # Navigation qualifiers describe the control, not its accessible name.
+        part=re.sub(r'^(Click .+?) in (?:the )?(?:application )?navigation$',r'\1',part,flags=re.I)
+        clear=re.fullmatch(r'(clear|leave) (?:the )?(.+?)(?: fields?| empty)\.?',part,re.I)
+        if clear and (',' in clear[2] or ' and ' in clear[2]):
+            result.extend('Clear '+f.strip()+' field' for f in re.split(r',\s*(?:and\s+)?|\s+and\s+',clear[2]) if f.strip());continue
+        part=re.sub(r'^(Leave .+?) empty$',r'\1 field empty',part,flags=re.I) if not re.search(r'field empty$',part,re.I) else part
+        if re.match(r'(?:enter|fill|type|input|provide)\b',part,re.I) and re.search(r'\b(?:in|into) (?:the )?[\w -]+$',part,re.I) and not re.search(r'\b(?:field|input|textbox)$',part,re.I):part+=' field'
+        result.append(part)
     return result
 
 
 def bound_actions(action, data):
-    """JSON field/value maps expand fills; unspecified prose never supplies values."""
-    action = normalize_action(action)
-    if isinstance(data, str):
-        try:
-            mapping = json.loads(data)
-        except (ValueError, TypeError):
-            mapping = None
-    else:
-        mapping = data
-    if isinstance(mapping, dict) and re.match(r"(?:enter|fill|type|input|provide)\b", action, re.I):
-        fields = list(mapping)
-        if not fields or any(not isinstance(k, str) or not isinstance(v, str) for k,v in mapping.items()):
-            return []
-        # Binding keys must occur as field names in the supplied action.
-        if any(not re.search(r"(?<!\w)" + re.escape(k) + r"(?!\w)", action, re.I) for k in fields):
-            return []
-        targets = re.sub(r"^(?:enter|fill|type|input|provide)\s+", "", action, flags=re.I)
-        if " and " in targets.lower() and not any(c in targets for c in "'\""):
-            for target in re.split(r"\s+and\s+|,", targets, flags=re.I):
-                target = re.sub(r"\b(?:valid|invalid|the|field|fields)\b", "", target, flags=re.I).strip()
-                if target and target.casefold() not in {k.casefold() for k in fields}:
-                    return []
-        return [f"Enter {v!r} in the {k} field" for k,v in mapping.items()]
-    return [action]
+    """Bind named fields to explicit values; never infer data from business prose."""
+    result=[];mapping=data_bindings(data)
+    for part in split_actions(action):
+        # 'respective fields' needs a complete explicit named mapping.
+        respective=re.search(r'\brespective fields\b',part,re.I)
+        compound=re.match(r'(?:enter|fill|type|input|provide)\b',part,re.I) and not re.search(r'\b(?:in|into)\b',part,re.I)
+        if mapping and (respective or compound):
+            if compound and not respective:
+                targets=re.sub(r'^(?:enter|fill|type|input|provide)\s+','',part,flags=re.I)
+                names=[re.sub(r'\b(?:the|valid|invalid|field|fields)\b','',n,flags=re.I).strip() for n in re.split(r'\s+and\s+|,',targets,flags=re.I)]
+                if not re.search(r'[`\"\']',targets) and {n.casefold() for n in names}!={k.casefold() for k in mapping}:return []
+            values=re.findall(r'\$\{[^}]+\}',part)
+            if values and all(v in ' '.join(mapping.values()) for v in values):
+                result.extend(f"Enter {v!r} in the {k} field" for k,v in mapping.items());continue
+            if not values and all(re.search(r'(?<!\w)'+re.escape(k)+r'(?!\w)',part,re.I) for k in mapping):
+                result.extend(f"Enter {v!r} in the {k} field" for k,v in mapping.items());continue
+        result.append(part)
+    return result
 
 
 def unresolved_dependencies(code):

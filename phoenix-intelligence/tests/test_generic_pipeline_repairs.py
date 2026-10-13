@@ -34,7 +34,7 @@ def test_pom_dependencies():
     bundle=_synthesize_pom_bundle(code,'flow','flow')
     page=bundle['page_objects'][0]['code']; test=bundle['tests'][0]['code']
     compile(page,'page','exec');compile(test,'test','exec')
-    assert 'BASE_URL=' in page and 'def helper(' in page and 'import math' in page
+    assert 'BASE_URL =' in page and 'def helper(' in page and 'import math' in page
     assert '_po.navigate()' not in test
     assert not final_artifact_issues({'script_code':code,'pom_bundle':bundle})
 
@@ -70,9 +70,9 @@ def test_request_mcp_isolation(monkeypatch,enabled):
 def test_compound_password_literal_with_and_stays_literal():
     assert not _missing_fill_data("Enter 'literal and negative' in the password field")
 
-def test_pom_navigation_when_flat_has_none():
+def test_pom_does_not_invent_navigation_when_flat_has_none():
     bundle=_synthesize_pom_bundle('def test_x(page):\n    page.get_by_text("Ready").click()','flow','flow')
-    assert '_po.navigate()' in bundle['tests'][0]['code']
+    assert '.navigate()' not in bundle['tests'][0]['code']
 
 def test_manual_gate_blocks_wrong_bdd_field():
     from phoenix.generators.manual import ManualTestQualityGate

@@ -370,6 +370,56 @@ def _render_for_root(bundle: dict[str, Any], root: ast.expr) -> str:
     return ast.unparse(_PageRoot(root).visit(expression))
 
 
+def _record_baseline_keyword_valid(tree, node, spec):
+    """Approve only an imported complete lookup captured before submission."""
+    from phoenix_shared.record_verification import validate_record_lookup
+    try:validate_record_lookup(spec.get('lookup'))
+    except ValueError:return False
+    binding=spec.get('baseline_binding')
+    if not isinstance(binding,str) or not binding.isidentifier():return False
+    keywords=[k for k in node.keywords if k.arg=='record_baseline']
+    if len(node.keywords)!=1 or len(keywords)!=1:return False
+    def slot(value):
+        if isinstance(value,ast.Name) and value.id==binding:return ('name',binding)
+        if isinstance(value,ast.Subscript) and isinstance(value.value,ast.Name) and value.value.id=='context' and isinstance(value.slice,ast.Constant) and value.slice.value==binding:
+            return ('context',binding)
+        return None
+    reference=slot(keywords[0].value)
+    if reference is None:return False
+    imports=[n for n in tree.body if isinstance(n,ast.ImportFrom) and n.module=='phoenix_shared.record_verification'
+             and any(a.name=='read_record_identities' and a.asname in {None,'read_record_identities'} for a in n.names)]
+    if not imports:return False
+    for n in ast.walk(tree):
+        if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef)) and n.name=='read_record_identities':return False
+        if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store) and n.id=='read_record_identities':return False
+        if isinstance(n,(ast.Import,ast.ImportFrom)):
+            for a in n.names:
+                if (a.asname or a.name.split('.')[0])=='read_record_identities' and n not in imports:return False
+    parents={child:parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    owner=node
+    while owner in parents and not isinstance(owner,(ast.FunctionDef,ast.AsyncFunctionDef)):owner=parents[owner]
+    if not isinstance(owner,(ast.FunctionDef,ast.AsyncFunctionDef)):return False
+    assignments=[n for n in ast.walk(owner) if isinstance(n,ast.Assign) and any(slot(t)==reference for t in n.targets)]
+    stores=[n for n in ast.walk(owner) if isinstance(n,(ast.Name,ast.Subscript)) and isinstance(n.ctx,ast.Store) and slot(n)==reference]
+    if len(assignments)!=1 or len(stores)!=1:return False
+    baseline=assignments[0];reader=baseline.value
+    assertion_statement=parents.get(node)
+    if parents.get(baseline) is not owner or not isinstance(assertion_statement,ast.Expr) or parents.get(assertion_statement) is not owner:return False
+    if not isinstance(reader,ast.Call) or not isinstance(reader.func,ast.Name) or reader.func.id!='read_record_identities':return False
+    if len(reader.args)!=2 or reader.keywords or ast.dump(reader.args[0])!=ast.dump(node.args[0]):return False
+    try:lookup=ast.literal_eval(reader.args[1])
+    except (ValueError,TypeError):return False
+    if lookup!=spec['lookup'] or baseline.lineno>=node.lineno:return False
+    interval=[n for n in ast.walk(owner) if baseline.lineno<getattr(n,"lineno",0)<node.lineno]
+    if reference[0]=='context':
+        if any(isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store) and n.id=='context' for n in interval):return False
+        if any(isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and isinstance(n.func.value,ast.Name)
+               and n.func.value.id=='context' and n.func.attr not in {'get','items','keys','values','copy'} for n in interval):return False
+    return any(isinstance(n,ast.Call) and isinstance(parents.get(n),ast.Expr) and parents.get(parents.get(n)) is owner
+               and ((isinstance(n.func,ast.Name) and n.func.id=='click_ready')
+               or (isinstance(n.func,ast.Attribute) and n.func.attr=='click')) for n in interval)
+
+
 def reconcile_generated_code(
     source: str,
     bundles: Iterable[dict[str, Any]],
@@ -441,6 +491,7 @@ def reconcile_generated_code(
     page_actions = {"click", "dblclick", "fill", "type", "press", "check", "uncheck", "select_option",
                     "hover", "focus", "set_input_files", "wait_for_selector"}
     bindings = {}
+    class_stack=[]
     guards = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "unique_visible"]
     identity_guard = False
     if len(guards) == 1 and guards[0].args.args:
@@ -478,6 +529,25 @@ def reconcile_generated_code(
             if target.id not in bindings:
                 unresolved.append("unsupported locator binding: " + target.id)
             return
+        if (isinstance(target,ast.Call) and isinstance(target.func,ast.Attribute)
+                and isinstance(target.func.value,ast.Name) and target.func.value.id=='self'
+                and class_stack and target.func.attr not in selector_methods):
+            # A POM accessor is a checked reference to its pure literal return,
+            # not an unresolved UI label. Preserve the call instead of replacing
+            # it with a selector (which could drop arbitrary method side effects).
+            getters=[n for n in class_stack[-1].body if isinstance(n,ast.FunctionDef) and n.name==target.func.attr]
+            if len(getters)==1:
+                getter=getters[0]
+                if (not target.args and not target.keywords and not getter.decorator_list
+                        and len(getter.args.args)==1 and getter.args.args[0].arg=='self'
+                        and not getter.args.vararg and not getter.args.kwarg and not getter.args.kwonlyargs
+                        and len(getter.body)==1 and isinstance(getter.body[0],ast.Return)):
+                    exact=exact_bundle(getter.body[0].value)
+                    if exact is not None:
+                        used.append(exact)
+                        return
+            unresolved.append('unsupported locator accessor: '+target.func.attr)
+            return
         previous = expression_bindings.get(ast.unparse(target))
         if previous is not None:
             root = _root_expression(target)
@@ -507,6 +577,11 @@ def reconcile_generated_code(
             unresolved.append("unsupported locator expression: " + ast.unparse(target))
 
     class Visitor(ast.NodeVisitor):
+        def visit_ClassDef(self,node):
+            class_stack.append(node)
+            for statement in node.body:self.visit(statement)
+            class_stack.pop()
+
         def visit_FunctionDef(self, node):
             saved = dict(bindings)
             saved_expressions = dict(expression_bindings)
@@ -581,6 +656,8 @@ def reconcile_generated_code(
                             and ((isinstance(n.func, ast.Name) and n.func.id in {"click_ready", "fill_ready"})
                                  or (isinstance(n.func, ast.Attribute) and n.func.attr in {"click", "fill", "check", "uncheck", "select_option"}))
                             for n in ast.walk(tree)))
+                if isinstance(spec,dict) and spec.get('kind')=='no_new_records':
+                    keyword_valid=_record_baseline_keyword_valid(tree,node,spec)
                 if (not imported_contract or spec is None or spec not in contracts or not keyword_valid
                         or ast.unparse(node.args[0]) not in {"page", "authenticated_page", "intelligent_page", "self.page", "self._page"}):
                     unresolved.append("unapproved assertion contract")

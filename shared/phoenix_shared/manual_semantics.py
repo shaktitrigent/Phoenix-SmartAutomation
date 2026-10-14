@@ -5,6 +5,24 @@ import re
 import symtable
 
 
+_QUOTED = re.compile(r"`[^`]*`|\"(?:[^\"\\]|\\.)*\"|(?<!\w)'(?:[^'\\]|\\.)*'")
+
+
+def split_unquoted(pattern, text, *, flags=0):
+    """Split grammar delimiters while preserving quoted data and UI labels."""
+    text = str(text or '')
+    spans = [match.span() for match in _QUOTED.finditer(text)]
+    parts = []
+    start = 0
+    for match in re.finditer(pattern, text, flags):
+        if any(left <= match.start() < right for left, right in spans):
+            continue
+        parts.append(text[start:match.start()])
+        start = match.end()
+    parts.append(text[start:])
+    return parts
+
+
 def negative_expectation(text):
     """Recognize predicate negation without treating quoted UI labels as grammar."""
     predicate = re.sub(r"`[^`]*`|\"[^\"]*\"|'[^']*'", "", str(text).lower())
@@ -20,7 +38,7 @@ def expectation_parts(text, fields=()):
     """Separate predicates while keeping shared field/control lists together."""
     from phoenix_shared.generation_contract import clauses
     result=[]
-    for sentence in re.split(r'(?<=[.!;])\s+', ' '.join(str(text or '').split())):
+    for sentence in split_unquoted(r'(?<=[.!;])\s+', ' '.join(str(text or '').split())):
         sentence=sentence.rstrip(';').strip()
         if not sentence:continue
         if re.fullmatch(r'(?:A|The) record is successfully created and searchable when .+? are supplied and .+? is omitted\.?',sentence,re.I):
@@ -78,12 +96,19 @@ def data_bindings(data):
         if isinstance(parsed,dict):return data_bindings(parsed)
     except ValueError:pass
     result={}
-    for part in data.split(';'):
+    for part in split_unquoted(';', data):
         match=re.fullmatch(r'\s*([^:]+):\s*(.*?)\s*',part)
         if not match:return {}
         key,value=match.groups()
-        value=value.strip().strip('`')
-        if value.casefold()=='empty':value=''
+        value=value.strip()
+        quoted=bool(_QUOTED.fullmatch(value))
+        if quoted:
+            # Delimiting quotes are syntax; preserve the value inside them.
+            if value.startswith('"'):
+                try:value=json.loads(value)
+                except ValueError:return {}
+            else:value=value[1:-1]
+        if not quoted and value.casefold()=='empty':value=''
         result[key.strip()]=value
     return result
 

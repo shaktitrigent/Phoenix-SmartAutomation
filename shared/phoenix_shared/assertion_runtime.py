@@ -129,7 +129,11 @@ def assert_contract(page, contract, *, timeout=30000, reference_url=None, record
             # Find an observed group that owns exactly this one input and an
             # exact message. A whole form containing several inputs is not proof
             # that an error belongs to the requested field.
-            depth=field.evaluate('''(field, message) => {
+            import time
+            deadline=time.monotonic()+timeout/1000
+            depth=None
+            while True:
+                depth=field.evaluate('''(field, message) => {
                 for (let node=field.parentElement, depth=1; node && depth<=8; node=node.parentElement, depth++) {
                     const controls=[...node.querySelectorAll('input,textarea,select')];
                     if (controls.length!==1 || controls[0]!==field) continue;
@@ -137,7 +141,10 @@ def assert_contract(page, contract, *, timeout=30000, reference_url=None, record
                     if (messages.length===1) return depth;
                 }
                 return null;
-            }''',message)
+                }''',message)
+                if type(depth) is int and 1<=depth<=8:break
+                if time.monotonic()>=deadline:break
+                page.wait_for_timeout(50)
             if type(depth) is not int or not 1<=depth<=8:raise AssertionError('No observed independent field/message group')
             group=field
             for _ in range(depth):group=group.locator('xpath=..')
@@ -210,4 +217,7 @@ def select_autocomplete_option(page, field, value, contract, *, timeout=15000):
     expect(option).to_have_count(1,timeout=timeout)
     expect(option).to_be_visible(timeout=timeout)
     option.click(timeout=timeout)
-    expect(field).to_have_value(value,timeout=timeout)
+    # Selected display labels may insert whitespace for omitted optional parts.
+    # Match the full supplied label, permitting only whitespace variation.
+    selected_value=re.compile(r'^\s*'+r'\s+'.join(re.escape(token) for token in value.split())+r'\s*$')
+    expect(field).to_have_value(selected_value,timeout=timeout)

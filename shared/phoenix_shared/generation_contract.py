@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import re
 from html.parser import HTMLParser
-from phoenix_shared.manual_semantics import negative_expectation
+from phoenix_shared.manual_semantics import negative_expectation, split_unquoted
 
 
 class Snapshot(HTMLParser):
@@ -56,12 +56,8 @@ def words(text):
 
 def clauses(text):
     """Split punctuation/conjunctions outside supplied quotes; no dropped clauses."""
-    quoted=re.compile(r"`[^`]*`|'[^']*'|\"[^\"]*\"")
-    saved=[]
-    def hide(match):saved.append(match.group());return f'QUOTEDTOKEN{len(saved)-1}X'
-    hidden=quoted.sub(hide,str(text or ''))
-    parts=re.split(r'(?<=[.!;])\s+|,\s*(?:and\s+)?(?=(?:the|a|an|user)\b|\w+\s+(?:is|are|remains|fails)\b)|\s+(?:and|followed by)\s+',hidden,flags=re.I)
-    return [re.sub(r'QUOTEDTOKEN(\d+)X',lambda m:saved[int(m.group(1))],p).strip() for p in parts if p.strip()]
+    parts=split_unquoted(r'(?<=[.!;])\s+|,\s*(?:and\s+)?(?=(?:the|a|an|user)\b|\w+\s+(?:is|are|remains|fails)\b)|\s+(?:and|followed by)\s+',text,flags=re.I)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def outcome_contract(expected,action,snapshot,step):
@@ -96,10 +92,14 @@ def workflow_summary_binding(text, contracts, records):
     cs=[c for c in contracts if c.get('step') in translated]
     positive=[c for c in cs if c.get('kind')=='record_present' and c.get('target_evidence') and c.get('expected_values')]
     saved=[c for c in cs if c.get('kind')=='data_visible' and c.get('expected_values')]
-    def refs(values):
-        return set(re.findall(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}', ' '.join(values)))
+    def identity(values):
+        # Preserve literals, variable order and multiplicity. Merely sharing
+        # environment names does not establish that the same record was found.
+        if not isinstance(values,list) or not values or any(not isinstance(v,str) or not v.strip() for v in values):
+            return None
+        return ' '.join(' '.join(v.split()) for v in values)
     creation=[(a,b) for a in saved for b in positive if a['step']<b['step']
-              and refs(a['expected_values']) and refs(a['expected_values'])==refs(b['expected_values'])
+              and identity(a['expected_values']) and identity(a['expected_values'])==identity(b['expected_values'])
               and translated[a['step']].get('url_asserted')
               and translated[a['step']].get('action_kind')=='click'
               and re.search(r'\b(?:save|create|add|submit|register|apply|confirm)\b',translated[a['step']].get('action_text',''),re.I)]
@@ -115,7 +115,7 @@ def workflow_summary_binding(text, contracts, records):
         matched=lambda label:next((v for k,v in inputs.items() if ' '.join(words(k))==' '.join(words(label))),None)
         values=[matched(label) for label in requested]
         if values and all(v for v in values) and matched(condition[2])=='':
-            pairs=[(a,b) for a,b in creation if refs(values)==refs(a['expected_values'])]
+            pairs=[(a,b) for a,b in creation if identity(values)==identity(a['expected_values'])]
             if pairs:return result([c['step'] for pair in pairs for c in pair],'observable_saved_and_filtered_record')
         return None
     blocked=re.fullmatch(r'(?:The )?form blocks submission when required (?:fields|names) are empty\.?',plain,re.I)

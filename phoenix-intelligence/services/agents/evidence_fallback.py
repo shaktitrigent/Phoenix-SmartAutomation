@@ -414,7 +414,10 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
                         'lookup':e['lookup'],'baseline_binding':f'_record_baseline_{number}',
                         'expected_text':expectation,'action_text':raw,'source':'explicit_api_record_comparison',
                         'proof_scope':'complete_configured_record_collection'}));continue
-                if len(supplied)!=1 or e.get('kind') not in {'record_present','record_absent'} or e.get('verification_method')!='follow_up_search' or not e.get('expected_values') or not e.get('record_role'):
+                values=e.get('expected_values')
+                role=e.get('record_role')
+                valid_values=isinstance(values,list) and bool(values) and all(isinstance(v,str) and v.strip() for v in values)
+                if len(supplied)!=1 or e.get('kind') not in {'record_present','record_absent'} or e.get('verification_method')!='follow_up_search' or not valid_values or not isinstance(role,str) or not role.strip():
                     failures.append('invalid_observable_assertion_evidence');unsupported.append(expectation);continue
                 scope=select_subject(e.get('scope_target',''),raw,bundles,snapshot,None)
                 if not scope or not target_evidence(scope):

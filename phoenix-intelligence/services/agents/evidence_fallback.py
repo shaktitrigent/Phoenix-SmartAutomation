@@ -4,7 +4,7 @@ import re
 from pydantic import ValidationError
 from phoenix_shared.locator_policy import locator_accepted
 from phoenix_shared.models.locator import Locator
-from phoenix_shared.generation_contract import Snapshot, words, clauses, outcome_contract, summary_binding
+from phoenix_shared.generation_contract import Snapshot, words, clauses, outcome_contract, summary_binding, structured_text_expectation
 from phoenix_shared.automation_translation import assertion_lines, explicit_step_data, fill_value_expression
 from phoenix_shared.manual_semantics import bound_actions, expectation_parts
 
@@ -221,6 +221,8 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
     def explicit_contract(expectation, action, number):
         # Each positive expectation must name a physical target. Repeated text
         # is resolved with its supplied field-group qualifier, never globally.
+        if structured_text_expectation(expectation):
+            return outcome_contract(expectation,action,snapshot,number)
         quoted=re.findall(r'"([^"]*)"|\x27([^\x27]*)\x27|`([^`]*)`', expectation)
         values=[next((v for v in group if v), '') for group in quoted]
         field_match=re.search(r'(?:the\s+)?([\w -]+?)\s+field\s+(?:contains|remains empty|is empty)',expectation,re.I)
@@ -243,7 +245,7 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
                 scope=re.search(r'within (?:the )?([\w -]+?) field group',expectation,re.I)
                 if scope:label=scope[1]+' '+label
         if label is None:
-            m=re.fullmatch(r'(?:the )?(.+?) (?:heading|option|button|control) is (visible|absent)\.?',expectation,re.I)
+            m=re.fullmatch(r'(?:the )?(.+?) (?:heading|option|button|control) is (visible|absent)(?: (?:anywhere on (?:the )?page|from (?:the )?(?:current )?page))?\.?',expectation,re.I)
             if m:
                 label=m[1];kind='heading' if 'heading' in expectation.lower() else 'interaction'
             else:return None
@@ -391,10 +393,16 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
             elif re.match(r'(?:check|uncheck)\b',low) and not re.search(r'validity|checkValidity', expected, re.I):
                 label=re.sub(r'^(?:check|uncheck)\s+(?:the\s+)?','',action,flags=re.I)
                 target=select_subject(label,raw,bundles,snapshot,'checkbox')
-                if not target:requested_target=label;failures.append('missing_or_ambiguous_checkbox_target');continue
-                method='uncheck' if low.startswith('uncheck') else 'check'
-                emitted.append(f'    {target}.{method}()')
-                action_kind=method
+                if target:
+                    method='uncheck' if low.startswith('uncheck') else 'check'
+                    emitted.append(f'    {target}.{method}()')
+                    action_kind=method
+                elif low.startswith('uncheck') or re.search(r'\bcheckbox\b',label,re.I):
+                    requested_target=label;failures.append('missing_or_ambiguous_checkbox_target');continue
+                else:
+                    # "Check the URL/form/value" is an observation, not a
+                    # request to select a checkbox. Its outcome must still bind.
+                    action_kind='assert'
             elif re.match(r'(?:verify|assert|ensure|confirm|validate|inspect|check)\b',low) and re.search(r'validity|checkValidity', expected, re.I):
                 field_match=re.search(r'(?:the\s+)?([\w -]+?)\s+field',raw,re.I)
                 field=re.sub(r'^(?:inspect|check|verify)\s+(?:the\s+)?','',field_match.group(1),flags=re.I) if field_match else ''
@@ -406,6 +414,13 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
             else:failures.append('unsupported_action')
         expectations=expectation_parts(expected or (raw if action_kind=='assert' else ''),fields)
         for expectation in expectations:
+            if structured_text_expectation(expectation):
+                spec=outcome_contract(expectation,raw,snapshot,number)
+                if spec:
+                    emitted.append(contract_line(spec))
+                else:
+                    failures.append('unsupported_structured_expected_outcome');unsupported.append(expectation)
+                continue
             supplied=[e for e in verification_evidence if e.get('expectation')==expectation]
             if supplied:
                 e=supplied[0]

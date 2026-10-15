@@ -52,6 +52,28 @@ _DESCRIBE = r"""(element, policy) => {
    const preceding = node.previousElementSibling;
    return snapshotText(own || (/^H[1-6]$/.test(preceding?.tagName || '') ? preceding : null));
  };
+ // Form identity excludes entered values and validation-message text.
+ // Capture it only after ordinary identity has been independently accepted.
+ const form = element.closest('form');
+ const formAttrs = node => Object.fromEntries(['id','name','action','method','role','data-testid','data-test','data-cy']
+   .map(k=>[k,node.getAttribute(k)||'']));
+ const formControl = node => ({tag:node.tagName.toLowerCase(),
+   ...Object.fromEntries(['id','name','type','role','placeholder','aria-label','href','data-testid','data-test','data-cy']
+     .map(k=>[k,node.getAttribute(k)||''])),
+   label:[...(node.labels||[])].map(n=>snapshotText(n)).join(' '),
+   text:node.matches('input,textarea,select') ?
+     (node.matches('input[type=submit],input[type=button],input[type=reset]') ? clean(node.value) : '') : snapshotText(node)});
+ const controls = form ? [...form.querySelectorAll('input,textarea,select,button,a[href],[role=button],[role=checkbox],[role=radio],[role=combobox],[role=textbox]')]
+   .filter(n=>n.closest('form')===form).map(formControl) : [];
+ let scopeAnchor=null;
+ for(let p=form?.parentElement,i=0;p && i<8;p=p.parentElement,i++) {
+   if(p.id || p.getAttribute('data-testid') || p.getAttribute('data-test')) {
+     scopeAnchor={tag:p.tagName.toLowerCase(),id:p.id||'',
+       'data-testid':p.getAttribute('data-testid')||'','data-test':p.getAttribute('data-test')||''};break;
+   }
+ }
+ const form_identity = form && ![...form.elements].some(n=>!form.contains(n)) ?
+   {version:1,source:'validated_live_form_controls',form:formAttrs(form),controls,scope_anchor:scopeAnchor} : null;
  const ancestors=[];
  for(let p=element.parentElement, i=0; p && i<8; p=p.parentElement,i++)
    ancestors.push({tag:p.tagName.toLowerCase(), ...attrs(p), heading:sectionHeading(p), text:snapshotText(p).slice(0,1500)});
@@ -63,12 +85,39 @@ _DESCRIBE = r"""(element, policy) => {
    children:[...node.children].map(structure)});
  const column_headers=element.matches('table,[role=table],[role=grid]') ?
    [...element.querySelectorAll('th,[role=columnheader]')].map(n=>clean(n.textContent)).filter(Boolean) : [];
- return {tag:element.tagName.toLowerCase(), ...attrs(element), table_context, column_headers,
+ return {tag:element.tagName.toLowerCase(), ...attrs(element), table_context, column_headers, form_identity,
          ...(policy ? {content_structure:structure(element), mutable_display_values:slots.map(n=>clean(n.textContent))} : {}),
          text:element.matches('input') ? (['submit','button','reset'].includes(element.type) ? clean(element.value) : '') : snapshotText(element),
          siblings:[...(element.parentElement?.children||[])].filter(n=>n!==element).slice(0,4).map(n=>({tag:n.tagName.toLowerCase(),...attrs(n),text:snapshotText(n).slice(0,300)})),
          ancestors};
 }"""
+
+
+def valid_form_control_identity(profile):
+    """Accept only a complete, value-free captured native form description."""
+    if not isinstance(profile, dict) or set(profile) != {'version','source','form','controls','scope_anchor'}:
+        return False
+    if profile['version'] != 1 or profile['source'] != 'validated_live_form_controls':
+        return False
+    form_keys={'id','name','action','method','role','data-testid','data-test','data-cy'}
+    if not isinstance(profile['form'],dict) or set(profile['form']) != form_keys or not all(isinstance(v,str) for v in profile['form'].values()):
+        return False
+    anchor=profile['scope_anchor']
+    if anchor is not None and (not isinstance(anchor,dict) or set(anchor)!={'tag','id','data-testid','data-test'} or
+            not all(isinstance(v,str) for v in anchor.values()) or not any(anchor[k] for k in ('id','data-testid','data-test'))):
+        return False
+    keys={'tag','id','name','type','role','placeholder','aria-label','href','data-testid','data-test','data-cy','label','text'}
+    controls=profile['controls']
+    if not isinstance(controls,list) or len(controls)<2 or len(controls)>100:
+        return False
+    for control in controls:
+        if not isinstance(control,dict) or set(control)!=keys or not all(isinstance(v,str) for v in control.values()):
+            return False
+        if control['tag'] in {'input','textarea','select'} and control['text'] and not (control['tag']=='input' and control['type'] in {'button','submit','reset'}):
+            return False
+        if not any(control[k] for k in ('id','name','placeholder','aria-label','href','data-testid','data-test','data-cy','label','text')):
+            return False
+    return True
 
 
 def identity_matches(actual: dict, expected: dict) -> bool:
@@ -107,6 +156,15 @@ def identity_matches(actual: dict, expected: dict) -> bool:
     if any(str(actual.get(k, "")) != v for k, v in checks.items()):
         return False
     context = data.get("ancestor_context") or {}
+    form_identity = data.get('form_control_identity')
+    if form_identity is not None:
+        if content or context.get('container_tag') != 'form' or not valid_form_control_identity(form_identity):
+            return False
+        if actual.get('form_identity') != form_identity:
+            return False
+        # A complete captured control signature replaces only incidental form
+        # text. Target attributes, labels, scope and live uniqueness still apply.
+        context = {**context, 'container_text':'', 'distinguishing_text':''}
     row=context.get("row_context") or {}
     if isinstance(row,dict) and any(row.get(k) and str(actual.get("table_context",{}).get(k,""))!=str(row[k])
         for k in ("table_id","table_testid","column_header")):
@@ -125,7 +183,7 @@ def identity_matches(actual: dict, expected: dict) -> bool:
                            ("container_testid", "data-testid")):
         if context.get(source):
             context_checks[target] = str(context[source])
-    distinction = context.get("distinguishing_text") or data.get("distinguishing_text")
+    distinction = context.get("distinguishing_text") or (None if form_identity is not None else data.get("distinguishing_text"))
     container_text = context.get("container_text")
     container_classes = set(str(context.get("container_class") or "").split())
     if context_checks or distinction or container_classes or container_text:
@@ -299,6 +357,8 @@ class LiveLocatorSession:
         raw=generate_locators_from_elements(elements)
         bundles=convert_locators(raw,page=page)
         bundles=self.revalidate(bundles) if validate else bundles
+        if validate:
+            bundles=self.capture_form_control_identities(bundles)
         self.scan_diagnostics = {"final_url":self.page.url,"state_name":self.state_name,
             "readiness":"settled", "captured_element_count":captured_count,
             "selected_element_count":len(elements), "converted_bundle_count":len(bundles),
@@ -308,6 +368,35 @@ class LiveLocatorSession:
             target=Path(output_dir); target.mkdir(parents=True,exist_ok=True)
             (target/"locators.json").write_text(json.dumps({"locators":raw,"capture":self.scan_diagnostics}),encoding="utf-8")
         return bundles
+
+    def capture_form_control_identities(self, bundles):
+        """Enrich only freshly accepted form controls on the owned scan Page.
+
+        Never upgrade historical evidence during runtime validation. Existing
+        bundles need a fresh scan before validation text can be disregarded.
+        """
+        from phoenix_shared.locator_policy import locator_accepted
+        result=[]
+        for bundle in bundles:
+            metadata=dict(bundle.metadata or {})
+            expected=metadata.get('element_data') or {}
+            context=expected.get('ancestor_context') or {}
+            if context.get('container_tag')!='form' or expected.get('content_identity') or not locator_accepted(bundle.primary,metadata):
+                result.append(bundle);continue
+            try:
+                actual=locator_on_page(self.page,bundle.primary).evaluate(_DESCRIBE,None)
+                profile=actual.get('form_identity')
+                if not valid_form_control_identity(profile):
+                    result.append(bundle);continue
+                enriched={**expected,'form_control_identity':profile}
+                upgraded=bundle.model_copy(update={'metadata':{**metadata,'element_data':enriched}})
+                # Check the strengthened evidence, including global identity
+                # uniqueness, before persisting it as accepted.
+                outcome=self.validate(bundle.primary,{'element_data':enriched})
+                result.append(upgraded if outcome.get('match_count')==1 and outcome.get('identity_matches') is True else bundle)
+            except Exception:
+                result.append(bundle)
+        return result
 
     def apply_content_identity(self, elements, policy):
         """Capture an explicit display-slot contract; never infer mutable text."""

@@ -60,9 +60,41 @@ def clauses(text):
     return [p.strip() for p in parts if p.strip()]
 
 
+def structured_text_expectation(text):
+    """Recognize explicit tag/text prose so qualifiers never become UI text."""
+    return bool(re.search(r"[`\"'][^`\"']+[`\"']\s+element\s+with\s+text\b",text,re.I))
+
+
+def structured_text_contract(text,action,step):
+    """Bind only an explicit native tag, exact text and native container tag.
+
+    Unsupported structures remain unresolved; no current-page inference can
+    substitute for a scope explicitly named for a later page.
+    """
+    import json
+    match=re.fullmatch(
+        r"(?:the\s+)?(?:central\s+)?(?P<q1>[`\"'])(?P<tag>h[1-6]|button|p|div|span|label|a)(?P=q1)"
+        r"\s+element\s+with\s+text\s+(?P<q2>[`\"'])(?P<label>[^\r\n]+?)(?P=q2)"
+        r"\s+is\s+visible\s+within\s+(?:the\s+)?(?P<q3>[`\"'])(?P<scope>main|header|footer|nav|section|article)(?P=q3)"
+        r"(?:\s+content\s+area)?\.?",text.strip(),re.I)
+    if not match:return None
+    label=match['label']
+    if not label.strip() or any(ord(c)<32 for c in label):return None
+    scope=f"page.locator({match['scope'].lower()!r})"
+    # Playwright :text-is provides exact normalized text matching on the
+    # explicitly supplied native tag; multiple matches fail at runtime.
+    selector=match['tag'].lower()+':text-is('+json.dumps(label,ensure_ascii=False)+')'
+    return {'version':1,'step':step,'kind':'visible','subject':f"{scope}.locator({selector!r})",
+            'scope':scope,'source':'manual_expected_result','expected_text':text.strip(),'action_text':action,
+            'expected_exact_text':label}
+
+
 def outcome_contract(expected,action,snapshot,step):
     """Return a contract only for explicit subject/state evidence."""
-    text=expected.strip();low=text.lower();scope=snapshot.scope(text)
+    text=expected.strip();low=text.lower()
+    if structured_text_expectation(text):
+        return structured_text_contract(text,action,step)
+    scope=snapshot.scope(text)
     if re.search(r'within (?:the )?[\w -]+ field group',text,re.I):
         # A scoped repeated message cannot fall back to a global text query.
         # The evidence-aware compiler must bind its physical field group.

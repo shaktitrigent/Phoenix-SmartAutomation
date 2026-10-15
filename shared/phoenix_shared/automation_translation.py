@@ -158,6 +158,10 @@ def assertion_lines(expected: str, *, action: str = "", locator: str | None = No
                     value: str | None = None) -> list[str]:
     """Translate explicit expected evidence; prose alone is not UI evidence."""
     text = expected.strip()
+    from phoenix_shared.generation_contract import structured_text_expectation
+    if structured_text_expectation(text):
+        # The typed contract compiler must retain tag and container qualifiers.
+        return []
     low = text.lower()
     if not text:
         return []
@@ -372,6 +376,16 @@ def explicit_step_data(action: str, test_data) -> str:
     if not target:
         return action
     data = test_data.strip()
+    # A named binding is field metadata, not a prefix to enter into the UI.
+    # Resolve only an exact field label; quoted scalar strings remain literal.
+    if not data.startswith(('"', "'", "`")):
+        from phoenix_shared.manual_semantics import data_bindings
+        bindings = data_bindings(data)
+        normalize_label = lambda label: " ".join(re.sub(r"\s+(?:field|input)$", "", label.strip(), flags=re.I).casefold().split())
+        matches = [value for label, value in bindings.items()
+                   if normalize_label(label) == normalize_label(target.group(1))]
+        if len(matches) == 1:
+            return f"Enter {matches[0]!r} in the {target.group(1)} field"
     if data.startswith("`") and data.endswith("`"):
         data = data[1:-1]
     elif data.startswith(('"', "'")):

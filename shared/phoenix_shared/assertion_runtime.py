@@ -75,6 +75,9 @@ def assert_contract(page, contract, *, timeout=30000, reference_url=None, record
         from phoenix_shared.record_verification import assert_no_new_records
         assert_no_new_records(page,contract['lookup'],record_baseline)
         return
+    if 'expected_exact_text' in contract and (contract['kind']!='visible' or
+            not isinstance(contract['expected_exact_text'],str) or not contract['expected_exact_text'].strip()):
+        raise ValueError('Exact text requires a nonempty visible-target assertion')
     scope=contract.get('scope')
     if scope:
         scoped=resolve_subject(page,scope)
@@ -186,6 +189,10 @@ def assert_contract(page, contract, *, timeout=30000, reference_url=None, record
         method={'visible':'to_be_visible','enabled':'to_be_enabled','disabled':'to_be_disabled',
                 'checked':'to_be_checked','unchecked':'not_to_be_checked'}[kind]
         getattr(expect(target),method)(timeout=timeout)
+        if 'expected_exact_text' in contract:
+            # Text selectors can match one immediate text node. Also prove
+            # the full target text, including all descendant content.
+            expect(target).to_have_text(contract['expected_exact_text'],timeout=timeout)
 
 
 def select_autocomplete_option(page, field, value, contract, *, timeout=15000):

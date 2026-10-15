@@ -41,6 +41,9 @@ def expectation_parts(text, fields=()):
     for sentence in split_unquoted(r'(?<=[.!;])\s+', ' '.join(str(text or '').split())):
         sentence=sentence.rstrip(';').strip()
         if not sentence:continue
+        masked=re.fullmatch(r'((?:The )?Password field contains the supplied value) and masks it\.?',sentence,re.I)
+        if masked:
+            result.extend([masked[1]+'.','The password is masked.']);continue
         if re.fullmatch(r'(?:A|The) record is successfully created and searchable when .+? are supplied and .+? is omitted\.?',sentence,re.I):
             result.append(sentence);continue
         display=re.search(r'\bdisplays?\s+((?:the\s+)?[^.]+(?:field|button|control|input))\.?$',sentence,re.I)

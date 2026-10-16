@@ -3000,6 +3000,10 @@ class TestGeneratorAgent(BaseAgent):
                     results[-1]["unbound_overall_outcomes"] = compiled.get("unbound_overall_outcomes", [])
                     results[-1]["proposed_locator_targets"] = compiled.get("proposed_locator_targets", [])
                     results[-1]["translation_targets"] = compiled.get("translation_targets", [])
+                    results[-1]["state_requirements"] = compiled.get("state_requirements", [])
+                    if results[-1]["state_requirements"]:
+                        results[-1]["warnings"].append(
+                            f"Current-page locator capture required for {len(results[-1]['state_requirements'])} target operation(s); runtime state resolution is pending")
                     results[-1]["generation_plan"] = {"version": 1,
                         "operations": operation_signature(results[-1]["script_code"])}
 

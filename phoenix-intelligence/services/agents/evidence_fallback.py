@@ -187,7 +187,7 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
     from phoenix_shared.state_evidence import group_state_evidence
     bundles=group_state_evidence(bundles)
     snapshot=Snapshot(html);snapshot.evidence={};lines=[];contracts=[];unresolved=[];step_records=[];previous_expected=[];pending_completion=[];last_navigation_binding=None
-    fields=[];step_operations=[];fills={};fill_data={};current_path=url
+    fields=[];step_operations=[];fills={};fill_data={};current_path=url;state_requirements=[]
     from phoenix_shared.manual_semantics import data_bindings
     def target_evidence(expression):
         matches=snapshot.evidence.get(expression, [])
@@ -217,6 +217,13 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
         return result
     def check_target(expression):
         evidence=target_evidence(expression)
+        if evidence:
+            from services.agents.state_plan import capture_requirement
+            requirement=capture_requirement(evidence,step=number,page_context=current_path,
+                prerequisite_steps=[r['step'] for r in step_records],application_url=url,
+                blocked_prerequisite_steps=[r['step'] for r in step_records if r.get('status')!='translated'],
+                action_index=action_index)
+            if requirement and requirement not in state_requirements:state_requirements.append(requirement)
         return ['    validate_target(page, '+repr(evidence)+')'] if evidence else []
     def explicit_contract(expectation, action, number):
         # Each positive expectation must name a physical target. Repeated text
@@ -309,7 +316,7 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
             else:
                 valid_comparison=comparisons[0]
                 emitted.append(f'    _record_baseline_{number} = read_record_identities(page, '+repr(valid_comparison['lookup'])+')')
-        for atomic in actions:
+        for action_index,atomic in enumerate(actions,1):
             action=explicit_step_data(atomic,step.get('test_data',''))
             action = re.sub(r'^In\s+[^,]+,\s*', '', action, flags=re.I)
             low=action.lower();lines.append(f'    # Step {number}')
@@ -603,6 +610,10 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
         else:
             record['status']='partial';record['reasons'].append('submission_outcome_not_supplied')
             unresolved.append(number);lines.append(f'    pytest.skip("Untranslated step {number}: submission_outcome_not_supplied")')
+    # Deferred assertions may change prerequisite status after initial parsing.
+    for requirement in state_requirements:
+        requirement['blocked_prerequisite_steps']=[r['step'] for r in step_records
+            if r['step'] in requirement['prerequisite_steps'] and r.get('status')!='translated']
     overall=manual.get('expected_result','')
     overall_missing=[];overall_bindings=[]
     for item in expectation_parts(overall,fields):
@@ -643,5 +654,5 @@ def compile_fallback(manual,url,bundles,html,*,extract_fill,extract_click,split_
     return {'script_code':script,'assertion_contracts':contracts,'step_contracts':step_records,
             'unresolved_steps':unresolved,'overall_outcome_unresolved':bool(overall_missing),
             'overall_bindings':overall_bindings,'unbound_overall_outcomes':overall_missing,
-            'proposed_locator_targets':snapshot.proposals,
+            'proposed_locator_targets':snapshot.proposals,'state_requirements':state_requirements,
             'translation_targets':[r['target'] for r in step_records if r.get('target')]}

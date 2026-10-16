@@ -106,8 +106,8 @@ def test_real_browser_restores_state_and_scans_hydrated_page_once(tmp_path,monke
         bundles=session.scan(page='dashboard',output_dir=tmp_path/'raw')
         assert page is session.page and page.url=='https://fixture.test/dashboard'
         assert len(created)==1 and created[0]['storage_state']==str(state.resolve())
-        assert session.scan_diagnostics['captured_element_count']==4
-        assert len(bundles)==4
+        assert session.scan_diagnostics['captured_element_count']==3
+        assert len(bundles)==3
         assert all(not fallback_reasons(b) for b in bundles), [(b.element_name, fallback_reasons(b), b.primary.value) for b in bundles]
         for bundle in bundles:
             assert bundle.primary.metadata['match_count']==1

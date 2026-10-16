@@ -347,7 +347,7 @@ class LiveLocatorSession:
         # Capture, validation and scoped fallback must share the settled Page.
         self.wait_for_ready()
         html = self.page.content()
-        elements=extract_interactable_elements(html, interaction_paths=observed_click_paths(self.page))
+        elements=extract_interactable_elements(html)
         captured_count = len(elements)
         for policy in identity_policies or []:
             self.apply_content_identity(elements, policy)

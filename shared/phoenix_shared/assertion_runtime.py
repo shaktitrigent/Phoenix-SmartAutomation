@@ -33,6 +33,29 @@ def resolve_subject(page, expression):
     return resolve(ast.parse(expression, mode='eval').body)
 
 
+def _wait_for_record_headers(page, target, expected, *, timeout):
+    """Wait only for incomplete captured table headers, never accept new identity."""
+    import time
+    data={**(expected.get('attributes') or {}),**expected}
+    headers=data.get('column_headers')
+    if (not isinstance(headers,list) or not headers or
+            not all(isinstance(v,str) and v for v in headers) or
+            not (data.get('tag')=='table' or data.get('role') in {'table','grid'})):
+        return False
+    deadline=time.monotonic()+max(0,timeout)/1000
+    while True:
+        if target.count()!=1:return False
+        actual=target.evaluate('''node => [...node.querySelectorAll('th,[role=columnheader]')]
+            .map(n=>(n.textContent||'').replace(/\\s+/g,' ').trim()).filter(Boolean)''')
+        if actual==headers:return True
+        # Full but different structure is a mismatch, not a loading state.
+        # A partial structure must preserve the captured ordered prefix.
+        if len(actual)>=len(headers) or actual!=headers[:len(actual)]:return False
+        remaining=(deadline-time.monotonic())*1000
+        if remaining<=0:return False
+        page.wait_for_timeout(min(100,remaining))
+
+
 def validate_target(page, evidence, *, timeout=30000):
     """Historical acceptance must be checked again in the current live state."""
     from playwright.sync_api import expect
@@ -58,7 +81,45 @@ def validate_target(page, evidence, *, timeout=30000):
         result = session.validate(candidate, {'element_data': expected})
         if result.get('match_count') == 1 and result.get('identity_matches') is True:
             return target
+        if (result.get('match_count') == 1 and
+                _wait_for_record_headers(page,target,expected,timeout=timeout)):
+            # Readiness alone is never acceptance: recheck physical identity,
+            # ancestry, captured text/attributes and global uniqueness.
+            result=session.validate(candidate,{'element_data':expected})
+            if result.get('match_count')==1 and result.get('identity_matches') is True:
+                return target
     raise AssertionError('Target identity does not match accepted evidence in the current live state')
+
+
+_RECORD_TEXT_SNAPSHOT = r'''rows => rows.map(row => {
+    const cells=[...row.querySelectorAll('td,th[scope=row],[role=cell],[role=gridcell]')]
+        .filter(cell=>cell.closest('tr,[role=row]')===row && cell.getClientRects().length
+            && getComputedStyle(cell).visibility!=='hidden'
+            && !cell.querySelector('tr,[role=row]'));
+    const nested=rows.some(other=>other!==row && row.contains(other));
+    const headerOnly=!cells.length && !!row.querySelector('th,[role=columnheader]');
+    const clean=text=>(text||'').replace(/\s+/g,' ').trim();
+    return {visible:!!row.getClientRects().length && getComputedStyle(row).visibility!=='hidden',
+        text:cells.length ? cells.map(cell=>clean(cell.innerText)).join(' ')
+            : nested || headerOnly ? '' : clean(row.innerText)};
+})'''
+
+
+def _assert_record_rows(page, rows, values, *, expected_count, timeout):
+    """Preserve cell separators without combining values from different records."""
+    import time
+    pattern=data_pattern(values)
+    deadline=time.monotonic()+max(0,timeout)/1000
+    while True:
+        snapshots=rows.evaluate_all(_RECORD_TEXT_SNAPSHOT)
+        count=sum(bool(row.get('visible')) and bool(pattern.search(row.get('text','')))
+                  for row in snapshots)
+        if count==expected_count:return
+        remaining=(deadline-time.monotonic())*1000
+        if remaining<=0:
+            raise AssertionError(f'Expected {expected_count} matching visible record(s); found {count}. '
+                                 'Matching preserves cell boundaries within each record.')
+        page.wait_for_timeout(min(100,remaining))
 
 
 def assert_contract(page, contract, *, timeout=30000, reference_url=None, record_baseline=None):
@@ -105,10 +166,9 @@ def assert_contract(page, contract, *, timeout=30000, reference_url=None, record
             if contract.get('target_evidence'):validate_target(page,contract['target_evidence'],timeout=timeout)
             if not scope or not contract.get('record_role'):raise ValueError('Records need explicit results scope and role')
             # All supplied tokens must occur in one record, never across rows.
-            pattern=data_pattern(values)
-            rows=resolve_subject(page,scope).get_by_role(contract['record_role']).filter(has_text=pattern)
-            expect(rows).to_have_count(0 if kind=='record_absent' else 1,timeout=timeout)
-            if kind=='record_present':expect(rows).to_be_visible(timeout=timeout)
+            rows=resolve_subject(page,scope).get_by_role(contract['record_role'])
+            _assert_record_rows(page,rows,values,
+                                expected_count=0 if kind=='record_absent' else 1,timeout=timeout)
             return
         pattern=data_pattern(values,ordered=True)
         target=(resolve_subject(page,scope) if scope else page).get_by_text(pattern)

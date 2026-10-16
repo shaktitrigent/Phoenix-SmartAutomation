@@ -44,7 +44,11 @@ def expectation_parts(text, fields=()):
         masked=re.fullmatch(r'((?:The )?Password field contains the supplied value) and masks it\.?',sentence,re.I)
         if masked:
             result.extend([masked[1]+'.','The password is masked.']);continue
-        if re.fullmatch(r'(?:A|The) record is successfully created and searchable when .+? are supplied and .+? is omitted\.?',sentence,re.I):
+        if re.fullmatch(r'(?:A|The) record is successfully created and searchable when .+',sentence,re.I):
+            # Keep all conditions for the proof binder, including unsupported
+            # qualifiers. Splitting at field-list conjunctions loses grammar.
+            result.append(sentence);continue
+        if re.fullmatch(r'(?:The )?form displays required-field validation when .+? are empty\.?',sentence,re.I):
             result.append(sentence);continue
         display=re.search(r'\bdisplays?\s+((?:the\s+)?[^.]+(?:field|button|control|input))\.?$',sentence,re.I)
         if display and ',' in display[1] and not re.search(r'\b(?:heading|URL)\b',display[1],re.I):

@@ -140,15 +140,41 @@ def workflow_summary_binding(text, contracts, records):
     plain=text.strip().rstrip('.,')
     # Shared input conditions are preserved as one sentence, rather than split
     # at field-list conjunctions and treated as independent business outcomes.
-    condition=re.fullmatch(r'(?:A|The) record is successfully created and searchable when (.+?) are supplied and (.+?) is omitted\.?',plain,re.I)
+    validation=re.fullmatch(r'(?:The )?form displays required-field validation when (.+?) are empty',plain,re.I)
+    if validation:
+        requested=[' '.join(words(v)) for v in re.split(r',\s*(?:and\s+)?|\s+and\s+',validation[1],flags=re.I)]
+        if not requested or len(set(requested))!=len(requested):return None
+        for c in cs:
+            if c.get('kind')!='field_messages' or not c.get('require_visible') or c.get('proof_scope')!='independent_field_groups':continue
+            field_list=re.fullmatch(r'\d+ "[^"]+" validation messages are visible for (.+)\.',c.get('expected_text',''),re.I)
+            if not field_list:continue
+            observed=[' '.join(words(v.strip())) for v in field_list[1].split(',')]
+            inputs={' '.join(words(k)):v for k,v in translated[c['step']].get('input_values',{}).items()}
+            if (set(requested)==set(observed) and len(observed)==len(requested)
+                    and c.get('expected_count')==len(requested)
+                    and len(c.get('field_subjects',[]))==len(requested)
+                    and len(set(c.get('field_subjects',[])))==len(requested)
+                    and all(inputs.get(k) == '' for k in requested)):
+                return result([c['step']],'observable_field_validation')
+        return None
+    condition=re.fullmatch(r'(?:A|The) record is successfully created and searchable when (.+?) are supplied(?:,\s*|\s+and\s+)(.+?) is omitted(?:(?:,\s*)?\s*and (?:an? )?(.+?) is (?:entered|supplied))?',plain,re.I)
     if condition and creation:
-        inputs={k:v for r in translated.values() for k,v in r.get('input_values',{}).items()}
         requested=[x.strip() for x in re.split(r',\s*(?:and\s+)?|\s+and\s+',condition[1],flags=re.I)]
-        matched=lambda label:next((v for k,v in inputs.items() if ' '.join(words(k))==' '.join(words(label))),None)
-        values=[matched(label) for label in requested]
-        if values and all(v for v in values) and matched(condition[2])=='':
-            pairs=[(a,b) for a,b in creation if identity(values)==identity(a['expected_values'])]
-            if pairs:return result([c['step'] for pair in pairs for c in pair],'observable_saved_and_filtered_record')
+        for saved_contract,found_contract in creation:
+            inputs={};input_steps={}
+            for r in sorted(translated.values(),key=lambda r:r['step']):
+                if r['step']>saved_contract['step']:continue
+                for k,v in r.get('input_values',{}).items():
+                    key=' '.join(words(k));inputs[key]=v;input_steps[key]=r['step']
+            matched=lambda label:inputs.get(' '.join(words(label)))
+            values=[matched(label) for label in requested]
+            labels=requested+[condition[2]]+([condition[3]] if condition[3] else [])
+            if (values and all(v for v in values) and matched(condition[2])==''
+                    and (not condition[3] or bool(matched(condition[3])))
+                    and identity(values)==identity(saved_contract['expected_values'])):
+                return result([saved_contract['step'],found_contract['step']]+
+                              [input_steps[' '.join(words(label))] for label in labels],
+                              'observable_saved_and_filtered_record')
         return None
     blocked=re.fullmatch(r'(?:The )?form blocks submission when required (?:fields|names) are empty\.?',plain,re.I)
     if blocked:

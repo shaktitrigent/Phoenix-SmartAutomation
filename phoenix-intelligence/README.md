@@ -2,6 +2,30 @@
 
 The AI server. Hosts the LLM integrations, agents, and prompt library. Runs as a FastAPI service on port 8001 and is called by `phoenix-core` over HTTP.
 
+## Installation
+
+From this repository, install Intelligence together with its local Shared package:
+
+```powershell
+cd phoenix-intelligence
+python -m pip install -e ../shared -e .
+```
+
+`phoenix-shared` is supplied by this repository, not assumed to be available on
+PyPI. Keep the sibling `shared/` directory for source installs. The existing
+repository-root flow (install Shared first, then Intelligence) also works.
+
+For a standalone wheel installation, obtain matching Shared and Intelligence
+wheels from the same release and run from their directory:
+
+```powershell
+python -m pip install ./phoenix_shared-0.1.5-py3-none-any.whl ./phoenix_intelligence-0.1.5-py3-none-any.whl
+```
+
+Intelligence's metadata requires the matching Shared version. A lone Intelligence
+wheel needs that version already installed or supplied through a local wheel
+directory; no public Shared package is assumed.
+
 ## Starting the server
 
 ```powershell

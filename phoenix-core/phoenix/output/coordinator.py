@@ -90,73 +90,164 @@ def _extract_new_methods(new_class_source: str, existing_names: List[str]) -> st
 
 
 def _splice_methods_into_class(existing_source: str, class_name: str, new_methods_source: str) -> str:
-    """Insert *new_methods_source* methods just before the closing of *class_name* in *existing_source*.
-
-    Falls back to appending at end-of-file if the class cannot be located.
-    """
-    existing_names = _get_existing_method_names(existing_source, class_name)
-    new_code = _extract_new_methods(new_methods_source, existing_names)
-    if not new_code:
-        return existing_source  # nothing new to add
-
-    # Find the last line of the class body and insert before the next class/EOF
+    """Replace same-named generated methods and append newly generated methods."""
     try:
-        tree = ast.parse(existing_source)
+        existing_tree = ast.parse(existing_source)
+        incoming_tree = ast.parse(new_methods_source)
     except SyntaxError:
-        return existing_source + "\n\n" + new_code
+        return existing_source
 
-    target_class = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            target_class = node
-            break
-
-    if target_class is None:
-        return existing_source + "\n\n" + new_code
-
-    lines = existing_source.splitlines(keepends=True)
-    insert_at = target_class.end_lineno  # type: ignore[attr-defined]
-
-    # Indent the new methods with 4 spaces to sit inside the class
-    indented = "\n".join(
-        ("    " + ln if ln.strip() else ln)
-        for ln in new_code.splitlines()
+    target_class = next(
+        (node for node in ast.walk(existing_tree)
+         if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
     )
-    lines.insert(insert_at, "\n" + indented + "\n")
-    return "".join(lines)
+    incoming_class = next(
+        (node for node in ast.walk(incoming_tree)
+         if isinstance(node, ast.ClassDef) and node.name == class_name),
+        None,
+    )
+
+    if incoming_class is None:
+        raise ValueError('Incoming page object does not define its declared class')
+    if target_class is None:
+        # A new scenario may declare a different page class in the same module.
+        # Append the class itself, never detach its methods into another class.
+        additions = []
+        existing_symbols = {n.name for n in existing_tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        existing_statements = {ast.dump(n, include_attributes=False) for n in existing_tree.body}
+        for node in incoming_tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == '__future__':continue
+            if node is incoming_class:
+                additions.append(ast.get_source_segment(new_methods_source, node) or ast.unparse(node))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                if ast.dump(node, include_attributes=False) not in existing_statements:
+                    additions.append(ast.unparse(node))
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in existing_symbols:
+                additions.append(ast.get_source_segment(new_methods_source, node) or ast.unparse(node))
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                assigned={n.id for n in ast.walk(node) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)}
+                defined={n.id for statement in existing_tree.body if isinstance(statement,(ast.Assign,ast.AnnAssign)) for n in ast.walk(statement) if isinstance(n,ast.Name) and isinstance(n.ctx,ast.Store)}
+                if not assigned & defined:additions.append(ast.unparse(node))
+        result=existing_source.rstrip()+'\n\n'+ '\n\n'.join(additions)+'\n'
+        compile(result, '<merged-page-object>', 'exec')
+        return result
+
+    existing_lines = existing_source.splitlines(keepends=True)
+    incoming_lines = new_methods_source.splitlines(keepends=True)
+
+    def line_offsets(lines: List[str]) -> List[int]:
+        offsets = []
+        total = 0
+        for line in lines:
+            offsets.append(total)
+            total += len(line.encode("utf-8"))
+        return offsets
+
+    existing_offsets = line_offsets(existing_lines)
+    incoming_offsets = line_offsets(incoming_lines)
+
+    def method_span(method: ast.FunctionDef | ast.AsyncFunctionDef, offsets: List[int]) -> tuple[int, int]:
+        start_node = method.decorator_list[0] if method.decorator_list else method
+        start = offsets[start_node.lineno - 1] + start_node.col_offset
+        end = offsets[method.end_lineno - 1] + method.end_col_offset
+        return start, end
+
+    existing_methods = {
+        method.name: method
+        for method in target_class.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    incoming_methods = [
+        method for method in incoming_class.body
+        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    source = existing_source.encode("utf-8")
+    replacements = []
+    for method in incoming_methods:
+        current = existing_methods.get(method.name)
+        if current is None:
+            continue
+        start, end = method_span(current, existing_offsets)
+        incoming_start, incoming_end = method_span(method, incoming_offsets)
+        replacements.append((start, end, new_methods_source.encode("utf-8")[incoming_start:incoming_end]))
+    for start, end, replacement in sorted(replacements, reverse=True):
+        source = source[:start] + replacement + source[end:]
+    updated_source = source.decode("utf-8")
+
+    # Page-specific generation carries selectors/provenance for independent
+    # methods. Extending a page must preserve earlier accessor metadata too.
+    merged_tree=ast.parse(updated_source)
+    merged_class=next(n for n in merged_tree.body if isinstance(n,ast.ClassDef) and n.name==class_name)
+    def provenance_assignment(cls):
+        return next((n for n in cls.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='LOCATOR_PROVENANCE' for t in n.targets)),None)
+    incoming_provenance=provenance_assignment(incoming_class)
+    if incoming_provenance is not None:
+        incoming_values=ast.literal_eval(incoming_provenance.value)
+        if not isinstance(incoming_values,dict):raise ValueError('Locator provenance must be a mapping')
+        previous=provenance_assignment(merged_class)
+        if previous is None:
+            merged_class.body.insert(0,incoming_provenance)
+        else:
+            previous_values=ast.literal_eval(previous.value)
+            if not isinstance(previous_values,dict):raise ValueError('Existing locator provenance must be a mapping')
+            previous.value=ast.parse(repr({**previous_values,**incoming_values}),mode='eval').body
+        ast.fix_missing_locations(merged_tree)
+        updated_source=ast.unparse(merged_tree)+'\n'
+
+    existing_names = set(_get_existing_method_names(updated_source, class_name))
+    updated_tree=ast.parse(updated_source)
+    target_class=next(n for n in updated_tree.body if isinstance(n,ast.ClassDef) and n.name==class_name)
+    for method in incoming_class.body:
+        if isinstance(method,(ast.FunctionDef,ast.AsyncFunctionDef)) and method.name not in existing_names:
+            target_class.body.append(method)
+    ast.fix_missing_locations(updated_tree)
+    merged=ast.unparse(updated_tree)+'\n'
+    compile(merged,'<merged-page-object>','exec')
+    return merged
 
 
 def _append_test_functions(existing_source: str, new_source: str) -> str:
-    """Append test functions from *new_source* to *existing_source*, skipping duplicates."""
-    try:
-        existing_tree = ast.parse(existing_source)
-        new_tree = ast.parse(new_source)
-    except SyntaxError:
-        return existing_source + "\n\n" + new_source
+    """Refresh incoming top-level tests and their imports; keep unrelated tests."""
+    existing_tree=ast.parse(existing_source)
+    incoming=ast.parse(new_source)
+    tests={n.name:n for n in incoming.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef))
+           and n.name.startswith('test_')}
+    if not tests:return existing_source
+    updated=[];replaced=set()
+    for node in existing_tree.body:
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef)) and node.name in tests:
+            updated.append(tests[node.name]);replaced.add(node.name)
+        else:updated.append(node)
+    imports={ast.dump(n,include_attributes=False) for n in updated if isinstance(n,(ast.Import,ast.ImportFrom))}
+    additions=[n for n in incoming.body if isinstance(n,(ast.Import,ast.ImportFrom))
+               and ast.dump(n,include_attributes=False) not in imports]
+    def imported_bindings(node):
+        if isinstance(node,ast.ImportFrom):
+            return {a.asname or a.name:(node.module,a.name) for a in node.names}
+        if isinstance(node,ast.Import):
+            return {a.asname or a.name.split('.')[0]:(a.name,None) for a in node.names}
+        return {}
+    previous={k:v for n in updated for k,v in imported_bindings(n).items()}
+    for node in additions:
+        for name,value in imported_bindings(node).items():
+            if name in previous and previous[name]!=value:
+                raise ValueError(f"Generated test import conflicts with existing binding: {name}")
+    # Keep future imports before ordinary imports and executable statements.
+    futures=[n for n in additions if isinstance(n,ast.ImportFrom) and n.module=='__future__']
+    ordinary=[n for n in additions if n not in futures]
+    index=1 if updated and isinstance(updated[0],ast.Expr) and isinstance(updated[0].value,ast.Constant) and isinstance(updated[0].value.value,str) else 0
+    updated[index:index]=futures
+    index+=len(futures)
+    while index<len(updated) and isinstance(updated[index],ast.ImportFrom) and updated[index].module=='__future__':index+=1
+    updated[index:index]=ordinary
+    updated.extend(node for name,node in tests.items() if name not in replaced)
+    existing_tree.body=updated
+    ast.fix_missing_locations(existing_tree)
+    result=ast.unparse(existing_tree)+'\n'
+    compile(result,'<updated-generated-tests>','exec')
+    return result
 
-    existing_funcs = {
-        n.name for n in ast.walk(existing_tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-    new_lines = new_source.splitlines(keepends=True)
-    parts_to_add: List[str] = []
-
-    for node in ast.walk(new_tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if not node.name.startswith("test_"):
-            continue
-        if node.name in existing_funcs:
-            continue
-        start = node.decorator_list[0].lineno - 1 if node.decorator_list else node.lineno - 1
-        end = node.end_lineno  # type: ignore[attr-defined]
-        parts_to_add.append("".join(new_lines[start:end]))
-
-    if not parts_to_add:
-        return existing_source
-
-    return existing_source.rstrip() + "\n\n\n" + "\n\n\n".join(parts_to_add) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +304,74 @@ class OutputManager:
 
     def __init__(self, project_root: Path) -> None:
         self.root = project_root
+        self._ensure_pom_infrastructure()
+
+    def _ensure_pom_infrastructure(self) -> None:
+        """Ensure pages/ directory and base_page.py exist for POM mode.
+
+        Uses the existing scaffold template mechanism to create BasePage
+        from the Jinja2 template, matching the phoenix init architecture.
+        """
+        pages_dir = self.root / "pages"
+        base_page_path = pages_dir / "base_page.py"
+
+        # If base_page.py already exists, no action needed
+        if base_page_path.exists():
+            return
+
+        # Create pages directory if it doesn't exist
+        pages_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create __init__.py if it doesn't exist
+        init_path = pages_dir / "__init__.py"
+        if not init_path.exists():
+            init_path.write_text('"""Page objects package."""\n', encoding="utf-8")
+
+        # Render base_page.py from template using scaffold's _render_template
+        try:
+            from phoenix.scaffold import _render_template
+            context = {
+                "project_name": self.root.name,
+            }
+            base_page_code = _render_template("pages_base_page.py.j2", context)
+            if base_page_code:
+                base_page_path.write_text(base_page_code, encoding="utf-8")
+        except Exception:
+            # If scaffold import fails, create minimal BasePage as fallback
+            base_page_path.write_text(
+                '"""BasePage — shared foundation for all Page Object classes."""\n'
+                'from __future__ import annotations\n\n'
+                'import os\n'
+                'import re\n'
+                'from pathlib import Path\n'
+                'from typing import Optional, Union\n\n'
+                'from playwright.sync_api import Locator, Page, expect\n\n\n'
+                'class BasePage:\n'
+                '    """Base class for all page objects."""\n\n'
+                '    URL_PATH: str = "/"\n'
+                '    ACTION_TIMEOUT_MS: int = 30_000\n'
+                '    NAVIGATION_TIMEOUT_MS: int = 60_000\n\n'
+                '    def __init__(self, page: Page) -> None:\n'
+                '        self._page = page\n'
+                '        self._page.set_default_timeout(self.ACTION_TIMEOUT_MS)\n'
+                '        self._page.set_default_navigation_timeout(self.NAVIGATION_TIMEOUT_MS)\n\n'
+                '    def navigate(self, path: Optional[str] = None) -> None:\n'
+                '        configured_base = os.environ.get("APP_URL", "").strip()\n'
+                '        if not configured_base:\n'
+                '            raise ValueError("APP_URL must be supplied explicitly before navigation")\n'
+                '        base = configured_base.rstrip("/")\n'
+                '        url = base + (path if path.startswith("/") else f"/{path}") if path else configured_base\n'
+                '        self._page.goto(url, timeout=self.NAVIGATION_TIMEOUT_MS)\n\n'
+                '    def click(self, locator: Locator) -> None:\n'
+                '        expect(locator).to_be_visible(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        expect(locator).to_be_enabled(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        locator.click()\n\n'
+                '    def fill(self, locator: Locator, value: str) -> None:\n'
+                '        expect(locator).to_be_visible(timeout=self.ACTION_TIMEOUT_MS)\n'
+                '        locator.clear()\n'
+                '        locator.fill(value)\n',
+                encoding="utf-8"
+            )
 
     def apply(self, bundle: Dict[str, Any]) -> List[str]:
         """Apply a parsed pom_bundle to disk.

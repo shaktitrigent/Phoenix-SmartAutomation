@@ -124,6 +124,10 @@ class ManualTestQualityGate:
             expected = step.get("expected_result", "") if isinstance(step, dict) else ""
             if len(action) < self._min_step:
                 violations.append(f"step {i} action too short")
+            if re.search(r'["\'](?:Given|When|Then|And|But)["\']\s+field', expected, re.I):
+                violations.append(f"step {i} uses a scenario keyword as a field")
+            if re.search(r"\b(?:valid credentials|valid username and password)\b", action, re.I) and not step.get("test_data"):
+                violations.append(f"step {i} requires explicit input data")
             if self._strict and len(expected) < self._min_step:
                 violations.append(f"step {i} expected_result too short")
             if self._PLACEHOLDER_RE.search(action):
@@ -314,7 +318,8 @@ class ManualTestGenerator:
                 expected = step.get("expected_result", "")
                 data = step.get("test_data", "") or ""
                 num = step.get("step_number", "")
-                lines.append(f"| {num} | {action} | {expected} | {data} |")
+                escape = lambda value: str(value).replace("|", r"\|").replace("\n", "<br>")
+                lines.append(f"| {num} | {escape(action)} | {escape(expected)} | {escape(data)} |")
         else:
             for num, step in enumerate(steps, 1):
                 lines.append(f"| {num} | {step} | | |")

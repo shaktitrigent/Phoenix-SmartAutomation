@@ -1,10 +1,19 @@
 """Database abstraction layer"""
 
 import logging
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Try to import sqlite3, but handle DLL load failures gracefully
+sqlite3_available = True
+try:
+    import sqlite3
+except ImportError as e:
+    sqlite3_available = False
+    logger.warning(f"SQLite3 not available: {e} - Database operations will be disabled")
 
 from sqlalchemy import create_engine, Engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -22,6 +31,10 @@ def check_db_write_access(db_url: str) -> bool:
     Returns True on success; logs a clear error and returns False on failure.
     Only relevant for SQLite — always returns True for other databases.
     """
+    if not sqlite3_available:
+        logger.warning("SQLite3 not available - database operations will be disabled")
+        return False
+    
     if not db_url.startswith("sqlite"):
         return True
     # Strip the sqlite:/// prefix to get the file path

@@ -23,6 +23,7 @@ Anti-pattern scanner (Layer 3):
 from __future__ import annotations
 
 import ast
+from phoenix_shared.automation_translation import select_page_fixture
 import re as re_module
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,36 +42,112 @@ logger = logging.getLogger(__name__)
 # Fixture selection — authenticated_page vs plain page
 # ---------------------------------------------------------------------------
 
-_AUTH_PRECONDITION_PHRASES = (
-    "logged in",
-    "authenticated",
-    "on the dashboard",
-    "already logged in",
-    "signed in",
-    "valid session",
-    "active session",
-    "user is logged",
-    "user has logged",
+_NEGATION_AUTH_PATTERNS = (
+    r"\bnot\s+(?:already\s+)?logged\s+in\b",
+    r"\buser\s+is\s+not\s+(?:already\s+)?(?:logged\s+in|authenticated)\b",
+    r"\bnot\s+authenticated\b",
+    r"\bunauthenticated\b",
+    r"\blogin\s+page\b",
+    r"\blog\s+in\s+page\b",
+    r"\bbefore\s+login\b",
+    r"\bwithout\s+login\b",
+    r"\bwithout\s+authentication\b",
+    r"\bguest\b",
+    r"\blogged\s+out\b",
+    r"\bno\s+active\s+session\b",
+    r"\bnever\s+logged\s+in\b",
+)
+
+_LOGIN_SCENARIO_PATTERNS = (
+    r"\binvalid\s+login\b",
+    r"\bempty\s+credentials\b",
+    r"\bblank\s+(?:username|password|credentials)\b",
+    r"\bwrong\s+(?:username|password|credentials)\b",
+    r"\bincorrect\s+(?:username|password|credentials)\b",
+    r"\bfailed\s+login\b",
+    r"\blogin\s+failure\b",
+    r"\blogin\s+with\s+(?:valid|invalid|empty|blank|incorrect|wrong)\b",
+    r"\blogin\s+test\b",
+    r"\buser\s+logs\s+in\b",
+    r"\buser\s+logs\s+into\b",
+    r"\buser\s+logging\s+in\b",
+    r"\bperform\s+login\b",
+    r"\battempt\s+login\b",
+    r"^test_.*login",
+    r"^test_.*credential",
+)
+
+_AUTH_PRECONDITION_PATTERNS = (
+    r"\balready\s+logged\s+in\b",
+    r"\buser\s+is\s+logged\s+in\b",
+    r"\buser\s+has\s+logged\s+in\b",
+    r"\buser\s+is\s+authenticated\b",
+    r"\bauthenticated\s+user\b",
+    r"\bvalid\s+session\b",
+    r"\bactive\s+session\b",
+    r"\blogged\s+in\s+as\b",
+    r"\bon\s+the\s+dashboard\b",
+    r"\buser\s+is\s+on\s+(?:the\s+)?dashboard\b",
 )
 
 
-def _needs_authenticated_page(preconditions: str) -> bool:
-    """Return True when preconditions indicate the user must already be logged in."""
+def _needs_authenticated_page(
+    preconditions: str = "",
+    name: str = "",
+    description: str = "",
+) -> bool:
+    """Return True when preconditions indicate the user must already be logged in.
+
+    Returns False for login scenarios (valid/invalid/empty), unauthenticated states,
+    negations (e.g. 'not already logged in'), and unrelated scenarios.
+    """
+    combined = f"{name} {description}".lower()
+    if any(re_module.search(p, combined) for p in _LOGIN_SCENARIO_PATTERNS):
+        return False
+
+    if not preconditions or not preconditions.strip():
+        return False
+
     low = preconditions.lower()
-    return any(phrase in low for phrase in _AUTH_PRECONDITION_PHRASES)
+
+    # Check for explicit negation
+    if any(re_module.search(p, low) for p in _NEGATION_AUTH_PATTERNS):
+        return False
+
+    # Check if preconditions describe a login page or scenario
+    if any(re_module.search(p, low) for p in _LOGIN_SCENARIO_PATTERNS):
+        return False
+
+    # Check for authentication precondition
+    return any(re_module.search(p, low) for p in _AUTH_PRECONDITION_PATTERNS)
+
+
+def _swap_fixtures_by_preconditions(
+    code: str,
+    preconditions: str = "",
+    name: str = "",
+    description: str = "",
+) -> str:
+    """Ensure test function signature uses the correct page fixture."""
+    needs_auth = _needs_authenticated_page(preconditions, name=name, description=description)
+    target_fixture = "authenticated_page" if needs_auth else "page"
+
+    return select_page_fixture(code, target_fixture)
 
 
 def _swap_to_authenticated_fixture(code: str) -> str:
-    """Replace ``page: Page`` with ``authenticated_page: Page`` in test_* signatures.
+    """Replace ``page: Page`` with ``authenticated_page: Page`` in test_* signatures."""
+    return select_page_fixture(code, "authenticated_page")
 
-    Only touches the function-signature line to avoid mangling calls to
-    page-object methods or helper functions that coincidentally use 'page'.
-    """
-    return re_module.sub(
-        r"(def test_\w+\s*\()page(\s*:\s*Page)",
-        r"\1authenticated_page\2",
-        code,
-    )
+
+def _swap_to_intelligent_fixture(
+    code: str,
+    preconditions: str = "",
+    name: str = "",
+    description: str = "",
+) -> str:
+    """Select appropriate fixture based on preconditions."""
+    return _swap_fixtures_by_preconditions(code, preconditions=preconditions, name=name, description=description)
 
 
 # Title-case two-or-more word pattern used to detect person display names
@@ -183,10 +260,15 @@ class AutomationTestGenerator:
             )
 
         code = self._normalise(script_code)
+        code = self._enforce_locator_evidence(code, test)
 
-        # Swap fixture to authenticated_page when preconditions require a live session
-        if _needs_authenticated_page(test.get("preconditions", "")):
-            code = _swap_to_authenticated_fixture(code)
+        # Select page or authenticated_page based on test preconditions
+        code = _swap_to_intelligent_fixture(
+            code,
+            preconditions=test.get("preconditions", ""),
+            name=test.get("name", ""),
+            description=test.get("description", ""),
+        )
 
         # ── Determine output path (needed by repair-loop logging) ──────────────────
         safe_name = _slugify(test.get("name", f"test_{idx}"))
@@ -228,6 +310,7 @@ class AutomationTestGenerator:
             code = self._repair_loop(code, err, test, "syntax_error", path)
 
         # ── Write to disk so file-based gates can run ─────────────────────────────
+        code = self._enforce_locator_evidence(code, test)
         path.write_text(code, encoding="utf-8")
 
         # ── py_compile gate ───────────────────────────────────────────────────────
@@ -244,6 +327,18 @@ class AutomationTestGenerator:
                 path.write_text(code, encoding="utf-8")
 
         return path
+
+    @staticmethod
+    def _enforce_locator_evidence(code, test):
+        if "locators" in test or test.get("locator_provenance"):
+            from phoenix.locators.reconciliation import reconcile_generated_code
+            code, _, missing = reconcile_generated_code(code, test.get("locators") or [],
+                assertion_contracts=test.get("assertion_contracts") or [])
+            from phoenix_shared.generation_contract import artifact_plan_issues
+            missing.extend(artifact_plan_issues({**test, "script_code": code}))
+            if missing:
+                raise RuntimeError("Final generated source lacks validated locator evidence or generation-plan fidelity: " + ", ".join(missing))
+        return code
 
     def _repair_loop(
         self,
@@ -271,7 +366,7 @@ class AutomationTestGenerator:
                     attempt, self._repair_attempts, path.name,
                 )
                 break
-            repaired = self._normalise(repaired)
+            repaired = self._enforce_locator_evidence(self._normalise(repaired), test)
             # Validate the repair before accepting it
             new_err = validate_syntax(repaired)
             if not new_err:
@@ -329,9 +424,10 @@ class AutomationTestGenerator:
         code = _fix_bare_assert(code)
 
         # --- New locator-quality fixes ---
-        code = _fix_ambiguous_get_by_text_in_assertion(code)
-        code = _fix_dynamic_person_name_in_locator(code)
-        code = _fix_get_by_text_click_strict_mode(code)
+        # Never force uniqueness by selecting the first match.
+        # Locator evidence is checked again after all transforms.
+
+
         code = _fix_dialog_on_to_once(code)
 
         # --- Import completion (must run after all code transforms) ---
@@ -462,8 +558,8 @@ def _fix_dynamic_person_name_in_locator(code: str) -> str:
 
     Replacement strategy — tries, in order:
       1. button[aria-haspopup] — ARIA-correct user-menu buttons in any framework
-      2. [class*='userdropdown'] — OrangeHRM and similar naming conventions
-      3. [class*='user-dropdown'], [class*='user-menu'] — generic SPA patterns
+      2. [class*='userdropdown'] — Common user dropdown naming conventions
+      3. [class*='user-dropdown'], [class*='user-menu'] — Generic SPA patterns
     Falls back to the .first match so the script is always syntactically valid.
     """
     pattern = re_module.compile(

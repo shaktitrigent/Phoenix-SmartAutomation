@@ -1,16 +1,25 @@
 """Test generation agent - uses LLM + Knowledge Base + MCP for real code generation."""
 
 import ast
+from phoenix_shared.automation_translation import (
+    assertion_lines, bind_page_object_body, fill_value_expression, resolve_script_environment_values, step_coverage,
+    explicit_step_data, fill_operation_evidence,
+)
+from phoenix_shared.manual_semantics import bound_actions, final_artifact_issues
+from phoenix_shared.locator_utils import _are_locator_bundles_sufficient, normalize_locator_bundles
 import json
 import logging
 import re
 import textwrap
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from services.agents.base import BaseAgent
 from services.llm.prompt_loader import PromptLoader
+from services.locator_validator import LocatorValidator
+from services.locator_corrector import LocatorCorrector
 
 logger = logging.getLogger(__name__)
 
@@ -209,34 +218,6 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
     if re.search(r"(select|choose|pick)\s+(from|to|leave|start|end)\s+date", lower):
         return ControlType.DATE_PICKER_FUTURE
 
-    # URL-based hints
-    if ("/checkboxes" in url_lower or "checkbox" in url_lower) and any(
-        k in lower for k in ["check", "tick", "uncheck", "untick"]
-    ):
-        return ControlType.CHECKBOX
-    if "/dropdown" in url_lower and any(
-        k in lower for k in ["select", "choose", "pick", "option"]
-    ):
-        return ControlType.SELECT_DROPDOWN
-    if "/upload" in url_lower and any(k in lower for k in ["upload", "attach", "file"]):
-        return ControlType.FILE_INPUT
-    if ("/javascript_alerts" in url_lower or "/alerts" in url_lower) and any(
-        k in lower for k in ["alert", "dialog", "confirm", "prompt", "dismiss", "accept"]
-    ):
-        if "confirm" in lower:
-            return ControlType.BROWSER_CONFIRM
-        if "prompt" in lower:
-            return ControlType.BROWSER_PROMPT
-        return ControlType.BROWSER_ALERT
-    if ("/drag_and_drop" in url_lower or "/drag" in url_lower) and any(
-        k in lower for k in ["drag", "drop"]
-    ):
-        return ControlType.DRAG_DROP
-    if ("/hovers" in url_lower or "/hover" in url_lower) and any(
-        k in lower for k in ["hover", "mouse over"]
-    ):
-        return ControlType.HOVER_TARGET
-
     # MENU_CLICK: "Click X in the navigation menu" / "Click X menu"
     if any(k in lower for k in ["click", "press", "tap"]) and any(
         k in lower for k in ["menu", "navigation", "nav", "sidebar", "submenu"]
@@ -295,53 +276,213 @@ def _classify_control(criterion: str, application_url: Optional[str] = None) -> 
 
 
 def _extract_quoted_value(text: str) -> Optional[str]:
-    """Return the first quoted string found in text."""
-    m = re.search(r'["\']([^"\']+)["\']', text)
+    """Return the first quoted or backtick-delimited string found in text."""
+    m = re.search(r'[`"\']([^`"\']*)[`"\']', text)
     return m.group(1) if m else None
 
 
-def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
-    """Extract (field_label, fill_value) from fill-type criteria."""
-    # Pattern: action + field + value  e.g. "Enter username tomsmith"
-    # Try quoted value first
-    quoted = _extract_quoted_value(criterion)
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+_FIELD_SUFFIX_RE = re.compile(r"\s+(?:field|input|box|area|textbox|text\s+box)\s*$", re.IGNORECASE)
 
-    # Remove action keyword at start
+
+def _normalise_field_label(field: str) -> str:
+    """Convert natural-language field text into a concise semantic label."""
+    field = field.strip().strip("`'\"")
+    field = _LEADING_ARTICLE_RE.sub("", field)
+    field = _FIELD_SUFFIX_RE.sub("", field)
+    field = re.sub(r"\s+", " ", field).strip(" :.-")
+    return field.title() if field else "Field"
+
+
+def _normalise_fill_value(value: str) -> str:
+    """Clean natural-language punctuation around a field value."""
+    return value.strip().strip("`'\"")
+
+
+def _normalise_bdd_action(text: str) -> str:
+    """Normalize grammar only; never infer targets, routes or input data."""
+    text = re.sub(r"^(?:Given|When|Then|And|But)\s+", "", text.strip(), flags=re.I)
+    return re.sub(r"^I\s+", "", text, flags=re.I)
+
+
+def _strip_fill_action_prefix(text: str) -> str:
     cleaned = re.sub(
-        r"^(?:enter|type|fill|input|provide)\s+",
+        r"^(?:enter|type|fill(?:\s+in)?|input|provide|set)\s+(?:in\s+|into\s+)?",
         "",
-        criterion.strip(),
+        _normalise_bdd_action(text),
         flags=re.IGNORECASE,
     )
+    return _LEADING_ARTICLE_RE.sub("", cleaned).strip()
 
-    # "in the X field" or "into the X field" → extract field from that
+
+def _extract_fill_target_and_value(criterion: str) -> Tuple[str, str]:
+    """Extract (field_label, fill_value) from fill-type criteria.
+    
+    CRITICAL FIX: Respect explicit locators like id='user-name', name='password', etc.
+    These have highest priority over any LLM-generated or heuristic extraction.
+    """
+    criterion = _normalise_bdd_action(criterion)
+    quoted = _extract_quoted_value(criterion)
+    cleaned = _strip_fill_action_prefix(criterion)
+    
+    # CRITICAL FIX: Extract explicit locators first (highest priority)
+    # Pattern: id='user-name', id="user-name", name='password', data-testid='login-btn', etc.
+    explicit_locator_match = re.search(
+        r"(?:id|name|data-testid|class|placeholder|aria-label)\s*=\s*['\"]([^'\"]+)['\"]",
+        criterion,
+        re.IGNORECASE
+    )
+    if explicit_locator_match:
+        explicit_locator = explicit_locator_match.group(1)
+        value_before_locator = re.sub(r"\s+(?:in|into|for)\s+(?:the\s+)?(?:field|input|box|area|textbox|text\s+box)\s+.*$", "", cleaned, flags=re.I).strip()
+        return explicit_locator, _normalise_fill_value(quoted or value_before_locator)
+
+    embedded = re.fullmatch(r"(username|password|email|user|pass|name)\s+(.+)", cleaned, re.I)
+    if quoted is None and embedded and not re.match(r"(?:in|into|for|field|with|as|value)\b", embedded[2], re.I):
+        return _normalise_field_label(embedded[1]), _normalise_fill_value(embedded[2])
+
     field_match = re.search(
-        r"(?:in|into|for)\s+(?:the\s+)?['\"]?([a-zA-Z\s]+?)['\"]?\s+(?:field|input|box|area)",
+        r"(?:in|into|for)\s+(?:the\s+)?[`'\"]?([a-zA-Z\s]+?)[`'\"]?\s+(?:field|input|box|area|textbox|text\s+box)",
         criterion,
         re.IGNORECASE,
     )
     if field_match:
-        field = field_match.group(1).strip()
+        field = _normalise_field_label(field_match.group(1))
         value = (
-            quoted or re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
+            quoted if quoted is not None else re.sub(r"\s+(?:in|into|for)\s+.*$", "", cleaned, flags=re.IGNORECASE).strip()
         )
-        return field.title(), value
+        return field, _normalise_fill_value(value)
 
     # "with value X" / "as X" / "= X"
-    with_match = re.search(r"(?:with|as|value|=)\s+['\"]?([^'\"]+)['\"]?", cleaned, re.IGNORECASE)
+    with_match = re.search(r"\s+(?:with|as|value|=)\s+[`'\"]?(.+?)[`'\"]?$", cleaned, re.IGNORECASE)
     if with_match:
-        value = with_match.group(1).strip()
+        value = quoted or with_match.group(1)
         field = re.sub(r"\s+(?:with|as|value|=).*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return field.title(), value
+        return _normalise_field_label(field), _normalise_fill_value(value)
+
+    # Handle quoted value pattern first - this is the most reliable extraction
+    if quoted is not None and quoted in cleaned:
+        quote_match = re.search(r'[`"\']([^`"\']*)[`"\']', cleaned)
+        field = cleaned[:quote_match.start()] if quote_match else cleaned
+        field = re.sub(r"\s+(?:with|as|value|=)\s*$", "", field, flags=re.IGNORECASE)
+        # Remove leading article from field if present
+        field = _LEADING_ARTICLE_RE.sub("", field).strip()
+        return _normalise_field_label(field or "Field"), _normalise_fill_value(quoted)
+
+    field_context_match = re.search(
+        r"^(?P<field>.+?)\s+(?:field|input|box|area|textbox|text\s+box)\s+[`'\"]?(?P<value>.+?)[`'\"]?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if field_context_match:
+        return (
+            _normalise_field_label(field_context_match.group("field")),
+            _normalise_fill_value(quoted or field_context_match.group("value")),
+        )
 
     # e.g. "username tomsmith" → first token = field, rest = value
+    # Apply leading article removal to the first part to handle "the username standard_user"
     parts = cleaned.split(None, 1)
     if len(parts) == 2:
-        return parts[0].title(), quoted or parts[1]
+        # Remove leading article from the field part if present
+        field_part = _LEADING_ARTICLE_RE.sub("", parts[0]).strip()
+        return _normalise_field_label(field_part or parts[0]), _normalise_fill_value(quoted or parts[1])
     if len(parts) == 1:
-        return parts[0].title(), quoted or "value"
+        # Remove leading article from the field part if present
+        field_part = _LEADING_ARTICLE_RE.sub("", parts[0]).strip()
+        return _normalise_field_label(field_part or parts[0]), quoted or "value"
 
     return "Field", quoted or "value"
+
+
+def _missing_fill_data(action: str) -> bool:
+    action = _normalise_bdd_action(action)
+    if not re.match(r"(?:enter|type|fill|input|provide|set)\b", action, re.I):
+        return False
+    # An explicit value in a field, or a quoted/environment binding is evidence.
+    unquoted = re.sub(r'"[^"]*"|\'[^\']*\'|`[^`]*`', "", action)
+    if re.search(r"\b(?:username|email|password|credentials)\b", unquoted, re.I) and re.search(r"\band\b", unquoted, re.I):
+        return True  # compound fields must be bound independently
+    field, value = _extract_fill_target_and_value(action)
+    if _extract_quoted_value(action) is not None and field.lower() not in {'field','valid','invalid'}:
+        return False
+    return (field.lower() in {"field", "valid", "invalid"}
+            or value.lower() in {"value", "password", "username", "credentials", "a password", "valid credentials", "invalid credentials"}
+            or re.match(r"^(?:valid|registered|test)\s+(?:username|email|password|credentials)\b", _strip_fill_action_prefix(action), re.I) is not None)
+
+
+def _resolve_fill_value_expr(field: str, value: str) -> str:
+    """Resolve explicitly supplied variables without default credential names."""
+    return fill_value_expression(value)
+
+
+
+def _split_compound_actions(criterion: str) -> List[str]:
+    from phoenix_shared.manual_semantics import split_actions
+    return split_actions(criterion)
+
+
+def _semantic_locator_expr(field: str, *, kind: str = "input") -> str:
+    """Build a generic DOM-aware locator expression for a semantic target."""
+    if field.startswith(("#", ".", "[", "//", "xpath=")):
+        return f'page.locator("{_safe_py_str(field)}")'
+
+    label = _safe_py_str(_normalise_field_label(field))
+    token = _safe_py_str(re.sub(r"[^a-z0-9]+", "-", field.lower()).strip("-"))
+    css_token = _safe_py_str(field.lower().replace(" ", "-"))
+
+    field_lower = field.lower()
+    
+    if kind == "button":
+        # The supplied target text does not establish an ID or even a role.
+        # Use its exact accessible text; stored evidence can refine this target.
+        return f"page.get_by_text({field.strip().rstrip('.')!r}, exact=True)"
+
+    # Enhanced input field locators with type-specific fallbacks
+    if "username" in field_lower or "email" in field_lower or "user" in field_lower:
+        return (
+            f'page.get_by_test_id("username")'
+            f'.or_(page.get_by_test_id("email"))'
+            f'.or_(page.get_by_placeholder("{label}", exact=True))'
+            f'.or_(page.get_by_placeholder("Username", exact=True))'
+            f'.or_(page.get_by_placeholder("Email", exact=True))'
+            f'.or_(page.get_by_label("{label}", exact=True))'
+            f'.or_(page.get_by_label("Username", exact=True))'
+            f'.or_(page.get_by_label("Email", exact=True))'
+            f'.or_(page.locator("[data-test=\'username\'], [data-testid=\'username\'], [data-test=\'email\'], [data-testid=\'email\']"))'
+            f'.or_(page.locator("input[name=\'username\'], input[name=\'email\'], input[type=\'email\']"))'
+        )
+    
+    if "password" in field_lower:
+        return (
+            f'page.get_by_test_id("password")'
+            f'.or_(page.get_by_placeholder("{label}", exact=True))'
+            f'.or_(page.get_by_placeholder("Password", exact=True))'
+            f'.or_(page.get_by_label("{label}", exact=True))'
+            f'.or_(page.get_by_label("Password", exact=True))'
+            f'.or_(page.locator("[data-test=\'password\'], [data-testid=\'password\']"))'
+            f'.or_(page.locator("input[name=\'password\'], input[type=\'password\']"))'
+        )
+    
+    if "sign in" in field_lower or "login" in field_lower or "submit" in field_lower:
+        return (
+            f'page.get_by_test_id("sign-in")'
+            f'.or_(page.get_by_test_id("login")'
+            f'.or_(page.get_by_test_id("submit"))'
+            f'.or_(page.get_by_role("button", name=re.compile(r"Sign In", re.IGNORECASE)))'
+            f'.or_(page.get_by_role("button", name=re.compile(r"Login", re.IGNORECASE)))'
+            f'.or_(page.get_by_role("button", name=re.compile(r"Submit", re.IGNORECASE)))'
+            f'.or_(page.locator("input[type=\'submit\']"))'
+            f'.or_(page.locator("button[type=\'submit\']"))'
+        )
+    
+    # Generic fallback for other fields
+    return (
+        f'page.get_by_test_id("{token}")'
+        f'.or_(page.get_by_placeholder("{label}", exact=True))'
+        f'.or_(page.get_by_label("{label}", exact=True))'
+        f'.or_(page.locator("[data-test=\'{token}\'], [data-testid=\'{token}\'], #{css_token}, input[name=\'{css_token}\']"))'
+    )
 
 
 def _extract_click_target(criterion: str) -> Tuple[str, str]:
@@ -353,14 +494,19 @@ def _extract_click_target(criterion: str) -> Tuple[str, str]:
         criterion.strip(),
         flags=re.IGNORECASE,
     )
-    quoted = _extract_quoted_value(criterion) or cleaned
+    cleaned = cleaned.strip().strip("`'\"*. ")
+    cleaned = re.sub(r"\s+in\s+(?:the\s+)?(?:application\s+)?navigation(?:\s+menu)?$", "", cleaned, flags=re.I)
+    quoted = (_extract_quoted_value(criterion) or cleaned).strip("`'\"*. ")
 
-    if "button" in lower:
+    if re.search(r'\bmenu\s+item\b|\boption\b.*\bmenu\b', lower):
+        return "menuitem", quoted
+
+    if "button" in lower or re.search(r"\b(log\s*in|login|sign\s*in|submit|continue|save|next)\b", cleaned, re.IGNORECASE):
         label = re.sub(r"\s+button.*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return "button", label or quoted
+        return "button", _extract_quoted_value(criterion) or label.strip("`'\" ") or quoted
     if "link" in lower:
         label = re.sub(r"\s+link.*$", "", cleaned, flags=re.IGNORECASE).strip()
-        return "link", label or quoted
+        return "link", _extract_quoted_value(criterion) or label.strip("`'\" ") or quoted
     return "text", quoted
 
 
@@ -381,7 +527,11 @@ def _extract_select_option(criterion: str) -> Tuple[str, str]:
 
 
 def _extract_assertion_subject(criterion: str) -> str:
-    """Extract what should be visible/true from assertion criteria."""
+    """Extract what should be visible/true from assertion criteria.
+    
+    Enhanced to handle dashboard verification assertions by extracting the actual
+    UI element name rather than the full descriptive text.
+    """
     lower = criterion.lower()
     # Remove assertion keyword
     cleaned = re.sub(
@@ -393,43 +543,81 @@ def _extract_assertion_subject(criterion: str) -> str:
     quoted = _extract_quoted_value(criterion)
     if quoted:
         return quoted
+    
+    # Enhanced patterns for dashboard/content verification
+    # "Verify the Dashboard heading is displayed" → "Dashboard"
+    # "Verify the dashboard displays the Missed Check Ins count" → "Missed Check Ins"
+    heading_match = re.search(r"(?:the\s+)?(.+?)\s+(?:heading|title|section)\s+is\s+displayed", cleaned, re.IGNORECASE)
+    if heading_match:
+        return heading_match.group(1).strip()
+    
+    # "Verify the dashboard displays the X count" → "X"
+    count_match = re.search(r"the\s+dashboard\s+displays\s+the\s+(.+?)\s+count", cleaned, re.IGNORECASE)
+    if count_match:
+        return count_match.group(1).strip()
+    
+    # "Verify the X section is displayed" → "X"
+    section_match = re.search(r"the\s+(.+?)\s+section\s+is\s+displayed", cleaned, re.IGNORECASE)
+    if section_match:
+        return section_match.group(1).strip()
+    
+    # "Verify the X status is displayed" → "X"
+    status_match = re.search(r"the\s+(.+?)\s+status\s+is\s+displayed", cleaned, re.IGNORECASE)
+    if status_match:
+        return status_match.group(1).strip()
+    
     # "the Secure Area page is shown" → "Secure Area"
     title_match = re.search(r"the\s+(.+?)\s+(?:page|section|area|screen)", cleaned, re.IGNORECASE)
     if title_match:
         return title_match.group(1).strip()
+    
     # "URL contains /secure" → /secure
     url_match = re.search(r"url\s+(?:contains|includes|is|=)\s+['\"]?([^\s'\"]+)", lower)
     if url_match:
         return url_match.group(1).strip()
+    
     return cleaned[:60]
 
 
-def _criterion_to_playwright_lines(
+def _criterion_to_playwright_lines_atomic(
     criterion: str,
     step_num: int,
     application_url: Optional[str] = None,
+    include_header: bool = False,
 ) -> List[str]:
-    """Map a single acceptance criterion → list of indented Playwright code lines."""
+    """Map a single atomic acceptance criterion → list of indented Playwright code lines."""
+    criterion = _normalise_bdd_action(criterion)
+    if _missing_fill_data(criterion):
+        return [_manual_review_warning_line("Explicit input data is missing or compound fields are unresolved")]
     control = _classify_control(criterion, application_url)
     lower = criterion.lower()
-    lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+    lines: List[str] = []
+    if include_header:
+        lines.append(f"    # Step {step_num}: {criterion}")
 
     if control == ControlType.LOGIN:
         # Extract URL, username, password from step text
         url_match = _LOGIN_URL_RE.search(criterion)
-        url = url_match.group(0).rstrip(".,)") if url_match else (application_url or "https://example.com")
+        url = url_match.group(0).rstrip(".,)") if url_match else application_url
+        if not url:
+            raise ValueError("Login step requires URL either in step text or via --url parameter")
         user_match = _LOGIN_USER_RE.search(criterion)
         username_val = user_match.group(1).strip().strip("'\"") if user_match else None
         pass_match = _LOGIN_PASS_RE.search(criterion)
         password_val = pass_match.group(1).strip().strip("'\"") if pass_match else None
-        username_expr = f'"{_safe_py_str(username_val)}"' if username_val else 'os.environ["TEST_USERNAME"]'
-        password_expr = f'"{_safe_py_str(password_val)}"' if password_val else 'os.environ["TEST_PASSWORD"]'
+        username_expr = _resolve_fill_value_expr("Username", username_val) if username_val is not None else None
+        password_expr = _resolve_fill_value_expr("Password", password_val) if password_val is not None else None
+        if username_expr is None or password_expr is None:
+            return [_manual_review_warning_line("Login requires explicitly supplied credentials", criterion)]
+        username_locator = _semantic_locator_expr("Username")
+        password_locator = _semantic_locator_expr("Password")
+        login_locator = _semantic_locator_expr("Login", kind="button")
         lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
-            f'    fill_ready(page, page.locator("input[name=\'username\']"), {username_expr}, "Username input")',
-            f'    fill_ready(page, page.locator("input[name=\'password\']"), {password_expr}, "Password input")',
-            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
-            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    page.goto("{_safe_py_str(url)}", wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    fill_ready(page, {username_locator}, {username_expr}, "Username input")',
+            f'    fill_ready(page, {password_locator}, {password_expr}, "Password input")',
+            f'    click_ready(page, {login_locator}, "Login button")',
+            '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.MENU_CLICK:
@@ -455,28 +643,38 @@ def _criterion_to_playwright_lines(
         ]
 
     elif control == ControlType.NAVIGATE:
-        url = _extract_quoted_value(criterion) or application_url or "https://example.com"
+        url = _extract_quoted_value(criterion) or application_url
+        if not url:
+            raise ValueError("Navigate step requires URL either in step text or via --url parameter")
         lines += [
-            f'    page.goto("{_safe_py_str(url)}", timeout=NAVIGATION_TIMEOUT_MS)',
+            f'    page.goto("{_safe_py_str(url)}", wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)',
             '    expect(page.locator("body")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)',
         ]
 
     elif control == ControlType.TEXT_INPUT:
         field, value = _extract_fill_target_and_value(criterion)
+        locator_expr = _semantic_locator_expr(field)
+        val_expr = _resolve_fill_value_expr(field, value)
         lines.append(
-            f'    fill_ready(page, page.get_by_label("{_safe_py_str(field)}", exact=True), "{_safe_py_str(value)}", "{_safe_py_str(field)} field")'
+            f'    fill_ready(page, {locator_expr}, {val_expr}, "{_safe_py_str(field)} field")'
         )
 
     elif control == ControlType.PASSWORD_INPUT:
-        _, value = _extract_fill_target_and_value(criterion)
+        field, value = _extract_fill_target_and_value(criterion)
+        f_name = field if field != "Field" else "Password"
+        locator_expr = _semantic_locator_expr(f_name)
+        val_expr = _resolve_fill_value_expr(f_name, value)
         lines.append(
-            f'    fill_ready(page, page.get_by_label("Password", exact=True), "{_safe_py_str(value)}", "Password field")'
+            f'    fill_ready(page, {locator_expr}, {val_expr}, "Password field")'
         )
 
     elif control == ControlType.EMAIL_INPUT:
-        _, value = _extract_fill_target_and_value(criterion)
+        field, value = _extract_fill_target_and_value(criterion)
+        f_name = field if field != "Field" else "Email"
+        locator_expr = _semantic_locator_expr(f_name)
+        val_expr = _resolve_fill_value_expr(f_name, value)
         lines.append(
-            f'    fill_ready(page, page.get_by_label("Email", exact=True), "{_safe_py_str(value)}", "Email field")'
+            f'    fill_ready(page, {locator_expr}, {val_expr}, "Email field")'
         )
 
     elif control == ControlType.CHECKBOX:
@@ -507,13 +705,14 @@ def _criterion_to_playwright_lines(
         ]
 
     elif control == ControlType.FILE_INPUT:
-        lines.append("    page.locator('input[type=\"file\"]').set_input_files('test_file.txt')")
+        lines.append(_manual_review_warning_line("File upload requires an explicit file and target"))
 
     elif control == ControlType.BUTTON:
         role, label = _extract_click_target(criterion)
         if role == "button":
+            locator_expr = _semantic_locator_expr(label, kind="button")
             lines.append(
-                f'    click_ready(page, page.get_by_role("button", name="{_safe_py_str(label)}", exact=True), "{_safe_py_str(label)} button")'
+                f'    click_ready(page, {locator_expr}, "{_safe_py_str(label)} button")'
             )
         else:
             lines.append(_manual_review_warning_line("No stable button locator could be derived", criterion))
@@ -532,13 +731,13 @@ def _criterion_to_playwright_lines(
             lines += [
                 '    page.once("dialog", lambda dialog: dialog.dismiss())',
                 "    # Trigger the alert",
-                '    click_ready(page, page.get_by_role("button").first, "Alert trigger button")',
+                '    click_ready(page, page.get_by_role("button"), "Alert trigger button")',
             ]
         else:
             lines += [
                 '    page.once("dialog", lambda dialog: dialog.accept())',
                 "    # Trigger the alert",
-                '    click_ready(page, page.get_by_role("button").first, "Alert trigger button")',
+                '    click_ready(page, page.get_by_role("button"), "Alert trigger button")',
             ]
 
     elif control == ControlType.BROWSER_CONFIRM:
@@ -561,74 +760,20 @@ def _criterion_to_playwright_lines(
         )
 
     elif control == ControlType.DRAG_DROP:
-        lines += [
-            "    source = page.locator('#column-a')",
-            "    target = page.locator('#column-b')",
-            "    source.drag_to(target)",
-        ]
+        lines.append(_manual_review_warning_line("Drag and drop requires explicit source and target evidence", criterion))
 
     elif control == ControlType.ASSERTION:
-        subject = _extract_assertion_subject(criterion)
-        if any(k in lower for k in ["url", "navigate", "redirect", "page contains /", "page is"]):
-            url_frag = re.search(r"[/][\w/-]+", subject)
-            if url_frag:
-                lines.append(
-                    f'    expect(page).to_have_url(re.compile(r".*{re.escape(url_frag.group())}.*"))'
-                )
-            else:
-                lines.append(
-                    f'    expect(page).to_have_url(re.compile(r".*{re.escape(subject)}.*"))'
-                )
-        elif "title" in lower:
-            lines.append(f'    expect(page).to_have_title(re.compile(r".*{re.escape(subject)}.*"))')
-        else:
-            if _looks_like_placeholder_assertion(subject):
-                lines.append(_manual_review_warning_line("Assertion text is not DOM-backed", criterion))
-            else:
-                lines.append(
-                    f'    expect(unique_visible(page.get_by_text("{_safe_py_str(subject)}", exact=True), "{_safe_py_str(subject)} assertion target")).to_be_visible(timeout=ASSERTION_TIMEOUT_MS)'
-                )
+        translated = assertion_lines(criterion)
+        lines.extend(translated or [_manual_review_warning_line("Assertion requires explicit UI or URL evidence", criterion)])
 
     elif control == ControlType.LOGIN_CREDENTIALS:
-        # "Login using valid Admin credentials" — use env vars; no URL extraction needed
-        lines += [
-            '    fill_ready(page, page.locator("input[name=\'username\']"), os.environ.get("TEST_USERNAME", "Admin"), "Username input")',
-            '    fill_ready(page, page.locator("input[name=\'password\']"), os.environ.get("TEST_PASSWORD", "admin123"), "Password input")',
-            '    click_ready(page, page.get_by_role("button", name="Login", exact=True), "Login button")',
-            '    expect(page).to_have_url(re.compile(r".*/dashboard.*"), timeout=NAVIGATION_TIMEOUT_MS)',
-        ]
+        lines.append(_manual_review_warning_line("Login requires explicit fields, values and submit control", criterion))
 
     elif control == ControlType.DATE_PICKER_FUTURE:
-        # "Select a future From Date" / "Select From Date"
-        field_match = re.search(
-            r"(from|to|start|end|leave)\s+date",
-            lower,
-        )
-        field_label = field_match.group(0).title() if field_match else "Date"
-        lines += [
-            f'    # Date picker — select a future date for "{field_label}"',
-            f'    page.locator("input.oxd-date-input-field, input[placeholder*=\'Date\'], [class*=\'date\'] input").first.click()',
-            '    dismiss_known_overlays(page)',
-            '    # Click the next-month arrow until a future date is reachable, then click a date cell',
-            '    future_date_cell = page.locator("[class*=\'calender-cell\'], [class*=\'day\']:not([class*=\'disabled\']):not([class*=\'prev\']):not([class*=\'next\'])").nth(14)',
-            '    future_date_cell.click(timeout=ACTION_TIMEOUT_MS)',
-        ]
+        lines.append(_manual_review_warning_line("Date selection requires a supplied date and control evidence", criterion))
 
     elif control == ControlType.DATE_PICKER_PAST:
-        # "Select past leave date" / "Select a past date"
-        field_match = re.search(
-            r"(from|to|start|end|leave|past)\s+.*date|date.*past",
-            lower,
-        )
-        field_label = field_match.group(0).title() if field_match else "Date"
-        lines += [
-            f'    # Date picker — select a past date for "{field_label}"',
-            f'    page.locator("input.oxd-date-input-field, input[placeholder*=\'Date\'], [class*=\'date\'] input").first.click()',
-            '    dismiss_known_overlays(page)',
-            '    # Click a past date cell (use a date 7 days ago)',
-            '    past_date_cell = page.locator("[class*=\'calender-cell\'], [class*=\'day\']:not([class*=\'disabled\']):not([class*=\'prev\']):not([class*=\'next\'])").nth(1)',
-            '    past_date_cell.click(timeout=ACTION_TIMEOUT_MS)',
-        ]
+        lines.append(_manual_review_warning_line("Date selection requires a supplied date and control evidence", criterion))
 
     elif control == ControlType.WAIT:
         lines += [
@@ -640,6 +785,45 @@ def _criterion_to_playwright_lines(
         logger.warning("Criterion not recognized for heuristic mapping: %s", criterion)
         lines.append(_manual_review_warning_line("Criterion not mapped to a stable automation step", criterion))
 
+    return lines
+
+
+def _build_script_from_stored_locators(manual_test, locator_bundles, application_url):
+    """Direct stored generation uses the same accepted evidence/business compiler."""
+    from services.agents.evidence_fallback import compile_fallback
+    compiled = compile_fallback(manual_test, application_url, normalize_locator_bundles(locator_bundles),
+        manual_test.get('_dom_snapshot') or '', extract_fill=_extract_fill_target_and_value,
+        extract_click=_extract_click_target, split_actions=_split_compound_actions,
+        extract_select=_extract_select_option, missing_fill_data=_missing_fill_data,
+        environment_values=manual_test.get('_environment_values'),
+        test_name=re.sub(r'[^a-z0-9_]', '_', manual_test.get('name','test').lower()))
+    manual_test['_compiled_fallback'] = compiled
+    missing = []
+    for i in compiled['unresolved_steps']:
+        action = str(manual_test.get('steps',[])[i-1].get('action') or '')
+        field, _ = _extract_fill_target_and_value(action)
+        if re.match(r'(?:enter|type|fill)\b', action, re.I) and field: missing.append(field)
+        else: missing.append(f'Step {i}')
+    if compiled['overall_outcome_unresolved']: missing.append('Overall expected result')
+    return not missing, compiled['script_code'], missing
+
+
+def _criterion_to_playwright_lines(
+    criterion: str,
+    step_num: int,
+    application_url: Optional[str] = None,
+) -> List[str]:
+    """Map a single acceptance criterion → list of indented Playwright code lines."""
+    sub_parts = _split_compound_actions(criterion)
+    if len(sub_parts) > 1:
+        lines: List[str] = [f"    # Step {step_num}: {criterion}"]
+        for sub in sub_parts:
+            sub_lines = _criterion_to_playwright_lines_atomic(sub, step_num, application_url, include_header=False)
+            lines.extend(sub_lines)
+        lines.append("")
+        return lines
+
+    lines = _criterion_to_playwright_lines_atomic(criterion, step_num, application_url, include_header=True)
     lines.append("")
     return lines
 
@@ -649,6 +833,7 @@ def _derive_expected_result(criterion: str) -> str:
 
     Never returns the generic placeholder 'Step completes as expected'.
     """
+    criterion = _normalise_bdd_action(criterion)
     lower = criterion.lower()
 
     # Assertion / verification criteria — the criterion IS the expected result
@@ -666,8 +851,10 @@ def _derive_expected_result(criterion: str) -> str:
 
     # Fill / input actions
     if any(k in lower for k in ["enter", "type", "fill", "input", "provide"]):
+        if _missing_fill_data(criterion):
+            return "[NEEDS MANUAL REVIEW] Input requires explicit field/value bindings"
         field, value = _extract_fill_target_and_value(criterion)
-        return f'"{field}" field contains the value "{value}"'
+        return f'"{field}" field contains the value "{value}"' 
 
     # Click / button actions
     if any(k in lower for k in ["click", "press", "tap"]):
@@ -836,23 +1023,9 @@ _FALLBACK_RUNTIME_HELPERS = textwrap.dedent(
 
 
     def dismiss_known_overlays(page: Page) -> None:
-        for selector in OVERLAY_SELECTORS:
-            overlay = page.locator(selector)
-            try:
-                if overlay.count() == 0:
-                    continue
-                close_button = overlay.get_by_role(
-                    "button",
-                    name=re.compile(r"close|dismiss|cancel|not now|skip|got it", re.IGNORECASE),
-                ).first
-                if close_button.is_visible(timeout=1_000):
-                    close_button.click(timeout=2_000)
-            except Exception:
-                continue
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
+        # Optional overlays require explicit, reviewed selectors; do not close
+        # required business dialogs or send Escape indiscriminately.
+        return None
 
 
     def unique_visible(locator: Locator, description: str) -> Locator:
@@ -1049,6 +1222,77 @@ def _parse_attr(attrs_str: str, attr_name: str, default: str = "") -> str:
     return m.group(1) if m else default
 
 
+def _detect_truncated_generation(script_code: str, manual_steps: List[Dict[str, Any]], *, coverage=None) -> List[str]:
+    """Detect signs of truncated or incomplete generated automation.
+
+    Returns a list of warning messages describing detected issues.
+    """
+    warnings = []
+    
+    if not script_code or not script_code.strip():
+        warnings.append("Generated script is empty")
+        return warnings
+    
+    # Check for common truncation markers
+    truncation_markers = [
+        "[TRUNCATED]",
+        "[INCOMPLETE]",
+        "[TODO]",
+        "# TODO:",
+        "# FIXME:",
+        "# PLACEHOLDER",
+    ]
+
+    # Captured identity text may explicitly end in an ellipsis. Only a Python
+    # Ellipsis expression establishes an unfinished executable statement.
+    try:
+        if any(isinstance(n, ast.Constant) and n.value is Ellipsis for n in ast.walk(ast.parse(script_code))):
+            warnings.append("Script contains truncation marker: ...")
+    except SyntaxError:
+        warnings.append("Generated script is invalid Python")
+    
+    for marker in truncation_markers:
+        if marker in script_code:
+            warnings.append(f"Script contains truncation marker: {marker}")
+    
+    # Check if script ends abruptly (without proper closing)
+    lines = script_code.strip().splitlines()
+    if lines:
+        last_line = lines[-1].strip()
+        # A complete script should end with a closing brace or be empty
+        if last_line and not last_line.endswith((")", "]", "}", "'", '"')) and not last_line.startswith("#"):
+            # Not a definitive sign, but suspicious
+            if len(lines) < 10:  # Very short scripts might be incomplete
+                warnings.append("Script may be incomplete (very short length)")
+    
+    # Check for missing imports on generated code
+    if "from playwright.sync_api import" not in script_code and "page." in script_code:
+        warnings.append("Script uses Playwright API but missing imports")
+    
+    # Check for undefined helper functions
+    helpers_used = set()
+    for helper in ["fill_ready", "click_ready", "configure_page", "dismiss_known_overlays", "unique_visible"]:
+        if f"{helper}(" in script_code:
+            helpers_used.add(helper)
+    
+    # Check if helpers are defined
+    has_helper_definitions = any(f"def {helper}(" in script_code for helper in helpers_used)
+    if helpers_used and not has_helper_definitions:
+        warnings.append(f"Script uses helper functions but they are not defined: {', '.join(helpers_used)}")
+    
+    # Check step coverage ratio
+    if manual_steps:
+        from phoenix_shared.automation_translation import step_coverage
+        coverage = coverage if coverage is not None else step_coverage(script_code, manual_steps)
+        ratio = coverage["implemented_steps"] / len(manual_steps) if manual_steps else 0.0
+        if ratio < 0.5:
+            warnings.append(f"Low step coverage: {ratio:.1%} of manual steps implemented")
+        if coverage["unresolved_steps"]:
+            warnings.append(f"Unresolved manual steps: {len(coverage['unresolved_steps'])} of {len(manual_steps)}")
+    
+    return warnings
+
+
 def _parse_bdd_bundle_output(raw: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
     """Parse an ``<automation_bundle>`` XML response (from ``3.0_bdd.md`` prompt).
 
@@ -1164,23 +1408,81 @@ def _parse_bdd_bundle_output(raw: str) -> Tuple[Dict[str, Any], List[Dict[str, A
     return bundle, locators_raw, recommendations
 
 
-_AUTH_PRECONDITION_PHRASES = (
-    "logged in",
-    "authenticated",
-    "on the dashboard",
-    "already logged in",
-    "signed in",
-    "valid session",
-    "active session",
-    "user is logged",
-    "user has logged",
+_NEGATION_AUTH_PATTERNS = (
+    r"\bnot\s+(?:already\s+)?logged\s+in\b",
+    r"\buser\s+is\s+not\s+(?:already\s+)?(?:logged\s+in|authenticated)\b",
+    r"\bnot\s+authenticated\b",
+    r"\bunauthenticated\b",
+    r"\blogin\s+page\b",
+    r"\blog\s+in\s+page\b",
+    r"\bbefore\s+login\b",
+    r"\bwithout\s+login\b",
+    r"\bwithout\s+authentication\b",
+    r"\bguest\b",
+    r"\blogged\s+out\b",
+    r"\bno\s+active\s+session\b",
+    r"\bnever\s+logged\s+in\b",
+)
+
+_LOGIN_SCENARIO_PATTERNS = (
+    r"\binvalid\s+login\b",
+    r"\bempty\s+credentials\b",
+    r"\bblank\s+(?:username|password|credentials)\b",
+    r"\bwrong\s+(?:username|password|credentials)\b",
+    r"\bincorrect\s+(?:username|password|credentials)\b",
+    r"\bfailed\s+login\b",
+    r"\blogin\s+failure\b",
+    r"\blogin\s+with\s+(?:valid|invalid|empty|blank|incorrect|wrong)\b",
+    r"\blogin\s+test\b",
+    r"\buser\s+logs\s+in\b",
+    r"\buser\s+logs\s+into\b",
+    r"\buser\s+logging\s+in\b",
+    r"\bperform\s+login\b",
+    r"\battempt\s+login\b",
+    r"^test_.*login",
+    r"^test_.*credential",
+)
+
+_AUTH_PRECONDITION_PATTERNS = (
+    r"\balready\s+logged\s+in\b",
+    r"\buser\s+is\s+logged\s+in\b",
+    r"\buser\s+has\s+logged\s+in\b",
+    r"\buser\s+is\s+authenticated\b",
+    r"\bauthenticated\s+user\b",
+    r"\bvalid\s+session\b",
+    r"\bactive\s+session\b",
+    r"\blogged\s+in\s+as\b",
+    r"\bon\s+the\s+dashboard\b",
+    r"\buser\s+is\s+on\s+(?:the\s+)?dashboard\b",
 )
 
 
-def _needs_authenticated_page(preconditions: str) -> bool:
-    """Return True when the preconditions indicate the user must already be logged in."""
+def _needs_authenticated_page(
+    preconditions: str = "",
+    name: str = "",
+    description: str = "",
+) -> bool:
+    """Return True when preconditions indicate the user must already be logged in.
+
+    Returns False for login scenarios (valid/invalid/empty), unauthenticated states,
+    negations (e.g. 'not already logged in'), and unrelated scenarios.
+    """
+    combined = f"{name} {description}".lower()
+    if any(re.search(p, combined) for p in _LOGIN_SCENARIO_PATTERNS):
+        return False
+
+    if not preconditions or not preconditions.strip():
+        return False
+
     low = preconditions.lower()
-    return any(phrase in low for phrase in _AUTH_PRECONDITION_PHRASES)
+
+    if any(re.search(p, low) for p in _NEGATION_AUTH_PATTERNS):
+        return False
+
+    if any(re.search(p, low) for p in _LOGIN_SCENARIO_PATTERNS):
+        return False
+
+    return any(re.search(p, low) for p in _AUTH_PRECONDITION_PATTERNS)
 
 
 def _extract_test_body_lines(script_code: str) -> List[str]:
@@ -1227,12 +1529,109 @@ def _extract_test_body_lines(script_code: str) -> List[str]:
     return []
 
 
+def _apply_explicit_locator_fixes(script_code: str, manual_test: Dict[str, Any]) -> str:
+    """Post-process generated script to respect explicit locators from manual test criteria.
+    
+    CRITICAL FIX: Replace fabricated locators with user-specified ones like id='user-name'
+    """
+    steps = manual_test.get("steps", [])
+    if not steps:
+        return script_code
+    
+    # Build a mapping of explicit locators from manual test criteria
+    explicit_locators = {}
+    for step in steps:
+        action = step.get("action", "")
+        # Extract explicit locators: id='user-name', name='password', etc.
+        # Match: id='user-name' or id="user-name" or id=user-name
+        for match in re.finditer(r"(?:id|name|data-testid|class|placeholder|aria-label)\s*=\s*['\"]?([^'\"]+)['\"]?", action, re.IGNORECASE):
+            locator_value = match.group(1)
+            # Map common field names to their explicit locators
+            if 'user-name' in action.lower() or 'username' in action.lower():
+                explicit_locators['username'] = locator_value
+            elif 'password' in action.lower():
+                explicit_locators['password'] = locator_value
+            elif 'login' in action.lower() or 'login-button' in action.lower():
+                explicit_locators['login'] = locator_value
+    
+    # Apply fixes to the script
+    if explicit_locators:
+        lines = script_code.split('\n')
+        fixed_lines = []
+        
+        for line in lines:
+            fixed_line = line
+            # Replace fabricated username locators with explicit id='user-name'
+            if 'username' in explicit_locators and 'username' in line.lower():
+                # Replace with the explicit locator
+                explicit_id = explicit_locators['username']
+                # Replace fabricated testid calls with the explicit ID selector (handles both page. and self._page.)
+                fixed_line = re.sub(
+                    r'(?:page|self\._page)\.get_by_test_id\(["\'].*?["\']\)',
+                    f'self._page.locator("#{explicit_id}")',
+                    fixed_line
+                )
+                # Replace entire chain of .or_() calls with just the explicit locator
+                fixed_line = re.sub(
+                    r'self\._page\.locator\("#[^"]+"\)\.or_\(.*?\)',
+                    f'self._page.locator("#{explicit_id}")',
+                    fixed_line
+                )
+            
+            # Replace fabricated password locators with explicit id='password'
+            elif 'password' in explicit_locators and 'password' in line.lower():
+                explicit_id = explicit_locators['password']
+                fixed_line = re.sub(
+                    r'(?:page|self\._page)\.get_by_test_id\(["\'].*?["\']\)',
+                    f'self._page.locator("#{explicit_id}")',
+                    fixed_line
+                )
+                fixed_line = re.sub(
+                    r'self\._page\.locator\("#[^"]+"\)\.or_\(.*?\)',
+                    f'self._page.locator("#{explicit_id}")',
+                    fixed_line
+                )
+            
+            # Replace fabricated login button locators
+            elif 'login' in explicit_locators and 'login' in line.lower():
+                explicit_id = explicit_locators['login']
+                fixed_line = re.sub(
+                    r'(?:page|self\._page)\.get_by_test_id\(["\'].*?["\']\)',
+                    f'self._page.locator("#{explicit_id}")',
+                    fixed_line
+                )
+                fixed_line = re.sub(
+                    r'self\._page\.locator\("#[^"]+"\)\.or_\(.*?\)',
+                    f'self._page.locator("#{explicit_id}")',
+                    fixed_line
+                )
+            
+            fixed_lines.append(fixed_line)
+        
+        return '\n'.join(fixed_lines)
+    
+    return script_code
+
+
+def _script_dependencies(script: str) -> str:
+    tree = ast.parse(script)
+    nodes = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.ClassDef)) or (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("test_")):
+            nodes.append(ast.get_source_segment(script, node) or ast.unparse(node))
+    return "\n\n".join(nodes)
+
+
 def _synthesize_pom_bundle(
     script_code: str,
     module_name: str,
     test_name: str,
     preconditions: str = "",
     human_name: str = "",
+    description: str = "",
 ) -> Dict[str, Any]:
     """Build a minimal ``pom_bundle`` from a flat Playwright script.
 
@@ -1242,6 +1641,11 @@ def _synthesize_pom_bundle(
     validate→repair loop in ``AutomationTestGenerator`` still runs on the
     synthesized test file.
     """
+    from phoenix_shared.page_objects import synthesize_pages
+    fixture = 'authenticated_page' if _needs_authenticated_page(preconditions, name=human_name, description=description) else 'page'
+    synthesized = synthesize_pages(script_code, module_name, test_name, fixture)
+    if synthesized is not None:
+        return synthesized
     # Derive class name from the human-readable test name when available so that
     # the class captures the full intent (e.g. "SuccessfulLoginWithValidCredentialsPage")
     # rather than the truncated module slug.
@@ -1256,26 +1660,51 @@ def _synthesize_pom_bundle(
 
     # Extract and adapt the test body
     body_lines = _extract_test_body_lines(script_code)
-    # Remove page.goto(...) lines — BasePage.navigate() handles navigation
-    body_lines = [ln for ln in body_lines if not re.match(r"\s*(?:self\._)?page\.goto\(", ln)]
-    # Replace `page.` → `self._page.` and standalone `page` args; skip comment lines
-    # so prose like "the login page. The user remains" is not mangled.
-    body_lines = [
-        ln if ln.lstrip().startswith("#") else re.sub(r"\bpage\b", "self._page",
-            re.sub(r"(?<!\.)page\.", "self._page.", ln))
-        for ln in body_lines
-    ]
+    
+    # CORE FIX: Preserve meaningful actions from fallback generation
+    # The fallback now always generates at least navigation + visibility checks
+    # We need to preserve helper function calls while removing navigation for BasePage
+    
+    # Separate navigation lines from actual interaction lines
+    nav_lines = []
+    interaction_lines = []
+    
+    # Preserve explicit navigation steps; never substitute a project default URL.
+    interaction_lines = body_lines
 
-    if not body_lines:
-        body_lines = [
-            "        # [NEEDS MANUAL REVIEW] No automation steps were extracted.",
-            "        # This usually means the MCP browser connection was unavailable during",
-            "        # `phoenix automate`. Re-run after resolving the MCP connection, or",
-            "        # fill in the Playwright steps manually.",
-            "        pass",
+    # Rebind identifiers without changing UI strings or supplied data.
+    if interaction_lines:
+        adapted = bind_page_object_body(textwrap.dedent("\n".join(interaction_lines)))
+        interaction_lines = textwrap.indent(adapted, "        ").splitlines()
+
+    # CORE FIX: If no interaction lines after removing navigation, add basic interaction
+    # This can happen if the fallback only generated navigation
+    if not interaction_lines or all(ln.strip().startswith("#") for ln in interaction_lines):
+        interaction_lines = [
+            "        # No specific interaction steps were extracted",
+            "        # Please review the manual test steps for more specific actions",
+            "        configure_page(self._page)",
+            "        dismiss_known_overlays(self._page)",
+            "        expect(self._page.locator('body')).to_be_visible()",
         ]
+    
+    body_lines = interaction_lines
 
     method_body = "\n".join(body_lines)
+
+    # Inject only dependencies that are absent from the normalized flat script.
+    # Duplicating unique_visible changes binding analysis and can mask overrides.
+    existing_tree = ast.parse(script_code)
+    existing_names = {n.name for n in existing_tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    existing_names.update(n.id for statement in existing_tree.body if isinstance(statement, (ast.Assign, ast.AnnAssign))
+        for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+    helper_nodes = []
+    for node in ast.parse(_FALLBACK_RUNTIME_HELPERS).body:
+        names = {node.name} if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else {
+            n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        if not names & existing_names:
+            helper_nodes.append(node)
+    runtime_helpers = ast.unparse(ast.Module(body=helper_nodes, type_ignores=[]))
 
     # ── Page object ────────────────────────────────────────────────────────
     page_code = (
@@ -1284,9 +1713,10 @@ def _synthesize_pom_bundle(
         f"from __future__ import annotations\n\n"
         f"import os\n"
         f"import re\n"
+        f"import pytest\n"
         f"from playwright.sync_api import Locator, Page, expect\n"
         f"from pages.base_page import BasePage\n\n\n"
-        f"{_FALLBACK_RUNTIME_HELPERS}\n\n\n"
+        f"{runtime_helpers}\n\n{_script_dependencies(script_code)}\n\n"
         f"class {page_class}(BasePage):\n"
         f'    """Page object for {module_name} tests."""\n\n'
         f'    URL_PATH = ""\n\n'
@@ -1298,9 +1728,12 @@ def _synthesize_pom_bundle(
     # Choose the correct pytest fixture based on preconditions: tests that start
     # from an already-authenticated state should use authenticated_page so the
     # session-scoped storage state is reused instead of logging in again.
-    _fixture = "authenticated_page" if _needs_authenticated_page(preconditions) else "page"
+    _fixture = "authenticated_page" if _needs_authenticated_page(preconditions, name=human_name, description=description) else "page"
 
     # ── Test file ──────────────────────────────────────────────────────────
+    has_navigation = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                         and n.func.attr == "goto" for n in ast.walk(ast.parse(script_code)))
+    navigation_line = "" if has_navigation else "    _po.navigate()\n"
     test_code = (
         f'"""Test: {test_name.replace("_", " ")}'
         f" — generated by phoenix automate (pom mode).\"\"\"\n"
@@ -1311,7 +1744,7 @@ def _synthesize_pom_bundle(
         f"def test_{test_name}({_fixture}: Page) -> None:\n"
         f'    """{test_name.replace("_", " ")}."""\n'
         f"    _po = {page_class}({_fixture})\n"
-        f"    _po.navigate()\n"
+        f"{navigation_line}"
         f"    _po.{test_name}()\n"
     )
 
@@ -1325,6 +1758,12 @@ def _synthesize_pom_bundle(
         ],
         "test_data": [],
     }
+
+
+def _expected_result_to_assertion_lines(expected: str) -> List[str]:
+    """Translate only explicitly supplied expected evidence."""
+    return assertion_lines(expected)
+
 
 
 class TestGeneratorAgent(BaseAgent):
@@ -1341,6 +1780,9 @@ class TestGeneratorAgent(BaseAgent):
         2. Call LLM -> returns JSON array of structured test cases.
         3. Falls back to heuristic if LLM unavailable.
     """
+
+    # Request-local values shadow this immutable default; never share a dict.
+    environment_values = None
 
     def process(self, input_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         user_story = input_data.get("user_story", "")
@@ -1475,7 +1917,7 @@ class TestGeneratorAgent(BaseAgent):
             f"## HARD LIMIT\n"
             f"Return AT MOST {_MAX_MANUAL_TESTS} test cases in the JSON array.\n"
             f"Do NOT create one test per criterion. Group related criteria into one test.\n"
-            f"Each test must cover a complete end-to-end workflow including login.\n\n"
+            f"Preserve independent scenarios. Include login only when explicitly required. Never invent input data or UI evidence.\n\n"
             f"Return a JSON array of test case objects as specified in the system prompt."
         )
 
@@ -1529,46 +1971,55 @@ class TestGeneratorAgent(BaseAgent):
         Derives specific expected results for each step (RC-03) rather than
         emitting the generic placeholder 'Step completes as expected'.
         """
-        steps = []
-        # Only add a bare navigate step if the first criterion isn't already a login/navigate step
-        first_criterion = acceptance_criteria[0] if acceptance_criteria else ""
-        first_is_login = _classify_control(first_criterion, application_url) in (
-            ControlType.LOGIN, ControlType.NAVIGATE
-        )
-        if application_url and not first_is_login:
-            steps.append(
-                {
-                    "step_number": 1,
-                    "action": f"Navigate to {application_url} and log in",
-                    "expected_result": (
-                        f"Page at {application_url} loads successfully "
-                        "with visible content and no error messages"
-                    ),
-                }
-            )
+        groups = []
+        current = {"preconditions": [], "criteria": []}
         for criterion in acceptance_criteria:
-            steps.append(
-                {
-                    "step_number": len(steps) + 1,
-                    "action": criterion,
-                    "expected_result": _derive_expected_result(criterion),
-                }
-            )
-
+            if re.match(r"^Scenario(?: Outline)?:", criterion.strip(), re.I):
+                if current["criteria"]: groups.append(current)
+                current = {"preconditions": [], "criteria": []}
+                continue
+            if re.match(r"^Given\b", criterion.strip(), re.I):
+                if current["criteria"]:
+                    groups.append(current)
+                    current = {"preconditions": [], "criteria": []}
+                current["preconditions"].append(_normalise_bdd_action(criterion))
+            else:
+                current["criteria"].append(criterion)
+        if current["criteria"] or current["preconditions"]: groups.append(current)
+        if not groups: groups = [{"preconditions": [], "criteria": []}]
+        results = []
         test_name = self._derive_short_name(user_story)
-        overall_result = _derive_overall_expected_result(acceptance_criteria, user_story)
-        return [
-            {
-                "name": f"TC-001: {test_name.replace('_', ' ').title()}",
-                "description": user_story,
-                "risk_level": risk_level or "regression",
-                "preconditions": "User has access to the application",
-                "steps": steps,
-                "expected_result": overall_result,
-                "postconditions": "",
-                "tags": ["manual", "generated"],
-            }
-        ]
+        for index, group in enumerate(groups, 1):
+            steps = []
+            if application_url:
+                steps.append({"step_number": 1, "action": f"Navigate to {application_url}",
+                              "expected_result": f'URL equals "{application_url}"', "test_data": ""})
+            assertion_continuation = False
+            for criterion in group["criteria"]:
+                is_result = bool(re.match(r"^Then\b", criterion, re.I)) or (
+                    assertion_continuation and bool(re.match(r"^And\b", criterion, re.I))
+                    and not re.match(r"^(?:click|enter|fill|type|navigate|search|remove|select|open|leave|change)\b", _normalise_bdd_action(criterion), re.I))
+                if is_result and steps and not steps[-1]["action"].startswith("Navigate to"):
+                    outcome = _normalise_bdd_action(criterion)
+                    if assertion_continuation:
+                        steps[-1]["expected_result"] += "; " + outcome
+                    else:
+                        steps[-1]["expected_result"] = outcome
+                    assertion_continuation = True
+                    continue
+                assertion_continuation = False
+                action = _normalise_bdd_action(criterion)
+                for atomic in _split_compound_actions(action):
+                    steps.append({"step_number": len(steps)+1, "action": atomic,
+                                  "expected_result": _derive_expected_result(atomic), "test_data": ""})
+            results.append({
+                "name": f"TC-{index:03d}: {test_name.replace('_', ' ').title()}",
+                "description": user_story, "risk_level": risk_level or "regression",
+                "preconditions": "\n".join(group["preconditions"]), "steps": steps,
+                "expected_result": steps[-1]["expected_result"] if steps else "[NEEDS MANUAL REVIEW] No executable scenario supplied",
+                "postconditions": "", "tags": ["manual", "generated"],
+            })
+        return results
 
     # ------------------------------------------------------------------
     # Automation tests — derived from manual tests (1 script per manual test)
@@ -1602,18 +2053,57 @@ class TestGeneratorAgent(BaseAgent):
         # Fetch the page snapshot once for all tests.
         # Phase D: best-effort grounding — never block generation on MCP failure.
         page_snapshot = ""
+        mcp_success = False
         if self.mcp_client and application_url:
+            logger.info("=== DOM SNAPSHOT CAPTURE ===")
             logger.info("Inspecting page via MCP: %s", application_url)
             try:
                 import concurrent.futures as _cf
+                import time
                 _mcp_pool = _cf.ThreadPoolExecutor(max_workers=1)
-                _mcp_fut = _mcp_pool.submit(self.mcp_client.inspect_page, application_url)
+                
+                # Generate execution ID for DOM reuse tracking
+                execution_id = f"testgen_{int(time.time())}"
+                project_name = "test_generation"
+                # Sanitize page name to avoid file system issues  
+                page_name = re.sub(r'[^\w\-]', '_', user_story[:50]).lower() if user_story else "default"
+                
+                _mcp_fut = _mcp_pool.submit(
+                    self.mcp_client.inspect_page, 
+                    application_url,
+                    project_name,
+                    page_name,
+                    execution_id
+                )
                 try:
-                    page_snapshot = _mcp_fut.result(timeout=60) or ""
-                    logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                    page_snapshot = _mcp_fut.result(timeout=max(1, float(getattr(getattr(self.mcp_client, "settings", None), "timeout", 60)))) or ""  # Increased timeout to 300s for slow applications
+                    if page_snapshot:
+                        mcp_success = True
+                        logger.info("MCP snapshot received (%d chars)", len(page_snapshot))
+                        
+                        # Extract and log key DOM statistics
+                        element_count = page_snapshot.count("element") or page_snapshot.count("role")
+                        logger.info("Estimated DOM elements: %d", element_count)
+                        
+                        # Validate DOM contains expected login elements
+                        expected_login_elements = ["button", "input", "textbox", "form"]
+                        found_login_elements = [elem for elem in expected_login_elements if elem.lower() in page_snapshot.lower()]
+                        if found_login_elements:
+                            logger.info(f"✓ DOM contains expected login elements: {found_login_elements}")
+                        else:
+                            logger.warning(f"⚠ DOM snapshot missing expected login elements")
+                            
+                        # Check for specific attribute patterns
+                        if any(attr in page_snapshot.lower() for attr in ["name=", "data-testid=", "placeholder=", "id="]):
+                            logger.info("✓ DOM contains searchable attributes")
+                        else:
+                            logger.warning("⚠ DOM snapshot may lack searchable attributes")
+                    else:
+                        logger.warning("MCP snapshot returned empty")
+                    
                 except _cf.TimeoutError:
                     logger.warning(
-                        "MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
+                        "MCP inspect_page exceeded the configured timeout for %s — proceeding without snapshot",
                         application_url,
                     )
                     page_snapshot = ""
@@ -1627,6 +2117,12 @@ class TestGeneratorAgent(BaseAgent):
                     application_url, _mcp_exc,
                 )
                 page_snapshot = ""
+        
+        # Log MCP success status for debugging
+        if mcp_success:
+            logger.info("✓ MCP DOM capture successful - locators will be grounded in real DOM")
+        else:
+            logger.warning("⚠ MCP DOM capture failed - locators will use heuristic patterns")
 
         results = []
         for manual_test in manual_tests:
@@ -1654,7 +2150,7 @@ class TestGeneratorAgent(BaseAgent):
                     "recommendations": gen["recommendations"],
                     "application_url": application_url,
                     "risk_level": manual_test.get("risk_level", risk_level or "regression"),
-                    "generation_mode": "fallback" if not self.llm_client else "llm",
+                    "generation_mode": gen.get("generation_mode", "fallback" if not self.llm_client else "llm"),
                     "warnings": self._collect_script_warnings(script_code),
                     "tags": ["automation", "generated", "manual-derived"],
                 }
@@ -1674,8 +2170,43 @@ class TestGeneratorAgent(BaseAgent):
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
         page_snapshot: str = "",
         manifest: str = "",
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Translate a single manual test into a Playwright script via LLM or fallback."""
+        if locator_bundles is not None and '_validated_locator_bundles' not in manual_test:
+            manual_test['_environment_values'] = getattr(self, 'environment_values', None)
+            sufficient, missing = _are_locator_bundles_sufficient(manual_test, locator_bundles)
+            if sufficient:
+                success, script, missing = _build_script_from_stored_locators(manual_test, locator_bundles, application_url)
+                if success:
+                    return {'script_code': _normalise_generated_script(script),
+                        'generation_mode': 'stored_locators_direct_skip_llm' if self.llm_client else 'stored_locators_direct_no_llm',
+                        'locators': locator_bundles, 'recommendations': []}
+            if locator_bundles and not self.llm_client:
+                return {'script_code':'', 'generation_mode':'unresolved_insufficient_bundles',
+                    'locators':locator_bundles, 'recommendations':['Missing accepted business evidence: '+', '.join(missing)+' - manual review required']}
+
+        if "_validated_locator_bundles" in manual_test:
+            from services.agents.evidence_fallback import compile_fallback
+            compiled = compile_fallback(manual_test, application_url,
+                manual_test.get("_validated_locator_bundles") or [], manual_test.get("_dom_snapshot") or "",
+                extract_fill=_extract_fill_target_and_value, extract_click=_extract_click_target,
+                split_actions=_split_compound_actions, extract_select=_extract_select_option, missing_fill_data=_missing_fill_data, environment_values=getattr(self, "environment_values", None), test_name=self._derive_short_name(manual_test.get("name", "test"), use_llm=False))
+            manual_test["_compiled_fallback"] = compiled
+            if not compiled["unresolved_steps"]:
+                # An unbound overall summary remains an explicit review block.
+                # Do not replace otherwise complete evidence-backed steps with
+                # speculative LLM selectors merely to interpret that summary.
+                return {"script_code": _normalise_generated_script(compiled["script_code"]),
+                        "generation_mode": "fallback" if compiled["overall_outcome_unresolved"] else "deterministic",
+                        "locators": [], "recommendations": []}
+        compiled = manual_test.get('_compiled_fallback')
+        if compiled and any(any(reason.startswith(('missing_', 'unbound_', 'contradictory_'))
+                                for reason in record.get('reasons',[]))
+                            for record in compiled.get('step_contracts',[])):
+            return {'script_code':_normalise_generated_script(compiled['script_code']),
+                    'generation_mode':'unresolved_evidence', 'locators':[],
+                    'recommendations':['Capture the named unresolved page/state targets or supply observable assertion evidence before retrying.']}
         if not self.llm_client:
             script = self._build_fallback_script_from_manual_test(
                 manual_test=manual_test,
@@ -1683,6 +2214,7 @@ class TestGeneratorAgent(BaseAgent):
             )
             return {
                 "script_code": _normalise_generated_script(script),
+                "generation_mode": "fallback",
                 "locators": [],
                 "recommendations": [],
             }
@@ -1720,8 +2252,17 @@ class TestGeneratorAgent(BaseAgent):
             if page_snapshot:
                 user_parts += [
                     "",
-                    "## Live DOM Snapshot (ground every locator in this snapshot)",
-                    page_snapshot[:3000],
+                    "## Live DOM Snapshot (ground EVERY locator in this snapshot - MANDATORY)",
+                    page_snapshot[:15000],  # Increased to 15000 for better locator context
+                    "",
+                    "## CRITICAL DOM PARSING REQUIREMENTS",
+                    "You MUST extract locators from the DOM snapshot above. Do NOT use heuristic patterns.",
+                    "1. Search the DOM snapshot for EXACT attribute matches for each step",
+                    "2. Extract role and name from accessibility tree lines: element 'button' name='Log in' role='button'",
+                    "3. Copy attribute values VERBATIM - do not modify or guess",
+                    "4. If an attribute doesn't exist in DOM, mark as verified_in_snapshot: false",
+                    "5. Priority: data-testid > id > name > placeholder > aria-label > role",
+                    "6. Create OR-chained locators when multiple valid attributes exist",
                 ]
             else:
                 user_parts += [
@@ -1736,7 +2277,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Domain Knowledge (project-specific — use this to improve locator selection)",
-                    domain_knowledge[:2000],
+                    domain_knowledge[:15000],
                 ]
 
             if supporting_documents:
@@ -1758,12 +2299,137 @@ class TestGeneratorAgent(BaseAgent):
                 ]
 
             user_prompt = "\n".join(user_parts)
+            logger.info("=== LLM AUTOMATION GENERATION ===")
             logger.info(
                 "Generating automation via LLM for manual test: %s", manual_test.get("name", "")
             )
-            raw = self.llm_client.generate(system_prompt, user_prompt)
-            script, locators, recommendations = _parse_structured_v2_output(raw)
+            logger.info("System prompt length: %d chars", len(system_prompt))
+            logger.info("User prompt length: %d chars", len(user_prompt))
+            logger.info("DOM snapshot included: %s (%d chars)", "Yes" if page_snapshot else "No", len(page_snapshot) if page_snapshot else 0)
+            
+            try:
+                _llm_started = time.monotonic()
+                logger.info("LLM automation call started; prompt_chars=%d",
+                            len(system_prompt) + len(user_prompt))
+                raw = self.llm_client.generate(system_prompt, user_prompt)
+                logger.info("LLM response received (%d chars) elapsed_seconds=%.2f",
+                            len(raw), time.monotonic() - _llm_started)
+                
+                script, locators, recommendations = _parse_structured_v2_output(raw)
+            except Exception as llm_exc:
+                # CRITICAL FIX: Fall back to heuristic generation when LLM fails (e.g., credit issues)
+                logger.error(
+                    "LLM generation failed (%s: %s) — falling back to heuristic generation",
+                    type(llm_exc).__name__,
+                    str(llm_exc)
+                )
+                # Use heuristic fallback which now respects explicit locators
+                script = self._build_fallback_script_from_manual_test(
+                    manual_test=manual_test,
+                    application_url=application_url,
+                )
+                locators = []
+                used_fallback = True
+                recommendations = [
+                    f"LLM generation failed ({type(llm_exc).__name__}: {str(llm_exc)}) — "
+                    f"Used heuristic fallback which respects explicit locators from manual test criteria."
+                ]
+            logger.info("Parsed LLM output: script (%d chars), locators (%d items), recommendations (%d items)", 
+                       len(script), len(locators), len(recommendations))
+            
+            # Validate locators if DOM snapshot is available
+            if page_snapshot and locators:
+                logger.info("=== LOCATOR VALIDATION ===")
+                logger.info("Validating %d generated locators against DOM snapshot", len(locators))
+                validator = LocatorValidator(dom_snapshot=page_snapshot)
+                valid_locators, invalid_locators = validator.validate_locators_batch(locators)
+                
+                # Log validation results
+                logger.info("Locator validation complete: %d valid, %d invalid", 
+                           len(valid_locators), len(invalid_locators))
+                
+                # Log detailed validation results
+                for locator in locators:
+                    element_id = locator.get('element_id', 'unknown')
+                    selector = locator.get('selector', 'unknown')
+                    logger.info("Candidate locator: %s -> %s", element_id, selector)
+                
+                # Add validation results to recommendations
+                if invalid_locators:
+                    logger.warning("=== INVALID LOCATORS REJECTED ===")
+                    invalid_summary = "\n".join([
+                        f"- {loc.get('element_id', 'unknown')}: {loc.get('rejection_reason', 'unknown')}"
+                        for loc in invalid_locators
+                    ])
+                    logger.warning("Invalid locators:\n%s", invalid_summary)
+                    recommendations.append(
+                        f"Invalid locators rejected:\n{invalid_summary}\n"
+                        f"These locators did not pass validation and were not included in the final script."
+                    )
+                
+                # Use only valid locators
+                locators = valid_locators
+                if invalid_locators:
+                    rejected = [str(item.get("selector", "")) for item in invalid_locators]
+                    if any(selector and selector in script for selector in rejected):
+                        script = "import pytest\n\ndef test_rejected_locator():\n    pytest.skip('Rejected locator remains in generated code; regenerate with validated evidence')\n"
+                        locators = []
+                
+                # Log locator quality metrics
+                logger.info("=== VALID LOCATOR QUALITY METRICS ===")
+                for locator in locators:
+                    confidence = locator.get('confidence_score', 0.0)
+                    element_id = locator.get('element_id', 'unknown')
+                    selector = locator.get('selector', 'unknown')
+                    alternates = locator.get('alternate_locators', [])
+                    logger.info(
+                        "VALID: %s -> %s (confidence: %.2f, alternates: %d)",
+                        element_id, selector, confidence, len(alternates)
+                    )
+                    if alternates:
+                        for alt in alternates:
+                            logger.info("  Alternate: %s", alt)
+            
             normalised = _normalise_generated_script(script)
+            
+            # Apply post-LLM locator correction for field mapping errors
+            if page_snapshot:
+                logger.info("=== POST-LLM LOCATOR CORRECTION ===")
+                corrector = LocatorCorrector(dom_snapshot=page_snapshot)
+                
+                # Extract step descriptions from manual test for context
+                step_descriptions = [
+                    step.get('action', '') 
+                    for step in manual_test.get('steps', [])
+                ]
+                
+                corrected_script, corrections = corrector.apply_corrections_to_fill_operations(normalised)
+                
+                if corrections:
+                    logger.warning("=== LOCATOR CORRECTIONS APPLIED ===")
+                    for correction in corrections:
+                        logger.warning(
+                            "Corrected locator mapping: %s - %s -> %s",
+                            correction['description'],
+                            correction['original_locator'],
+                            correction['corrected_locator']
+                        )
+                    
+                    # Add correction info to recommendations
+                    correction_summary = "\n".join([
+                        f"- {corr['description']}: {corr['original_locator']} -> {corr['corrected_locator']}"
+                        for corr in corrections
+                    ])
+                    recommendations.append(
+                        f"Field mapping errors corrected:\n{correction_summary}\n"
+                        f"The LLM initially generated locators targeting wrong field types. "
+                        f"These have been automatically corrected."
+                    )
+                    
+                    normalised = corrected_script
+                else:
+                    logger.info("No field mapping errors detected")
+            
             # Validate the normalised script is syntactically correct before
             # sending it to the client.  If not, fall back to the heuristic stub
             # so the client never receives a file that will fail pytest collection.
@@ -1784,15 +2450,63 @@ class TestGeneratorAgent(BaseAgent):
                     )
                 )
                 locators = []
+                used_fallback = True
                 recommendations = [
                     f"LLM generated invalid Python (SyntaxError: {_syn.msg} at line "
                     f"{_syn.lineno}) — review this stub and fill in the Playwright steps "
                     "manually, or re-run `phoenix automate` once the prompt is improved."
                 ]
+            
+            # CRITICAL: Validate that all manual test steps are implemented
+            manual_steps = manual_test.get("steps", [])
+            implemented_steps = self._count_implemented_steps(normalised, manual_steps)
+            
+            if implemented_steps < len(manual_steps):
+                missing_steps = len(manual_steps) - implemented_steps
+                logger.warning(
+                    f"INCOMPLETE AUTOMATION: {missing_steps} manual steps not implemented "
+                    f"({implemented_steps}/{len(manual_steps)} steps implemented)"
+                )
+                recommendations.append(
+                    f"INCOMPLETE AUTOMATION: {missing_steps} manual test steps were not "
+                    f"implemented in the generated script ({implemented_steps}/{len(manual_steps)} "
+                    f"steps). The automation may not cover the complete business flow. "
+                    f"Manual review required."
+                )
+                
+                # CRITICAL FIX: If too many steps are missing, reject the automation
+                if implemented_steps == 0 or (len(manual_steps) > 0 and implemented_steps / len(manual_steps) < 0.3):
+                    logger.error(
+                        f"REJECTING AUTOMATION: Too few steps implemented ({implemented_steps}/{len(manual_steps)})"
+                    )
+                    # Force fallback to ensure at least basic functionality
+                    used_fallback = True
+                    normalised = _normalise_generated_script(
+                        self._build_fallback_script_from_manual_test(
+                            manual_test=manual_test,
+                            application_url=application_url,
+                        )
+                    )
+                    recommendations.append(
+                        "Automation rejected due to insufficient step implementation. "
+                        "Using fallback script with basic functionality."
+                    )
+            else:
+                logger.info(
+                    f"COMPLETE AUTOMATION: All {len(manual_steps)} manual steps implemented"
+                )
+            
             return {
+                "generation_mode": "fallback" if locals().get("used_fallback", False) else "llm",
                 "script_code": normalised,
                 "locators": locators,
                 "recommendations": recommendations,
+                "generation_quality": {
+                    "manual_steps": len(manual_steps),
+                    "implemented_steps": implemented_steps,
+                    "missing_steps": len(manual_steps) - implemented_steps,
+                    "completeness_ratio": implemented_steps / len(manual_steps) if manual_steps else 1.0,
+                }
             }
 
         except Exception as exc:
@@ -1808,6 +2522,7 @@ class TestGeneratorAgent(BaseAgent):
             )
             return {
                 "script_code": _normalise_generated_script(script),
+                "generation_mode": "fallback",
                 "locators": [],
                 "recommendations": [],
             }
@@ -1817,41 +2532,109 @@ class TestGeneratorAgent(BaseAgent):
         manual_test: Dict[str, Any],
         application_url: Optional[str],
     ) -> str:
-        """Build a Playwright script by translating manual steps heuristically."""
+        """Build a Playwright script by translating manual steps heuristically.
+        
+        This is the CORE fallback when LLM is not available. It must generate
+        executable Playwright code based on manual test steps, not placeholders.
+        
+        CRITICAL FIX: Ensure we always generate executable code, never empty stubs.
+        """
+        if "_validated_locator_bundles" in manual_test:
+            from services.agents.evidence_fallback import compile_fallback
+            compiled = compile_fallback(manual_test, application_url,
+                manual_test.get("_validated_locator_bundles") or [], manual_test.get("_dom_snapshot") or "",
+                extract_fill=_extract_fill_target_and_value, extract_click=_extract_click_target,
+                split_actions=_split_compound_actions, extract_select=_extract_select_option, missing_fill_data=_missing_fill_data, environment_values=getattr(self, "environment_values", None), test_name=self._derive_short_name(manual_test.get("name", "test"), use_llm=False))
+            manual_test["_compiled_fallback"] = compiled
+            return compiled["script_code"]
         logger.warning(
             "Using heuristic fallback for manual test '%s'. "
-            "Set ANTHROPIC_API_KEY for LLM-powered generation.",
+            "Review generation diagnostics for the reason the LLM path was unavailable.",
             manual_test.get("name", ""),
         )
-        steps: List[Dict[str, Any]] = manual_test.get("steps", [])
-        url = application_url or "https://example.com"
+        steps = []
+        for source in manual_test.get("steps", []):
+            for action in bound_actions(source.get("action", ""), source.get("test_data", "")):
+                item = dict(source, action=action)
+                if action != _normalise_bdd_action(source.get("action", "")):
+                    item["test_data"] = ""
+                    item["expected_result"] = _derive_expected_result(action)
+                steps.append(item)
+        url = application_url
+        if not url:
+            raise ValueError("Manual test requires application URL via --url parameter for heuristic fallback")
 
         body_lines: List[str] = []
 
+        # Do not navigate twice when the first manual action already navigates.
+        starts_with_navigation = bool(steps and re.match(
+            r"(?:navigate|visit|go)\b", steps[0].get("action", ""), re.I))
+        if not starts_with_navigation:
+            body_lines.append(f"    page.goto({url!r}, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT_MS)")  # Increased timeout to 300s
+            body_lines.append('    page.wait_for_load_state("domcontentloaded")')
+            body_lines.append('    expect(page.locator("body")).to_be_visible()')
+            body_lines.append("")  # Empty line for readability
+
         if steps:
             for step in steps:
-                action = step.get("action", "")
+                action = _normalise_bdd_action(step.get("action", ""))
                 step_num = step.get("step_number", 1)
                 expected = step.get("expected_result", "")
+                test_data = step.get("test_data", "")
+                action = explicit_step_data(action, test_data)
+
                 body_lines.append(f"    # --- Step {step_num}: {action} ---")
-                playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
-                playwright_lines = [ln for ln in playwright_lines if not ln.startswith(f"    # Step {step_num}:")]
-                body_lines.extend(playwright_lines)
-                if expected:
+                
+                field, value = _extract_fill_target_and_value(action)
+                is_assertion = bool(re.match(r"(?:verify|assert|ensure|confirm|validate)\b", action, re.I))
+                if is_assertion:
+                    playwright_lines = assertion_lines(expected or action, action=action)
+                else:
+                    playwright_lines = _criterion_to_playwright_lines(action, step_num, url)
+                meaningful = [ln for ln in playwright_lines if ln.strip() and not ln.strip().startswith("#")]
+                needs_review = any("[NEEDS MANUAL REVIEW]" in ln for ln in playwright_lines)
+                if not meaningful or needs_review:
+                    body_lines.append("    # [NEEDS MANUAL REVIEW] Unsupported action or missing evidence")
+                    body_lines.append(f"    pytest.skip({('Untranslated manual step ' + str(step_num) + ': supply explicit action/expected evidence')!r})")
+                else:
+                    body_lines.extend(playwright_lines)
+                if expected and not is_assertion:
+                    locator = None
+                    expr = None
+                    if re.match(r"(?:enter|type|fill|input|provide)\b", action, re.I):
+                        locator, expr = fill_operation_evidence(playwright_lines)
+                    translated = assertion_lines(expected, action=action, locator=locator, value=expr)
                     body_lines.append(f"    # Expected: {expected}")
+                    body_lines.extend(translated)
+                    if not translated:
+                        body_lines.append("    # [NEEDS MANUAL REVIEW] Expected result lacks executable evidence")
+                        body_lines.append(f"    pytest.skip({('Untranslated expected result for step ' + str(step_num))!r})")
+                if test_data:
+                    body_lines.append(f"    # Test data: {test_data}")
+                body_lines.append("")  # Empty line for readability
         else:
-            body_lines += [
-                "    # No manual steps provided — navigate to URL only",
-                f'    page.goto("{url}", timeout=60_000)',
-                '    page.wait_for_load_state("domcontentloaded")',
-            ]
+            # CRITICAL FIX: Even without steps, generate basic functional code
+            logger.warning("No manual steps provided, generating basic navigation test")
+            body_lines.append("    # No manual steps provided - basic navigation test")
+            body_lines.append("    pytest.skip('No manual steps supplied')")
+            body_lines.append("    # TODO: Add specific test steps based on user story")
+
+        overall_expected = manual_test.get("expected_result", "")
+        if overall_expected:
+            overall_lines = assertion_lines(overall_expected)
+            if overall_lines:
+                body_lines.extend(overall_lines)
+            else:
+                body_lines.append("    # [NEEDS MANUAL REVIEW] Overall expected result requires explicit evidence")
+                body_lines.append("    pytest.skip('Overall expected result was not translated')")
 
         body = "\n".join(body_lines)
-        test_func_name = self._derive_short_name(manual_test.get("name", "test"))
+        test_func_name = self._derive_short_name(manual_test.get("name", "test"), use_llm=False)
         description = manual_test.get("description", manual_test.get("name", ""))
 
-        return (
+        script = (
             f'"""{description.replace(chr(34), chr(39))} — automated by Phoenix."""\n'
+            "import os\n"
             "import re\n"
             "import pytest\n"
             "from playwright.sync_api import Page, expect\n"
@@ -1861,6 +2644,7 @@ class TestGeneratorAgent(BaseAgent):
             f'    """{description.replace(chr(34), chr(39))}"""\n'
             f"{body}\n"
         )
+        return script
 
     def _generate_single_automation_fallback(
         self,
@@ -1870,10 +2654,12 @@ class TestGeneratorAgent(BaseAgent):
         risk_level: Optional[str],
     ) -> List[Dict[str, Any]]:
         """Legacy single-script fallback used only when no manual tests exist."""
-        url = application_url or "https://example.com"
+        url = application_url
+        if not url:
+            raise ValueError("Single automation fallback requires application URL via --url parameter")
         body_lines: List[str] = [
             "    # Navigate to target URL",
-            f'    page.goto("{url}", timeout=60_000)',
+            f"    page.goto({url!r}, wait_until='domcontentloaded', timeout=NAVIGATION_TIMEOUT_MS)",  # Increased timeout to 300s
             '    page.wait_for_load_state("domcontentloaded")',
             "",
         ]
@@ -1885,6 +2671,7 @@ class TestGeneratorAgent(BaseAgent):
 
         script_code = (
             "# WARNING: No manual tests — heuristic fallback from acceptance criteria.\n"
+            "import os\n"
             "import re\n"
             "import pytest\n"
             "from playwright.sync_api import Page, expect\n"
@@ -1922,6 +2709,10 @@ class TestGeneratorAgent(BaseAgent):
         )
         return results[0]["script_code"] if results else ""
 
+    def _count_implemented_steps(self, script: str, manual_steps: List[Dict[str, Any]]) -> int:
+        """Count executable translation evidence, never comments or helper text."""
+        return step_coverage(script, manual_steps)["implemented_steps"]
+
     @staticmethod
     def _format_manual_steps_for_prompt(manual_test: Dict[str, Any]) -> str:
         """Format manual test steps as numbered list for the LLM prompt."""
@@ -1951,9 +2742,11 @@ class TestGeneratorAgent(BaseAgent):
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
         manifest: str = "",
-        use_pom: bool = False,
+        use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
+        dom_snapshot: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Generate one automation script for each supplied manual test.
 
@@ -1974,20 +2767,75 @@ class TestGeneratorAgent(BaseAgent):
         if not manual_tests:
             return {"automation_tests": []}
 
+        if locator_bundles:
+            domain_knowledge = "\n\n".join(
+                part for part in (
+                    domain_knowledge,
+                    "## Validated Phoenix LocatorBundle evidence\n"
+                    "Treat selector values as immutable; validated evidence is enforced "
+                    "before output is written.\n"
+                    + json.dumps(locator_bundles, ensure_ascii=False, separators=(",", ":")),
+                ) if part
+            )
+
+        domain_knowledge = "\n\n".join((
+            "Generic translation requirements: use only the supplied application URL, "
+            "test data, preconditions, expected results, and page/locator evidence. "
+            "Never invent credential variable names, selectors, routes, messages, or "
+            "authentication indicators. Preserve invalid and empty input values. "
+            "Mark missing evidence or unsupported steps for manual review.",
+            domain_knowledge,
+        ))
         knowledge_context = self.get_knowledge_context(query="playwright automation")
 
         # Phase D — best-effort grounding: never block on MCP failure
-        page_snapshot = ""
-        if self.mcp_client and application_url:
+        page_snapshot = dom_snapshot or ""
+        if dom_snapshot is None and self.mcp_client and application_url:
             try:
                 import concurrent.futures as _cf
+                import time
                 _mcp_pool = _cf.ThreadPoolExecutor(max_workers=1)
-                _mcp_fut = _mcp_pool.submit(self.mcp_client.inspect_page, application_url)
+                
+                # Generate execution ID for DOM reuse tracking
+                execution_id = f"automate_{int(time.time())}"
+                project_name = "automation"
+                page_name = "manual_automation"
+                
+                logger.info(f"[PHOENIX AUTOMATE] === MCP DOM INSPECTION STARTED ===")
+                logger.info(f"[PHOENIX AUTOMATE] URL: {application_url}")
+                logger.info(f"[PHOENIX AUTOMATE] Project: {project_name}")
+                logger.info(f"[PHOENIX AUTOMATE] Page: {page_name}")
+                logger.info(f"[PHOENIX AUTOMATE] Execution ID: {execution_id}")
+                
+                _mcp_fut = _mcp_pool.submit(
+                    self.mcp_client.inspect_page,
+                    application_url,
+                    project_name,
+                    page_name,
+                    execution_id
+                )
                 try:
-                    page_snapshot = _mcp_fut.result(timeout=60) or ""
+                    page_snapshot = _mcp_fut.result(timeout=max(1, float(getattr(getattr(self.mcp_client, "settings", None), "timeout", 60)))) or ""  # Increased timeout to 300s for slow applications
+                    if page_snapshot:
+                        logger.info(f"[PHOENIX AUTOMATE] ✓ MCP DOM capture SUCCESS - {len(page_snapshot)} chars")
+                        # Verify DOM snapshot contains expected elements
+                        expected_elements = ["button", "input", "textbox", "form"]
+                        found_elements = [elem for elem in expected_elements if elem.lower() in page_snapshot.lower()]
+                        if found_elements:
+                            logger.info(f"[PHOENIX AUTOMATE] ✓ DOM contains expected elements: {found_elements}")
+                        else:
+                            logger.warning(f"[PHOENIX AUTOMATE] ⚠ DOM snapshot missing expected elements")
+                        
+                        # Check for specific attribute patterns
+                        if any(attr in page_snapshot.lower() for attr in ["name=", "data-testid=", "placeholder=", "id="]):
+                            logger.info("[PHOENIX AUTOMATE] ✓ DOM contains searchable attributes")
+                        else:
+                            logger.warning("[PHOENIX AUTOMATE] ⚠ DOM snapshot may lack searchable attributes")
+                    else:
+                        logger.warning(f"[PHOENIX AUTOMATE] ⚠ MCP DOM capture returned empty")
                 except _cf.TimeoutError:
                     logger.warning(
-                        "MCP inspect_page timed out after 60s for %s — proceeding without snapshot",
+                        "[PHOENIX AUTOMATE] MCP inspect_page exceeded the configured timeout for %s — proceeding without snapshot",
                         application_url,
                     )
                     page_snapshot = ""
@@ -1995,16 +2843,25 @@ class TestGeneratorAgent(BaseAgent):
                     _mcp_pool.shutdown(wait=False)  # don't block; hung thread runs in background
             except Exception as _mcp_exc:
                 logger.error(
-                    "MCP inspect_page failed for %s — generation will proceed without a DOM "
+                    "[PHOENIX AUTOMATE] MCP inspect_page failed for %s — generation will proceed without a DOM "
                     "snapshot. Page object methods will contain [NEEDS MANUAL REVIEW] markers "
                     "and must be completed before tests can run. Error: %s",
                     application_url, _mcp_exc,
                 )
                 page_snapshot = ""
+        else:
+            if not self.mcp_client:
+                logger.warning("[PHOENIX AUTOMATE] MCP client not available - proceeding without DOM inspection")
+            if not application_url:
+                logger.warning("[PHOENIX AUTOMATE] No application URL provided - skipping DOM inspection")
 
         results = []
-        for manual_test in manual_tests:
-            test_name = self._derive_short_name(manual_test.get("name", "test"))
+        for original_manual_test in manual_tests:
+            manual_test = dict(original_manual_test)
+            if locator_bundles is not None:
+                manual_test["_validated_locator_bundles"] = locator_bundles
+                manual_test["_dom_snapshot"] = page_snapshot
+            test_name = self._derive_short_name(manual_test.get("name", "test"), use_llm=False)
             source_file = manual_test.get("source_file", "")
             # Derive a clean module name from source file:
             # 1. Take the file stem and slugify it
@@ -2045,7 +2902,7 @@ class TestGeneratorAgent(BaseAgent):
                         "recommendations": gen.get("recommendations", []),
                         "application_url": application_url,
                         "risk_level": manual_test.get("risk_level", "regression"),
-                        "generation_mode": "fallback" if not self.llm_client else "llm",
+                        "generation_mode": gen.get("generation_mode", "fallback" if not self.llm_client else "llm"),
                         "warnings": [],
                         "tags": ["automation", "generated", "manual-derived", "bdd"],
                         "bdd_bundle": gen.get("bdd_bundle", {}),
@@ -2064,12 +2921,17 @@ class TestGeneratorAgent(BaseAgent):
                     manifest=manifest,
                 )
                 script_code = gen["script_code"]
+                
+                # CRITICAL FIX: Post-process script to respect explicit locators from manual test criteria
+                script_code = _apply_explicit_locator_fixes(script_code, manual_test)
+                
                 pom_bundle = _synthesize_pom_bundle(
                     script_code,
                     module_name,
                     test_name,
                     preconditions=manual_test.get("preconditions", ""),
                     human_name=manual_test.get("name", ""),
+                    description=manual_test.get("description", ""),
                 )
                 results.append(
                     {
@@ -2084,7 +2946,7 @@ class TestGeneratorAgent(BaseAgent):
                         "recommendations": gen["recommendations"],
                         "application_url": application_url,
                         "risk_level": manual_test.get("risk_level", "regression"),
-                        "generation_mode": "fallback" if not self.llm_client else "llm",
+                        "generation_mode": gen.get("generation_mode", "fallback" if not self.llm_client else "llm"),
                         "warnings": self._collect_script_warnings(script_code),
                         "tags": ["automation", "generated", "manual-derived", "pom"],
                         "pom_bundle": pom_bundle,
@@ -2117,14 +2979,103 @@ class TestGeneratorAgent(BaseAgent):
                         "recommendations": gen["recommendations"],
                         "application_url": application_url,
                         "risk_level": manual_test.get("risk_level", "regression"),
-                        "generation_mode": "fallback" if not self.llm_client else "llm",
+                        "generation_mode": gen.get("generation_mode", "fallback" if not self.llm_client else "llm"),
                         "warnings": self._collect_script_warnings(script_code),
                         "tags": ["automation", "generated", "manual-derived"],
                     }
                 )
                 logger.info("Automated manual test: %s", manual_test.get("name", ""))
 
-        return {"automation_tests": results}
+            compiled = manual_test.get("_compiled_fallback")
+            if compiled and not use_bdd:
+                from phoenix_shared.generation_contract import operation_signature
+                # Carry contracts only for the compiler's selected artifact. An
+                # independently generated LLM script cannot borrow its approval.
+                fallback_normalized = _normalise_generated_script(compiled["script_code"])
+                if operation_signature(results[-1]["script_code"]) == operation_signature(fallback_normalized):
+                    results[-1]["assertion_contracts"] = compiled["assertion_contracts"]
+                    results[-1]["step_contracts"] = compiled["step_contracts"]
+                    results[-1]["overall_outcome_unresolved"] = compiled["overall_outcome_unresolved"]
+                    results[-1]["overall_bindings"] = compiled.get("overall_bindings", [])
+                    results[-1]["unbound_overall_outcomes"] = compiled.get("unbound_overall_outcomes", [])
+                    results[-1]["proposed_locator_targets"] = compiled.get("proposed_locator_targets", [])
+                    results[-1]["translation_targets"] = compiled.get("translation_targets", [])
+                    results[-1]["state_requirements"] = compiled.get("state_requirements", [])
+                    if results[-1]["state_requirements"]:
+                        results[-1]["warnings"].append(
+                            f"Current-page locator capture required for {len(results[-1]['state_requirements'])} target operation(s); runtime state resolution is pending")
+                    results[-1]["generation_plan"] = {"version": 1,
+                        "operations": operation_signature(results[-1]["script_code"])}
+
+        for result, source in zip(results, manual_tests):
+            result["script_code"] = resolve_script_environment_values(result.get("script_code", ""))
+
+            steps = source.get("steps", [])
+            coverage = step_coverage(result["script_code"], steps)
+            
+            artifact_issues = final_artifact_issues(result)
+            if (result.get("generation_plan") and not artifact_issues
+                    and result.get("step_contracts")
+                    and (not coverage.get("first_blocking_line") or (
+                        result.get("overall_outcome_unresolved")
+                        and 'pytest.skip("Overall expected outcome lacks explicit executable evidence")'
+                        in result["script_code"].splitlines()[coverage["first_blocking_line"] - 1]))
+                    and len(result["step_contracts"]) == len(steps)
+                    and all(s.get("status") == "translated" for s in result["step_contracts"])):
+                # Typed action/outcome mappings plus ordered artifact fidelity
+                # provide stronger coverage evidence than English token overlap.
+                coverage.update(implemented_steps=len(steps), unresolved_steps=[])
+            if result.get('step_contracts') and result.get('generation_plan') and not artifact_issues:
+                records=result['step_contracts']
+                partial=[r['step'] for r in records if r.get('status')!='translated']
+                first_partial=min(partial) if partial else None
+                compiled_count=sum(r.get('status')=='translated' for r in records)
+                reachable=[r['step'] for r in records if r.get('status')=='translated' and (first_partial is None or r['step']<first_partial)]
+                coverage.update(compiled_steps=compiled_count, compilation_unresolved_steps=partial,
+                    implemented_steps=len(reachable), unresolved_steps=[r['step'] for r in records if r['step'] not in reachable],
+                    unreachable_steps=[r['step'] for r in records if r.get('status')=='translated' and first_partial is not None and r['step']>first_partial])
+            # Use the same authoritative coverage for warnings and acceptance.
+            # Recomputing token-based coverage here can falsely reject a fully
+            # mapped action/assertion plan (notably scoped absence assertions).
+            truncation_warnings = _detect_truncated_generation(
+                result["script_code"], steps, coverage=coverage)
+            if truncation_warnings:
+                result.setdefault("warnings", []).extend(truncation_warnings)
+            if artifact_issues:
+                result.setdefault("warnings", []).extend(artifact_issues)
+            requires_review = bool(
+                artifact_issues or
+                coverage["unresolved_steps"] 
+                or not steps 
+                or "pytest.skip(" in result["script_code"]
+                or truncation_warnings  # Truncation also requires review
+            )
+            result["generation_quality"] = {
+                "manual_steps": len(steps), **coverage,
+                "requires_manual_review": requires_review,
+                "missing_steps": len(coverage["unresolved_steps"]),
+                "completeness_ratio": coverage["implemented_steps"] / len(steps) if steps else 0.0,
+                "status": "partial" if requires_review else "translated",
+            }
+            if requires_review:
+                result.setdefault("warnings", []).append("Manual review required: incomplete automation translation")
+            if result.get("overall_outcome_unresolved"):
+                result.setdefault("warnings", []).append(
+                    "Overall expected result needs explicit executable assertions; translated steps do not prove the unbound summary")
+            if coverage["unresolved_steps"]:
+                result.setdefault("recommendations", []).append(
+                    "Untranslated or unverified manual steps: " + ", ".join(map(str, coverage["unresolved_steps"]))
+                )
+            for bundle_key in ("pom_bundle", "bdd_bundle"):
+                bundle = result.get(bundle_key) or {}
+                for section in ("page_objects", "steps"):
+                    for node in bundle.get(section, []):
+                        if node.get("code"):
+                            node["code"] = resolve_script_environment_values(node["code"])
+        return {"automation_tests": results, "metadata": {
+            "translation_status": "partial" if any(r["generation_quality"]["status"] == "partial" for r in results) else "translated",
+            "browser_validated": False,
+        }}
 
     # ------------------------------------------------------------------
     # Phase C — BDD generation
@@ -2187,7 +3138,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Live DOM Snapshot (ground every locator in this snapshot)",
-                    page_snapshot[:3000],
+                    page_snapshot[:10000],  # Increased from 3000 to 10000 for better locator context
                 ]
             else:
                 user_parts += [
@@ -2201,7 +3152,7 @@ class TestGeneratorAgent(BaseAgent):
                 user_parts += [
                     "",
                     "## Domain Knowledge",
-                    domain_knowledge[:2000],
+                    domain_knowledge[:15000],
                 ]
 
             user_prompt = "\n".join(user_parts)
@@ -2227,9 +3178,9 @@ class TestGeneratorAgent(BaseAgent):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _derive_short_name(self, user_story: str) -> str:
-        """Derive a short snake_case name - LLM first, heuristic fallback."""
-        if self.llm_client:
+    def _derive_short_name(self, user_story: str, *, use_llm: bool = True) -> str:
+        """Derive a snake_case name; manual translation uses deterministic naming."""
+        if use_llm and self.llm_client:
             try:
                 system_prompt = _prompt_loader.get("test_name")
                 raw = self.llm_client.generate(system_prompt, user_story).strip()

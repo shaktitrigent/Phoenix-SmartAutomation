@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urljoin
 
 import requests
 
 from phoenix.sdk.config import PhoenixConfig
+from phoenix_shared.contracts.project_context import ProjectContext
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +43,16 @@ class IntelligenceClient:
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = self._build_url(path)
         last_error: Optional[Exception] = None
+        request_id = uuid.uuid4().hex[:12]
+        started = time.monotonic()
+        logger.info("Intelligence request started id=%s path=%s", request_id, path)
 
         for attempt in range(self.retry_count):
             try:
-                response = requests.post(url, json=payload, timeout=self.timeout)
+                response = requests.post(
+                    url, json=payload, timeout=self.timeout,
+                    headers={"X-Correlation-ID": request_id},
+                )
 
                 if response.status_code in _RETRYABLE_STATUS:
                     logger.warning(
@@ -68,6 +76,10 @@ class IntelligenceClient:
                         len(metadata["warnings"]),
                         "; ".join(metadata["warnings"][:3]),
                     )
+                logger.info(
+                    "Intelligence request completed id=%s path=%s status=%d elapsed_seconds=%.2f",
+                    request_id, path, response.status_code, time.monotonic() - started,
+                )
                 return data
 
             except requests.ConnectionError as exc:
@@ -81,14 +93,18 @@ class IntelligenceClient:
                 time.sleep(_BASE_BACKOFF * (2**attempt))
 
             except requests.Timeout as exc:
-                logger.warning(
-                    "Timeout on attempt %d/%d: %s",
-                    attempt + 1,
-                    self.retry_count,
-                    exc,
+                # A timed-out POST may still be running on the server. Retrying
+                # automation generation can duplicate expensive LLM work and
+                # write competing artifacts, so surface the ambiguous outcome.
+                elapsed = time.monotonic() - started
+                logger.error(
+                    "Intelligence request timed out id=%s path=%s elapsed_seconds=%.2f; not retrying",
+                    request_id, path, elapsed,
                 )
-                last_error = exc
-                time.sleep(_BASE_BACKOFF * (2**attempt))
+                raise RuntimeError(
+                    f"Phoenix Intelligence request {request_id} timed out after "
+                    f"{elapsed:.1f}s; server completion is unknown. Check server logs before retrying."
+                ) from exc
 
             except requests.HTTPError as exc:
                 # Non-retryable 4xx — re-raise immediately
@@ -111,6 +127,11 @@ class IntelligenceClient:
         risk_level: Optional[str],
         domain_knowledge: str = "",
         supporting_documents: Optional[List[Dict[str, Any]]] = None,
+        use_pom: bool = True,  # Added for POM generation
+        mcp_enabled: bool = True,
+        mcp_command: str = "npx",
+        mcp_args: str = "@playwright/mcp@latest",
+        mcp_timeout: int = 60,
     ) -> Dict[str, Any]:
         payload = {
             "user_story": user_story,
@@ -119,23 +140,37 @@ class IntelligenceClient:
             "options": {
                 "test_type": test_type,
                 "risk_level": risk_level,
+                "use_pom": use_pom,  # Added to options
             },
             "domain_knowledge": domain_knowledge or None,
             "supporting_documents": supporting_documents or [],
+            "mcp_config": {
+                "enabled": mcp_enabled,
+                "command": mcp_command,
+                "args": mcp_args,
+                "timeout": mcp_timeout,
+            }
         }
         return self._post("/api/v1/tests/generate", payload)
 
     def discover_locators(
         self,
         page_url: str,
-        elements: List[str],
+        elements: Optional[List[str]] = None,
         dom_snapshot: Optional[str] = None,
+        element_contexts: Optional[List[Dict[str, Any]]] = None,
+        require_llm: bool = False,
+        project_context: Optional[Union[ProjectContext, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         payload = {
             "page_url": page_url,
-            "elements": elements,
+            "elements": elements or [],
             "dom_snapshot": dom_snapshot,
+            "element_contexts": element_contexts or [],
+            "require_llm": require_llm,
         }
+        if project_context is not None:
+            payload["project_context"] = ProjectContext.model_validate(project_context).model_dump()
         return self._post("/api/v1/locators/discover", payload)
 
     def analyze_failure(
@@ -155,9 +190,16 @@ class IntelligenceClient:
         application_url: Optional[str] = None,
         domain_knowledge: str = "",
         manifest: str = "",
-        use_pom: bool = False,
+        use_pom: bool = True,  # Changed default to True for production-ready POM generation
         use_bdd: bool = False,
         keywords: str = "",
+        mcp_enabled: bool = True,
+        mcp_command: str = "npx",
+        mcp_args: str = "@playwright/mcp@latest",
+        mcp_timeout: int = 60,
+        project_context: Optional[Union[ProjectContext, Dict[str, Any]]] = None,
+        locator_bundles: Optional[List[Dict[str, Any]]] = None,
+        dom_snapshot: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {
             "manual_tests": manual_tests,
@@ -167,7 +209,19 @@ class IntelligenceClient:
             "use_pom": use_pom,
             "use_bdd": use_bdd,
             "keywords": keywords or None,
+            "mcp_config": {
+                "enabled": mcp_enabled,
+                "command": mcp_command,
+                "args": mcp_args,
+                "timeout": mcp_timeout,
+            }
         }
+        if project_context is not None:
+            payload["project_context"] = ProjectContext.model_validate(project_context).model_dump()
+        if locator_bundles is not None:
+            payload["locator_bundles"] = locator_bundles
+        if dom_snapshot is not None:
+            payload["dom_snapshot"] = dom_snapshot
         return self._post("/api/v1/tests/automate", payload)
 
     def fix_script(

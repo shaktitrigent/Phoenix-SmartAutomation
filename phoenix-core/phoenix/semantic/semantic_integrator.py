@@ -612,7 +612,10 @@ class SemanticIntegrator:
                 ComponentType.RADIO_BUTTON,
             ]:
                 validation_rules = self.validation_detector.detect_validation_rules(component)
-                component.validation_rules = [rule.dict() for rule in validation_rules]
+                component.validation_rules = [
+                    (rule.model_dump() if hasattr(rule, 'model_dump') else rule.dict())
+                    for rule in validation_rules
+                ]
                 component.validation_characteristics = self.validation_detector.detect_validation_characteristics(
                     component, validation_rules
                 )
@@ -620,7 +623,10 @@ class SemanticIntegrator:
             # Generate locator candidates
             if self.locator_intelligence:
                 locator_candidates = self.locator_intelligence.generate_locator_candidates(component)
-                component.locator_candidates = [candidate.dict() for candidate in locator_candidates]
+                component.locator_candidates = [
+                    (candidate.model_dump() if hasattr(candidate, 'model_dump') else candidate.dict())
+                    for candidate in locator_candidates
+                ]
                 
                 # Select best locator
                 best_locator = self.locator_intelligence.select_best_locator(locator_candidates)

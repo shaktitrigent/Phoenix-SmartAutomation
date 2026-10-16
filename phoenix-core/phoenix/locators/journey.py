@@ -27,6 +27,17 @@ def prepare_states(definitions, values):
         state["actions"] = []
         for source in definition.get("actions", []):
             action = dict(source)
+            kind = str(action.get("action") or action.get("type") or "").strip().lower()
+            # Normalize actions for SmartLocator runtime compatibility:
+            # If selector is not provided and value looks like a selector, move it to selector field
+            if "selector" not in action and kind in {"fill", "click", "press", "check", "uncheck", "select_option", "wait_for_selector"}:
+                selector = action.get("value")
+                if selector is not None:
+                    action["selector"] = selector
+                    if kind == "fill" and "text" in action and action.get("text") is not None:
+                        action["value"] = action["text"]
+                    elif kind != "fill":
+                        action["value"] = None
             value = action.get("value")
             if isinstance(value, str):
                 match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", value)

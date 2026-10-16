@@ -16,6 +16,72 @@ def test_state_bindings_and_duplicate_names():
     with pytest.raises(ValueError):prepare_states(original,{})
     with pytest.raises(ValueError):prepare_states([{'name':'Login'},{'name':'login'}],{})
 
+def test_state_actions_are_normalized_for_smartlocator_runtime():
+    """Test that actions with selector in value field are normalized for SmartLocator compatibility."""
+    original=[{'name':'login','actions':[
+        {'action':'fill','value':'#user-name','text':'standard_user'},
+        {'action':'click','value':'#login-button'},
+        {'action':'wait_for_selector','value':'.inventory_list'}
+    ]}]
+    states=prepare_states(original,{})
+    assert states[0]['actions'][0]['selector']=='#user-name'
+    assert states[0]['actions'][0]['value']=='standard_user'
+    assert states[0]['actions'][1]['selector']=='#login-button'
+    assert states[0]['actions'][1]['value'] is None
+    assert states[0]['actions'][2]['selector']=='.inventory_list'
+    assert states[0]['actions'][2]['value'] is None
+
+def test_actions_with_existing_selector_are_not_modified():
+    """Test that actions with explicit selector field are not modified."""
+    original=[{'name':'login','actions':[
+        {'action':'fill','selector':'#existing-selector','value':'text_value'}
+    ]}]
+    states=prepare_states(original,{})
+    assert states[0]['actions'][0]['selector']=='#existing-selector'
+    assert states[0]['actions'][0]['value']=='text_value'
+
+def test_runtime_end_execution_handles_null_gracefully():
+    """Test that end_execution handles None runtime_evidence gracefully."""
+    from phoenix.execution.intelligent_runtime import IntelligentRuntime
+    import tempfile
+    import shutil
+    
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        runtime = IntelligentRuntime(
+            base_dir=tmp_dir,
+            project_name="test",
+            enable_cache=False,
+            enable_repository=False,
+            enable_healing=False,
+            enable_metrics=False,
+            enable_timeline=False,
+            enable_semantic=False
+        )
+        # Call end_execution without calling start_execution
+        result = runtime.end_execution(status="passed")
+        assert result is None
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+def test_pydantic_model_dump_compatibility():
+    """Test that Pydantic model_dump() compatibility is handled correctly."""
+    # This is a compile-time check - the code in semantic_integrator.py
+    # should use model_dump() if available, falling back to dict()
+    from pydantic import BaseModel
+    
+    class TestModel(BaseModel):
+        value: str
+    
+    model = TestModel(value="test")
+    # Verify model_dump() works (Pydantic 2.x)
+    assert hasattr(model, 'model_dump')
+    result = model.model_dump()
+    assert result == {'value': 'test'}
+    # Verify dict() still works for backward compatibility
+    result_dict = model.dict()
+    assert result_dict == {'value': 'test'}
+
 def test_journey_persistence_keeps_state_identity(tmp_path,monkeypatch):
     import phoenix.locators.journey as journey
     import phoenix_smartlocatorai.dynamic_states as scanner

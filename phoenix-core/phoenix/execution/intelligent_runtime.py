@@ -689,6 +689,9 @@ class IntelligentRuntime:
     def end_execution(self, status: str = "passed") -> RuntimeEvidence:
         """End execution and generate complete runtime evidence."""
         logger.info(f"[INTELLIGENT RUNTIME] Ending execution with status: {status}")
+        if self.runtime_evidence is None:
+            logger.warning("[INTELLIGENT RUNTIME] end_execution called before start_execution; no evidence to record")
+            return None
         logger.info(f"[INTELLIGENT RUNTIME] Final evidence - dom_reuse_count: {self.runtime_evidence.dom_reuse_count}, dom_generation_count: {self.runtime_evidence.dom_generation_count}")
         logger.info(f"[INTELLIGENT RUNTIME] Final evidence - cache_hits: {self.runtime_evidence.cache_hits}, cache_misses: {self.runtime_evidence.cache_misses}")
         
